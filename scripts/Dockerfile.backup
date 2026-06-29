@@ -1,0 +1,27 @@
+# ===================================================================
+# PostgreSQL 定时备份容器 Dockerfile
+# 用途：在 docker-compose.prod.yml 中作为独立服务，每天 02:00 自动备份
+# ===================================================================
+FROM postgres:16-alpine
+
+# 安装 cron + bash
+RUN apk add --no-cache bash busybox-suid
+
+# 复制备份脚本
+COPY scripts/backup_db.sh /usr/local/bin/backup_db.sh
+RUN chmod +x /usr/local/bin/backup_db.sh
+
+# 创建备份目录
+RUN mkdir -p /backups
+
+# 配置 cron 定时任务
+# 默认每天 02:00 执行备份，可通过 BACKUP_CRON 环境变量覆盖
+ENV BACKUP_CRON="0 2 * * *"
+
+# 用 entrypoint 启动 cron（前台）
+COPY scripts/backup-cron-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+VOLUME ["/backups"]
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

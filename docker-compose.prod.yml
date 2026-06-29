@@ -1,0 +1,161 @@
+version: '3.8'
+
+services:
+  # ====== Nginx 反向代理（TLS 终止 + 静态资源 + 限流）======
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./static:/app/static:ro
+      - nginx_logs:/var/log/nginx
+      - certbot_data:/var/www/certbot:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  web:
+    build: .
+    expose:
+      - "5000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY 必须设置}
+      - DATABASE_URL=postgresql://ops:${DB_PASSWORD:?DB_PASSWORD 必须设置}@db:5432/ops_platform
+      - CACHE_TYPE=redis
+      - CACHE_REDIS_URL=redis://redis:6379/0
+      - RATELIMIT_STORAGE_URL=redis://redis:6379/1
+      - LLM_PROVIDER=${LLM_PROVIDER:-rule}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      # P0: 生产环境不默认 *，必须显式指定允许的源（缺失则启动报错）
+      - CORS_ORIGINS=${CORS_ORIGINS:?CORS_ORIGINS 必须设置，例如 https://ops.example.com}
+      - METRICS_ENABLED=${METRICS_ENABLED:-1}
+      - RBAC_ENABLED=1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    # P0: 生产日志驱动，限制大小避免撑爆磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 必须设置}
+      POSTGRES_DB: ops_platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops -d ops_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ====== 定时备份服务 ======
+  db-backup:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.backup
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=ops
+      - POSTGRES_DB=ops_platform
+      - PGPASSWORD=${DB_PASSWORD:?DB_PASSWORD 必须设置}
+      - BACKUP_DIR=/backups
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
+      # 默认每天 02:00 备份，可通过 .env 覆盖
+      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+      - TZ=Asia/Shanghai
+    volumes:
+      - db_backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  db_backups:
+  nginx_logs:
+  certbot_data:

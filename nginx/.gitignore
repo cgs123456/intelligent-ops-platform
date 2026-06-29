@@ -1,0 +1,4 @@
+# 本目录存放 nginx 反向代理配置：
+# - conf.d/app.conf  : 主配置（TLS 终止 + 静态资源 + 反向代理 + 安全头 + 限流 + gzip）
+# - certs/           : TLS 证书目录（生产用 Let's Encrypt；本地预演执行 gen-self-signed-cert.sh）
+# - gen-self-signed-cert.sh : 生成自签证书的脚本（仅本地预演用）

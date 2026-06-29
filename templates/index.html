@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中型企业智能运营平台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<!-- 登录页 -->
+<div id="loginPage" class="login-page" style="display:none">
+    <div class="login-card">
+        <h2>智能运营平台登录</h2>
+        <input type="text" id="loginUser" placeholder="用户名" autocomplete="username">
+        <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+        <label class="login-hint"><input type="checkbox" id="rememberMe"> 记住用户名</label>
+        <button class="btn" onclick="doLogin()">登录</button>
+        <div id="loginError" class="login-error"></div>
+    </div>
+</div>
+
+<div id="app">
+    <header class="header">
+        <div class="header-title">
+            <span class="logo">IO</span>
+            <h1>中型企业智能运营平台</h1>
+        </div>
+        <div class="header-meta">
+            <span id="runId">轮次 #1</span>
+            <span class="dot"></span>
+            <span>RPA · ERP · FDE · AIGC 四层闭环</span>
+            <button class="btn btn-sm btn-ghost" onclick="reopenGuide()" title="重开引导">?</button>
+            <button class="btn btn-sm btn-ghost" onclick="logout()">退出</button>
+        </div>
+    </header>
+
+    <section class="metrics" id="metrics">
+        <div class="metric-card" onclick="switchTab('erp')" style="cursor:pointer"><div class="metric-label">SKU 总数</div><div class="metric-value" id="m-skus">-</div></div>
+        <div class="metric-card" onclick="switchTab('erp')" style="cursor:pointer"><div class="metric-label">库存价值</div><div class="metric-value" id="m-inv">-</div></div>
+        <div class="metric-card" onclick="switchTab('fde')" style="cursor:pointer"><div class="metric-label">近7日销售额</div><div class="metric-value" id="m-sales">-</div></div>
+        <div class="metric-card alert" id="m-low-card" onclick="switchTab('erp')" style="cursor:pointer"><div class="metric-label">低库存预警</div><div class="metric-value" id="m-low">-</div></div>
+        <div class="metric-card" onclick="switchTab('aigc')" style="cursor:pointer"><div class="metric-label">待审建议</div><div class="metric-value" id="m-pending">-</div></div>
+    </section>
+
+    <nav class="tabs">
+        <button class="tab active" data-tab="dashboard" title="Ctrl+1">概览</button>
+        <button class="tab" data-tab="loop" title="Ctrl+2">闭环控制</button>
+        <button class="tab" data-tab="erp" title="Ctrl+3">ERP 进销存</button>
+        <button class="tab" data-tab="rpa" title="Ctrl+4">RPA 采集</button>
+        <button class="tab" data-tab="fde" title="Ctrl+5">FDE 数仓</button>
+        <button class="tab" data-tab="aigc" title="Ctrl+6">AIGC 助手</button>
+    </nav>
+
+    <main class="content">
+        <!-- 概览 -->
+        <div class="panel active" id="tab-dashboard">
+            <div class="panel-grid">
+                <div class="card">
+                    <h3>经营日报</h3>
+                    <pre id="dailyReport" class="report-box">加载中...</pre>
+                    <button class="btn btn-sm" onclick="genReport()">生成日报</button>
+                </div>
+                <div class="card">
+                    <h3>近期单据</h3>
+                    <div id="recentOrders" class="order-list">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 闭环控制 -->
+        <div class="panel" id="tab-loop">
+            <div class="card">
+                <h3>五步闭环协同</h3>
+                <p class="hint">AIGC 建议 → 人审核 → RPA 下单 → ERP 记账 → FDE 刷新。支持回滚、并发锁、断点续跑。</p>
+                <div id="loopSteps" class="loop-steps"></div>
+                <div class="loop-actions">
+                    <button class="btn" id="runStepBtn" onclick="runCurrentStep()">执行当前步骤</button>
+                    <button class="btn btn-ghost" onclick="resetLoop()">重置闭环</button>
+                    <span id="loopMessage" class="loop-msg"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ERP -->
+        <div class="panel" id="tab-erp">
+            <div class="panel-grid">
+                <div class="card">
+                    <h3>库存清单
+                        <input type="text" class="table-search" placeholder="搜索 SKU/品名..." oninput="tableSearch('invTable', this.value)">
+                        <button class="btn btn-sm" onclick="exportTable('invTable','inventory.csv')">导出</button>
+                    </h3>
+                    <table class="data-table" id="invTable">
+                        <thead><tr><th>SKU</th><th>品名</th><th>库存</th><th>安全线</th><th>状态</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="card">
+                    <h3>财务概览</h3>
+                    <div id="accountSummary" class="account-box">加载中...</div>
+                    <h3 style="margin-top:16px">仓库</h3>
+                    <div id="warehouseList" class="warehouse-list">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RPA -->
+        <div class="panel" id="tab-rpa">
+            <div class="card">
+                <h3>供应商报价采集
+                    <button class="btn btn-sm" onclick="loadQuotes()">刷新报价</button>
+                    <input type="text" class="table-search" placeholder="搜索..." oninput="tableSearch('quoteTable', this.value)">
+                    <button class="btn btn-sm" onclick="exportTable('quoteTable','quotes.csv')">导出</button>
+                </h3>
+                <table class="data-table" id="quoteTable">
+                    <thead><tr><th>供应商</th><th>产品</th><th>报价</th><th>来源</th><th>日期</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <h3>电商订单同步 <button class="btn btn-sm" onclick="syncOrders()">执行同步</button></h3>
+                <div id="syncResult" class="sync-result">点击"执行同步"将未同步的电商订单回写 ERP。</div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <h3>调度状态</h3>
+                <div id="scheduleStatus">加载中...</div>
+            </div>
+        </div>
+
+        <!-- FDE -->
+        <div class="panel" id="tab-fde">
+            <div class="card">
+                <h3>数仓分层监控 <button class="btn btn-sm" onclick="runETL()">运行 ETL</button></h3>
+                <div id="warehouseStats" class="warehouse-stats">加载中...</div>
+            </div>
+            <div class="panel-grid" style="margin-top:16px">
+                <div class="card">
+                    <h3>数据血缘</h3>
+                    <div id="lineageBox" class="lineage-box">加载中...</div>
+                </div>
+                <div class="card">
+                    <h3>数据质量 <button class="btn btn-sm" onclick="loadDQ()">刷新</button></h3>
+                    <div id="dqBox" class="dq-box">加载中...</div>
+                </div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <h3>ADS 应用层 · 补货建议源数据
+                    <input type="text" class="table-search" placeholder="搜索..." oninput="tableSearch('adsTable', this.value)">
+                    <button class="btn btn-sm" onclick="exportTable('adsTable','ads_suggestions.csv')">导出</button>
+                </h3>
+                <table class="data-table" id="adsTable">
+                    <thead><tr><th>产品</th><th>近7日销量</th><th>当前库存</th><th>在途</th><th>建议采购</th><th>建议供应商</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- AIGC -->
+        <div class="panel" id="tab-aigc">
+            <div class="panel-grid">
+                <div class="card">
+                    <h3>补货建议审核 <button class="btn btn-sm" onclick="loadSuggestions()">刷新</button></h3>
+                    <div id="batchBar" class="batch-bar" style="display:none">
+                        <span>已选 <b class="batch-count">0</b> 条</span>
+                        <button class="btn btn-sm btn-approve" onclick="batchReview('approve')">批量批准</button>
+                        <button class="btn btn-sm btn-reject" onclick="batchReview('reject')">批量拒绝</button>
+                    </div>
+                    <div id="suggestionList" class="suggestion-list">加载中...</div>
+                </div>
+                <div class="card">
+                    <h3>智能问答（RAG + Text2SQL · 流式输出）</h3>
+                    <div class="chat-box" id="chatBox">
+                        <div class="chat-msg bot">你好，我是运营助手。可问我销售额、库存、补货建议等。</div>
+                    </div>
+                    <div class="chat-input">
+                        <input type="text" id="chatInput" placeholder="如：近7天销售额多少？（Ctrl+Enter 发送）" onkeydown="if(event.key==='Enter')sendQuery()">
+                        <button class="btn btn-sm" onclick="sendQuery()">发送</button>
+                    </div>
+                    <div class="quick-questions">
+                        <button class="chip" onclick="quickAsk('近7天销售额多少？')">销售额</button>
+                        <button class="chip" onclick="quickAsk('哪些产品库存不足？')">低库存</button>
+                        <button class="chip" onclick="quickAsk('卖得最好的是什么？')">销冠</button>
+                        <button class="chip" onclick="quickAsk('有哪些补货建议？')">补货建议</button>
+                        <button class="chip" onclick="quickAsk('采购了多少？')">采购概况</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<!-- 操作引导浮层 -->
+<div id="guideOverlay" class="guide-overlay" style="display:none">
+    <div class="guide-card">
+        <h3>欢迎使用智能运营平台</h3>
+        <p>三步体验四层闭环协同：</p>
+        <ol>
+            <li>切到「闭环控制」Tab（Ctrl+2），点「执行步骤1」生成补货建议</li>
+            <li>切到「AIGC 助手」Tab（Ctrl+6），审核建议（批准/拒绝/修改数量）</li>
+            <li>回「闭环控制」依次执行步骤3-5，观察闭环自动完成</li>
+        </ol>
+        <p class="hint">键盘快捷键：Ctrl+1~6 切换 Tab · Ctrl+Enter 发送消息 · ESC 关闭弹窗</p>
+        <button class="btn" onclick="closeGuide()">开始体验</button>
+    </div>
+</div>
+<script>
+if (!localStorage.getItem('guide_shown')) {
+    document.getElementById('guideOverlay').style.display = 'flex';
+}
+function closeGuide() {
+    document.getElementById('guideOverlay').style.display = 'none';
+    localStorage.setItem('guide_shown', '1');
+}
+</script>
+</body>
+</html>
