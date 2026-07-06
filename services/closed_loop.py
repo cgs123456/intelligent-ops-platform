@@ -560,3 +560,52 @@ class ClosedLoop:
         if low > 0:
             return {'triggered': True, 'reason': f'检测到{low}个低库存SKU', 'low_count': low}
         return {'triggered': False, 'reason': '无低库存'}
+
+    @staticmethod
+    def check_auto_trigger_with_anomaly(anomalies):
+        """改进9：基于时序异常检测结果触发闭环。
+
+        :param anomalies: list[dict] AnomalyDetector 检测出的 critical 异常列表
+        :return: {triggered, reason, loop_run_id, anomaly_count}
+        - 自动触发闭环 step 1（生成补货建议）
+        - 异常产品优先纳入补货建议
+        - 记录审计日志
+        """
+        from flask import current_app
+        if not current_app.config.get('LOOP_AUTO_TRIGGER'):
+            return {'triggered': False, 'reason': '自动触发未启用（LOOP_AUTO_TRIGGER=False）'}
+
+        if not anomalies:
+            return {'triggered': False, 'reason': '无 critical 异常'}
+
+        # 检查当前闭环状态，若上一轮未完成则不触发（避免冲突）
+        status = ClosedLoop.get_status()
+        if status['current_step'] <= 5 and not all(s['status'] == 'done' for s in status['steps']):
+            return {'triggered': False, 'reason': '当前轮次未完成，跳过自动触发'}
+
+        # 重置闭环，开启新一轮
+        try:
+            ClosedLoop.reset(actor='anomaly_detector')
+            run_result = ClosedLoop.run_step(1, actor='anomaly_detector')
+
+            # 记录审计日志
+            db.session.add(AuditLog(
+                actor='anomaly_detector',
+                action='loop_auto_trigger_by_anomaly',
+                target_type='loop',
+                detail=f'时序异常检测触发闭环补货：{len(anomalies)} 个 critical 异常产品'
+            ))
+            db.session.commit()
+
+            logger.info('[ClosedLoop] 异常检测触发闭环成功，异常数=%d', len(anomalies))
+            return {
+                'triggered': True,
+                'reason': f'检测到 {len(anomalies)} 个 critical 时序异常，已触发闭环补货',
+                'loop_run_id': status.get('run_id'),
+                'anomaly_count': len(anomalies),
+                'run_step_result': run_result,
+            }
+        except Exception as e:
+            logger.error('[ClosedLoop] 异常检测触发闭环失败: %s', e)
+            db.session.rollback()
+            return {'triggered': False, 'reason': f'触发失败：{e}', 'error': str(e)}

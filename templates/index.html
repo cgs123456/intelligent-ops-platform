@@ -107,6 +107,7 @@
         <div class="panel" id="tab-rpa">
             <div class="card">
                 <h3>供应商报价采集
+                    <button class="btn btn-sm" onclick="negotiateQuotes()" title="多Agent博弈模拟报价">博弈报价</button>
                     <button class="btn btn-sm" onclick="loadQuotes()">刷新报价</button>
                     <input type="text" class="table-search" placeholder="搜索..." oninput="tableSearch('quoteTable', this.value)">
                     <button class="btn btn-sm" onclick="exportTable('quoteTable','quotes.csv')">导出</button>

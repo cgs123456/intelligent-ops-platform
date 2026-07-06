@@ -265,12 +265,18 @@ class AIGCService:
 
     # ==================== 经营日报生成 ====================
 
-    def generate_daily_report(self, dt=None):
-        """
-        读 ADS 日报数据生成自然语言日报。
-        - 优先 LLM 生成，不可用走模板。
-        - 幂等：同天覆盖。
-        - SQLite Date 字段只接受 date 对象，字符串日期需转换。
+    def generate_daily_report(self, dt=None, push=False):
+        """改进10：LLM 经营日报（昨日回顾 + 趋势分析 + 风险提示 + 建议行动）。
+
+        - 从 ADS 层读取当日经营指标
+        - 读取近 7 天趋势数据（销售/采购/库存货值/低库存数）
+        - LLM 生成 4 段式日报；不可用走规则模板
+        - 可选通过 notifier.send_alert() 推送到钉钉/企微/邮件
+        - 幂等：同天覆盖
+
+        :param dt: 日报日期（默认今天）
+        :param push: 是否通过 Notifier 推送多渠道告警
+        :return: DailyReport 对象
         """
         if dt is None:
             dt = date.today()
@@ -288,7 +294,9 @@ class AIGCService:
             logger.warning('ADS 日报数据不存在 dt=%s', dt)
             return None
 
-        context = self._build_report_context(report, dt)
+        # 读取近 7 天趋势（含 dt 当天）
+        trend = self._load_7d_trend(dt)
+        context = self._build_report_context(report, dt, trend)
         text = None
 
         if self._llm_available():
@@ -297,8 +305,12 @@ class AIGCService:
                     {
                         'role': 'system',
                         'content': (
-                            '你是经营分析师，根据结构化数据生成简洁的中文经营日报，'
-                            '包含整体表现、亮点、风险提示三段，不超过200字。'
+                            '你是一位资深零售经营分析师，根据结构化经营数据撰写简洁专业的中文日报。'
+                            '严格按以下四段输出（每段以【】开头），总字数 300-500 字：\n'
+                            '【昨日回顾】当日销售/采购/库存货值/低库存情况，与上周同日对比；\n'
+                            '【趋势分析】近 7 天趋势变化，识别增长/下滑品类与异常波动；\n'
+                            '【风险提示】库存预警、缺货风险、毛差转负、采购集中度等；\n'
+                            '【建议行动】2-4 条具体可执行的下一步行动（补货/调价/促销/审核）。'
                         ),
                     },
                     {'role': 'user', 'content': context},
@@ -307,7 +319,7 @@ class AIGCService:
             )
 
         if not text:
-            text = self._template_daily_report(report, dt)
+            text = self._template_daily_report(report, dt, trend)
 
         try:
             existing = (
@@ -320,40 +332,147 @@ class AIGCService:
                 existing = DailyReport(dt=dt, report_text=text)
                 self.session.add(existing)
             self.session.commit()
-            return existing
+            saved = existing
         except Exception as e:
             self.session.rollback()
             logger.error('保存日报失败 dt=%s: %s', dt, e)
             raise
 
-    def _build_report_context(self, report, dt):
-        return (
-            f"日期：{dt}\n"
-            f"销售总额：{report.total_sales_amount}\n"
-            f"采购总额：{report.total_purchase_amount}\n"
-            f"销售总件数：{report.total_sale_qty}\n"
-            f"库存货值：{report.inventory_value}\n"
-            f"畅销SKU：{report.top_sku}\n"
-            f"低库存SKU数：{report.low_stock_count}"
-        )
+        # 推送多渠道告警（异步，不阻塞）
+        if push:
+            try:
+                self._push_daily_report(saved, dt)
+            except Exception as e:
+                logger.warning('日报推送失败 dt=%s: %s', dt, e)
+        return saved
 
-    def _template_daily_report(self, report, dt):
-        """规则引擎模板日报"""
+    def _load_7d_trend(self, dt):
+        """读取近 7 天（含 dt）ADS 经营日报数据，按 dt 升序。
+
+        :return: list[dict] 每日 {dt, sales, purchase, sale_qty, inventory_value, low_stock_count, top_sku}
+        """
+        from datetime import timedelta
+        start = dt - timedelta(days=6)
+        rows = (
+            self.session.query(AdsDailyOpsReport)
+            .filter(AdsDailyOpsReport.dt >= start)
+            .filter(AdsDailyOpsReport.dt <= dt)
+            .order_by(AdsDailyOpsReport.dt.asc())
+            .all()
+        )
+        trend = []
+        for r in rows:
+            trend.append({
+                'dt': str(r.dt),
+                'sales': float(r.total_sales_amount or 0),
+                'purchase': float(r.total_purchase_amount or 0),
+                'sale_qty': int(r.total_sale_qty or 0),
+                'inventory_value': float(r.inventory_value or 0),
+                'low_stock_count': int(r.low_stock_count or 0),
+                'top_sku': r.top_sku or '-',
+            })
+        return trend
+
+    def _build_report_context(self, report, dt, trend=None):
+        """构造给 LLM 的结构化上下文。
+
+        :param trend: list[dict] 近 7 天趋势，None 时不输出趋势段
+        """
+        sales = float(report.total_sales_amount or 0)
+        purchase = float(report.total_purchase_amount or 0)
+        profit = sales - purchase
+        lines = [
+            f"# 当日经营指标（{dt}）",
+            f"- 销售总额：¥{sales:,.2f}",
+            f"- 采购总额：¥{purchase:,.2f}",
+            f"- 毛差（销售-采购）：¥{profit:,.2f}",
+            f"- 销售总件数：{report.total_sale_qty or 0}",
+            f"- 库存货值：¥{float(report.inventory_value or 0):,.2f}",
+            f"- 畅销SKU：{report.top_sku or '-'}",
+            f"- 低库存SKU数：{report.low_stock_count or 0}",
+        ]
+        if trend:
+            lines.append('')
+            lines.append('# 近 7 天趋势（含当日，按日期升序）')
+            lines.append('| 日期 | 销售额 | 采购额 | 销量 | 库存货值 | 低库存数 | 畅销SKU |')
+            lines.append('|------|--------|--------|------|----------|----------|---------|')
+            for t in trend:
+                lines.append(
+                    f"| {t['dt']} | ¥{t['sales']:,.2f} | ¥{t['purchase']:,.2f} | "
+                    f"{t['sale_qty']} | ¥{t['inventory_value']:,.2f} | "
+                    f"{t['low_stock_count']} | {t['top_sku']} |"
+                )
+            if len(trend) >= 2:
+                first_sales = trend[0]['sales']
+                last_sales = trend[-1]['sales']
+                if first_sales > 0:
+                    change_pct = (last_sales - first_sales) / first_sales * 100
+                    lines.append(f'- 7日销售变化：首日 ¥{first_sales:,.2f} → 末日 ¥{last_sales:,.2f}（{change_pct:+.1f}%）')
+                low_max = max(t['low_stock_count'] for t in trend)
+                low_min = min(t['low_stock_count'] for t in trend)
+                lines.append(f'- 7日低库存SKU数区间：{low_min} ~ {low_max}')
+        return '\n'.join(lines)
+
+    def _push_daily_report(self, report_obj, dt):
+        """通过 Notifier 多渠道推送日报（钉钉/企微/邮件）。"""
+        from services.notifier import notifier
+        text = report_obj.report_text or ''
+        notifier.send_alert(
+            title=f'经营日报 - {dt}',
+            message=text,
+            level='info',
+            context={'report_date': str(dt), 'type': 'daily_report'},
+        )
+        logger.info('[DailyReport] 日报已推送 dt=%s', dt)
+    def _template_daily_report(self, report, dt, trend=None):
+        """规则引擎模板日报（LLM 不可用时的兜底，4 段式）。
+
+        :param trend: list[dict] 近 7 天趋势，None 或空时趋势段降级
+        """
         sales = float(report.total_sales_amount or 0)
         purchase = float(report.total_purchase_amount or 0)
         profit = sales - purchase
         low = report.low_stock_count or 0
         top = report.top_sku or '无'
-        trend = '盈利' if profit >= 0 else '亏损'
-        risk = f'存在 {low} 个低库存SKU，建议及时补货' if low > 0 else '库存健康'
-        return (
-            f"【经营日报 {dt}】\n"
-            f"1. 整体表现：销售总额 ¥{sales:,.2f}，采购总额 ¥{purchase:,.2f}，"
-            f"毛差 ¥{profit:,.2f}（{trend}）；销售件数 {report.total_sale_qty or 0}。"
-            f"库存货值 ¥{float(report.inventory_value or 0):,.2f}。\n"
-            f"2. 亮点：畅销SKU为 {top}。\n"
-            f"3. 风险提示：{risk}。"
-        )
+        trend_label = '盈利' if profit >= 0 else '亏损'
+        risk_parts = []
+        if low > 0:
+            risk_parts.append(f'存在 {low} 个低库存SKU，建议及时补货')
+        if profit < 0:
+            risk_parts.append('毛差转负，需关注采购成本或销售定价')
+        if not risk_parts:
+            risk_parts.append('整体库存健康，无显著风险')
+        risk = '；'.join(risk_parts)
+
+        lines = [
+            f"【经营日报 {dt}】",
+            f"【昨日回顾】销售总额 ¥{sales:,.2f}，采购总额 ¥{purchase:,.2f}，"
+            f"毛差 ¥{profit:,.2f}（{trend_label}）；销售件数 {report.total_sale_qty or 0}，"
+            f"库存货值 ¥{float(report.inventory_value or 0):,.2f}，畅销SKU {top}，低库存SKU {low} 个。",
+        ]
+        if trend and len(trend) >= 2:
+            first = trend[0]
+            last = trend[-1]
+            sales_change = ((last['sales'] - first['sales']) / first['sales'] * 100) if first['sales'] > 0 else 0
+            trend_dir = '上升' if sales_change >= 0 else '下滑'
+            low_min = min(t['low_stock_count'] for t in trend)
+            low_max = max(t['low_stock_count'] for t in trend)
+            lines.append(
+                f"【趋势分析】近 7 天销售额 {trend_dir} {abs(sales_change):.1f}%"
+                f"（{first['dt']} ¥{first['sales']:,.2f} → {last['dt']} ¥{last['sales']:,.2f}），"
+                f"低库存SKU数区间 {low_min} ~ {low_max}。"
+            )
+        else:
+            lines.append("【趋势分析】历史数据不足，暂无法分析趋势。")
+        lines.append(f"【风险提示】{risk}。")
+        actions = []
+        if low > 0:
+            actions.append('对低库存SKU启动闭环补货流程')
+        if profit < 0:
+            actions.append('复盘近期采购成本与销售定价策略')
+        actions.append('关注畅销SKU备货与在途情况')
+        lines.append("【建议行动】" + '；'.join(actions) + '。')
+        return '\n'.join(lines)
 
     # ==================== Text2SQL 引擎 ====================
 
@@ -629,6 +748,19 @@ class AIGCService:
             answer = self._format_search_result(question, docs)
         else:
             route = 'text2sql'
+            # 改进8：优先走 DataAgent 全链路（NL→SQL→校验→执行→NL 回复）
+            try:
+                from services.data_agent import DataAgent
+                agent = DataAgent(aigc_service=self)
+                da_res = agent.query(question, session_id=sid)
+                answer = da_res.get('answer', '')
+                # DataAgent 已记录历史，这里跳过重复记录
+                if da_res.get('_recorded'):
+                    return {'session_id': sid, 'route': route, 'answer': answer,
+                            'sql': da_res.get('sql'), 'rows_count': da_res.get('rows_count')}
+            except Exception as e:
+                logger.warning('[NLQuery] DataAgent 失败，回退 text2sql: %s', e)
+            # 兜底：原 text2sql 规则匹配
             res = self.text2sql(question)
             answer = self._format_sql_result(question, res)
 
@@ -847,3 +979,10 @@ class AIGCService:
             .limit(limit)
             .all()
         )
+
+# 多 Agent 采购博弈（改进7）：从独立模块 re-export，保持 AIGCService 模块统一入口
+from services.multiagent import MultiAgentNegotiator  # noqa: E402,F401
+
+
+# Data Agent（改进8）：Text2SQL 全链路 re-export，保持 AIGCService 模块统一入口
+from services.data_agent import DataAgent  # noqa: E402,F401

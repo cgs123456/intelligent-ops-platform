@@ -85,6 +85,110 @@ class RPAService:
             self.session.rollback()
 
     # ====================================================================
+    # 多 Agent 报价模拟（改进7）
+    # ====================================================================
+
+    def _simulate_collect_quotes(self, today):
+        """
+        改进7：当天无报价时调用 MultiAgentNegotiator 多 Agent 博弈模拟报价。
+        - 对每个低库存产品，让买方 Agent + 2 个供应商 Agent 博弈
+        - 博弈产生的报价写入 ExtSupplierQuote 表
+        - 博弈失败回退到原 ±5% 波动逻辑（保证 Demo 永远可用）
+        :return: 当天报价列表（ExtSupplierQuote 对象）
+        """
+        logger.info('[RPA-quote] 当天无报价，启动多 Agent 博弈模拟')
+        try:
+            from services.multiagent import MultiAgentNegotiator
+            from models.erp import Product, Supplier
+            negotiator = MultiAgentNegotiator(db_session=self.session)
+
+            # 取低库存产品（stock_qty < safety_stock * 2），最多 12 个
+            products = (
+                self.session.query(Product)
+                .filter(Product.is_active.is_(True))
+                .filter(Product.stock_qty < Product.safety_stock * 2)
+                .limit(12)
+                .all()
+            )
+            # 兜底：无低库存产品时取最近有报价的产品
+            if not products:
+                recent_quotes = (
+                    self.session.query(ExtSupplierQuote)
+                    .order_by(ExtSupplierQuote.collected_at.desc())
+                    .limit(12)
+                    .all()
+                )
+                seen_pids = set()
+                products = []
+                for q in recent_quotes:
+                    if q.product_id not in seen_pids:
+                        p = self.session.get(Product, q.product_id)
+                        if p:
+                            products.append(p)
+                            seen_pids.add(q.product_id)
+
+            # 取所有启用供应商
+            suppliers = (
+                self.session.query(Supplier)
+                .filter(Supplier.is_active.is_(True))
+                .all()
+            )
+
+            count = 0
+            for prod in products:
+                try:
+                    result = negotiator.negotiate(prod, suppliers)
+                    for q in result.get('quotes', []):
+                        # mock 竞争对手（supplier_id >= 9001）跳过不写库
+                        if q.get('supplier_id', 0) >= 9001:
+                            continue
+                        self.session.add(ExtSupplierQuote(
+                            supplier_id=q['supplier_id'],
+                            product_id=prod.id,
+                            quote_price=q['price'],
+                            quote_date=today,
+                            source='多Agent博弈',
+                            collected_at=datetime.now()
+                        ))
+                        count += 1
+                except Exception as e:
+                    logger.warning('[RPA-quote] 产品 %s 博弈失败: %s', prod.id, e)
+
+            self.session.commit()
+            quotes = ExtSupplierQuote.query.filter_by(quote_date=today).all()
+            logger.info('[RPA-quote] 多 Agent 博弈生成 %d 条报价', len(quotes))
+
+            if not quotes:
+                # 博弈全部失败：回退 ±5% 波动兜底
+                logger.warning('[RPA-quote] 多 Agent 博弈无结果，回退 ±5%% 波动兜底')
+                return self._fallback_fluctuate_quotes(today)
+            return quotes
+
+        except Exception as e:
+            logger.error('[RPA-quote] 多 Agent 博弈异常: %s，回退波动兜底', e)
+            self.session.rollback()
+            return self._fallback_fluctuate_quotes(today)
+
+    def _fallback_fluctuate_quotes(self, today):
+        """±5% 波动兜底（原模拟逻辑，多 Agent 失败时使用）。"""
+        logger.info('[RPA-quote] 兜底：取最近历史报价模拟 ±5%% 波动')
+        latest = ExtSupplierQuote.query.order_by(
+            ExtSupplierQuote.collected_at.desc()
+        ).limit(12).all()
+        for q in latest:
+            fluct = random.uniform(-0.05, 0.05)
+            new_price = round(float(q.quote_price) * (1 + fluct), 2)
+            self.session.add(ExtSupplierQuote(
+                supplier_id=q.supplier_id, product_id=q.product_id,
+                quote_price=new_price, quote_date=today,
+                source=q.source or '供应商官网',
+                collected_at=datetime.now()
+            ))
+        self.session.commit()
+        quotes = ExtSupplierQuote.query.filter_by(quote_date=today).all()
+        logger.info('[RPA-quote] 兜底生成 %d 条波动报价', len(quotes))
+        return quotes
+    # ====================================================================
     # 1. 报价采集
     # ====================================================================
 
@@ -102,23 +206,8 @@ class RPAService:
         quotes = ExtSupplierQuote.query.filter_by(quote_date=today).all()
 
         if not quotes:
-            # 当天无报价：取最近历史报价模拟 ±5% 波动
-            logger.info('[RPA-quote] 当天无报价，模拟生成 ±5%% 波动报价')
-            latest = ExtSupplierQuote.query.order_by(
-                ExtSupplierQuote.collected_at.desc()
-            ).limit(12).all()
-            for q in latest:
-                fluct = random.uniform(-0.05, 0.05)
-                new_price = round(float(q.quote_price) * (1 + fluct), 2)
-                self.session.add(ExtSupplierQuote(
-                    supplier_id=q.supplier_id, product_id=q.product_id,
-                    quote_price=new_price, quote_date=today,
-                    source=q.source or '供应商官网',
-                    collected_at=datetime.now()
-                ))
-            self.session.commit()
-            quotes = ExtSupplierQuote.query.filter_by(quote_date=today).all()
-            logger.info('[RPA-quote] 模拟生成 %d 条波动报价', len(quotes))
+            # 当天无报价：改进7 - 优先调用多 Agent 博弈模拟，失败回退 ±5% 波动
+            quotes = self._simulate_collect_quotes(today)
 
         results = []
         for q in quotes:

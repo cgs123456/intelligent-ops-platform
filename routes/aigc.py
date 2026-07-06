@@ -75,8 +75,28 @@ def report():
 @bp.route('/generate-report', methods=['POST'])
 @require_permission('fde:run')
 def gen_report():
-    text = AIGCService().generate_daily_report()
-    return jsonify({'text': text})
+    """改进10：生成 LLM 经营日报（昨日回顾+趋势+风险+建议）。
+    查询参数：
+        push: 可选，true 时通过 Notifier 推送多渠道告警
+        date: 可选，YYYY-MM-DD，默认今天
+    """
+    push = request.args.get('push', '').lower() == 'true'
+    date_str = request.args.get('date')
+    dt = None
+    if date_str:
+        from datetime import datetime as _dt
+        try:
+            dt = _dt.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': '日期格式错误，需 YYYY-MM-DD'}), 400
+    report = AIGCService().generate_daily_report(dt=dt, push=push)
+    if report is None:
+        return jsonify({'error': 'ADS 日报数据不存在，请先运行 FDE 刷新'}), 404
+    return jsonify({
+        'text': report.report_text,
+        'dt': str(report.dt),
+        'pushed': push,
+    })
 
 
 @bp.route('/query', methods=['POST'])
@@ -178,3 +198,80 @@ def feedback_stats():
 #   from tasks import generate_daily_report_async, generate_suggestions_async
 #   result = generate_daily_report_async.delay()
 #   task_id = result.id
+
+
+# ---- 改进7：多 Agent 采购博弈 ----
+
+
+@bp.route('/negotiate', methods=['POST'])
+@require_permission('aigc:review')
+def negotiate():
+    """多 Agent 采购博弈：买方 Agent + 2 个供应商 Agent 竞价。
+
+    请求体：
+        product_id: int   必填
+        suggested_qty: int 可选，建议采购量
+        supplier_ids: list[int] 可选，指定候选供应商（默认取全部启用供应商）
+    返回：
+        buyer_demand / quotes / best / negotiation_log
+    """
+    from extensions import db
+    from models.erp import Product, Supplier
+    from services.multiagent import MultiAgentNegotiator
+
+    data = request.get_json(force=True, silent=True) or {}
+    product_id = data.get('product_id')
+    if not product_id:
+        return jsonify({'error': 'product_id 必填'}), 400
+
+    product = db.session.get(Product, product_id)
+    if not product:
+        return jsonify({'error': f'产品 {product_id} 不存在'}), 404
+
+    # 候选供应商
+    supplier_ids = data.get('supplier_ids')
+    if supplier_ids:
+        suppliers = (
+            db.session.query(Supplier)
+            .filter(Supplier.id.in_(supplier_ids))
+            .filter(Supplier.is_active.is_(True))
+            .all()
+        )
+    else:
+        suppliers = (
+            db.session.query(Supplier)
+            .filter(Supplier.is_active.is_(True))
+            .all()
+        )
+
+    negotiator = MultiAgentNegotiator(db_session=db.session)
+    result = negotiator.negotiate(
+        product, suppliers,
+        suggested_qty=data.get('suggested_qty'),
+    )
+    return jsonify(result)
+
+# ---- 改进8：Data Agent Text2SQL 全链路 ----
+
+
+@bp.route('/data-query', methods=['POST'])
+@require_permission('aigc:read')
+def data_query():
+    """Data Agent：NL → SQL（LLM 生成）→ AST 校验 → 真执行 → NL 回复。
+
+    请求体：
+        question: str    必填，自然语言问题
+        session_id: str  可选，会话 ID（支持多轮）
+    返回：
+        session_id / route / sql / result / rows_count / answer
+    """
+    from services.data_agent import DataAgent
+    data = request.get_json(force=True, silent=True) or {}
+    question = data.get('question')
+    if not question:
+        return jsonify({'error': 'question 必填'}), 400
+    agent = DataAgent()
+    result = agent.query(question, session_id=data.get('session_id'))
+    # result 含 _recorded 内部字段，移除后返回
+    result.pop('_recorded', None)
+    return jsonify(result)

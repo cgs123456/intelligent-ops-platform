@@ -345,6 +345,33 @@ async function loadQuotes() {
   const quotes = await API('/api/v1/rpa/quotes');
   quoteTable.setData(quotes);
 }
+// 改进7：多 Agent 采购博弈 — 选择低库存产品发起三方竞价
+async function negotiateQuotes() {
+  // 找第一个低库存产品（库存 < 安全线*2）
+  let productId = null;
+  const inv = await API('/api/v1/erp/inventory');
+  const lowItem = (inv.items || inv).find(it => it.stock_qty < (it.safety_stock || 0) * 2);
+  if (lowItem) {
+    productId = lowItem.id || lowItem.product_id;
+  } else {
+    showToast('暂无低库存产品，无需博弈采购', 'info');
+    return;
+  }
+  try {
+    showToast('多 Agent 博弈进行中...', 'info', 8000);
+    const r = await API('/api/v1/aigc/negotiate', {
+      method: 'POST',
+      body: JSON.stringify({ product_id: productId })
+    });
+    // 展示博弈日志
+    const logHtml = (r.negotiation_log || []).map(line => `<div class="sync-item">${esc(line)}</div>`).join('');
+    const bestHtml = r.best ? `<div class="sync-item sync-ok">✓ 最优：${esc(r.best.supplier_name)} ¥${r.best.price}/件 交期${r.best.lead_days}天 得分${r.best.score}</div>` : '';
+    document.getElementById('syncResult').innerHTML = logHtml + bestHtml;
+    showToast(`博弈完成：${(r.quotes||[]).length} 个供应商报价`, 'success');
+    loadQuotes(); // 刷新报价列表
+  } catch (e) { showToast('博弈失败：' + sanitizeError(e.message), 'error'); }
+}
+
 async function syncOrders() {
   try {
     const r = await API('/api/v1/rpa/sync-orders', {method:'POST'});

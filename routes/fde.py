@@ -70,3 +70,34 @@ def backfill():
         return jsonify({'error': '回刷范围不能超过 90 天'}), 400
 
     return jsonify(WarehouseService().backfill(start, end))
+
+
+# ---- 改进9：FDE 时序异常检测 ----
+
+
+@bp.route('/anomalies')
+@require_permission('fde:read')
+def anomalies():
+    """检测销售时序异常（7 日移动平均 + 2σ）。
+
+    查询参数：
+        date: 可选，检测日期（YYYY-MM-DD，默认今天）
+        trigger: 可选，是否自动触发闭环补货（true/false，默认 false）
+    """
+    from services.anomaly_detector import AnomalyDetector
+    from datetime import datetime, date
+
+    detector = AnomalyDetector()
+    target_date = None
+    date_str = request.args.get('date')
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': '日期格式错误，需 YYYY-MM-DD'}), 400
+
+    if request.args.get('trigger', '').lower() == 'true':
+        result = detector.detect_and_trigger(target_date)
+    else:
+        result = detector.detect_sales_anomalies(target_date)
+    return jsonify(result)

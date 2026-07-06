@@ -122,18 +122,48 @@ def generate_suggestions_async(self):
 
 
 @_task(name='tasks.generate_daily_report_async', bind=True)
-def generate_daily_report_async(self, dt_str=None):
-    """异步生成经营日报"""
+def generate_daily_report_async(self, dt_str=None, push=True):
+    """改进10：异步生成 LLM 经营日报并多渠道推送。
+
+    - 从 ADS 读取当日指标 + 近 7 天趋势
+    - LLM 生成 4 段式日报（昨日回顾/趋势/风险/建议）
+    - 通过 Notifier 推送钉钉/企微/邮件（push=True，定时任务默认开启）
+    """
     try:
         _get_app()
         from services.aigc_service import AIGCService
         from datetime import datetime
         dt = datetime.strptime(dt_str, '%Y-%m-%d').date() if dt_str else None
-        result = AIGCService().generate_daily_report(dt)
-        logger.info('[celery] daily report generated')
-        return {'ok': result is not None}
+        result = AIGCService().generate_daily_report(dt, push=push)
+        logger.info('[celery] daily report generated, pushed=%s', push)
+        return {'ok': result is not None, 'pushed': push}
     except Exception as exc:
         logger.exception('[celery] generate daily report failed')
+        if hasattr(self, 'retry'):
+            raise self.retry(exc=exc, countdown=2 ** self.request.retries)
+        raise
+
+
+@_task(name='tasks.detect_anomalies_async', bind=True, max_retries=1)
+def detect_anomalies_async(self):
+    """改进9：定时执行销售时序异常检测 + 触发闭环 + 发送告警。
+
+    - 检测近 30 天 dws_sales_sku_daily 数据
+    - critical 异常自动触发闭环补货
+    - warning+ 异常发送多渠道告警（钉钉/企业微信/邮件）
+    """
+    try:
+        _get_app()
+        from services.anomaly_detector import AnomalyDetector
+        detector = AnomalyDetector()
+        result = detector.detect_and_trigger()
+        logger.info('[celery] anomaly detection done: checked=%d anomalies=%d triggered=%d',
+                    result.get('checked', 0),
+                    result.get('summary', {}).get('total', 0),
+                    len(result.get('triggered_actions', [])))
+        return result
+    except Exception as exc:
+        logger.exception('[celery] anomaly detection failed')
         if hasattr(self, 'retry'):
             raise self.retry(exc=exc, countdown=2 ** self.request.retries)
         raise
@@ -156,6 +186,11 @@ if celery_app is not None:
         'rpa-sync-every-30min': {
             'task': 'tasks.run_rpa_scheduled_async',
             'schedule': '*/30 * * * *',
+        },
+        # 改进9：每小时整点执行销售时序异常检测（09:00-22:00 业务时段）
+        'hourly-anomaly-detect': {
+            'task': 'tasks.detect_anomalies_async',
+            'schedule': '0 9-22 * * *',
         },
     }
     celery_app.conf.timezone = 'Asia/Shanghai'
