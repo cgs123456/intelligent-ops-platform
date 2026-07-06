@@ -18,11 +18,11 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 
 平台落地一个涵盖 RPA、ERP、FDE、AIGC 四大领域的小型可运行系统,验证技术协同:
 
-- **AIGC**:基于 LLM 抽象层 + 规则引擎兜底,生成补货建议、经营日报,支持自然语言查询(Text2SQL + 语义检索)
-- **RPA**:供应商报价采集、电商订单同步,适配器模式支持 mock/selenium 切换
+- **AIGC**:基于 LLM 抽象层 + 规则引擎兜底,生成补货建议、4 段式经营日报,支持自然语言查询(Text2SQL 全链路 + 语义检索)
+- **RPA**:供应商报价采集(多 Agent 博弈)、电商订单同步,适配器模式支持 mock/selenium 切换
 - **ERP**:产品/供应商/采购/销售/库存/财务科目管理,移动加权平均成本核算
-- **FDE**:ODS/DWD/DWS/ADS 四层数仓,ETL 流水线 + 数据质量监控 + 数据血缘
-- **闭环**:五步状态机编排,支持跨进程文件锁、超时处理、断点续跑、业务侧回滚补偿
+- **FDE**:ODS/DWD/DWS/ADS 四层数仓,ETL 流水线 + 数据质量监控 + 数据血缘 + 时序异常检测
+- **闭环**:五步状态机编排,支持跨进程文件锁、超时处理、断点续跑、业务侧回滚补偿、异常自动触发
 
 主要特性:
 - JWT 认证 + RBAC 三级权限(admin/operator/viewer)+ Token 旋转 + 黑名单
@@ -35,6 +35,13 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 - PostgreSQL 定时备份 + 完整性校验 + 保留策略
 - 健康检查端点(live/ready/deep)
 - Prometheus 指标 + Swagger API 文档(可选)
+
+### 进阶能力(改进 7-10)
+
+- **多 Agent 采购博弈**:买方 Agent + 双供应商 Agent LLM 角色扮演,综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手
+- **Data Agent Text2SQL 全链路**:NL→SQL 生成 → AST 4 层安全校验(单语句/SELECT-WITH/禁 DDL-DML/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
+- **FDE 时序异常检测**:7 日移动平均 + 2σ/3σ 分级,critical 异常自动触发闭环补货,warning+ 多渠道告警,Celery Beat 09:00-22:00 整点调度
+- **LLM 经营日报**:4 段式(昨日回顾 + 趋势分析 + 风险提示 + 建议行动),读取近 7 天 ADS 趋势,Notifier 多渠道推送
 
 ## 技术栈
 
@@ -117,12 +124,14 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 ```
 1. AIGC 生成补货建议 → Suggestion(pending)
 2. 人工审核(approve/reject + final_qty) → SuggestionFeedback 自学习
-3. RPA 向供应商系统下单 → ExtSupplierQuote + PurchaseOrder(draft)
+3. RPA 向供应商系统下单(多 Agent 博弈报价)→ ExtSupplierQuote + PurchaseOrder(draft)
 4. ERP 记账入库 → StockMove(in) + AccountMove(payable) + 移动加权平均成本
 5. FDE 刷新 ADS 层 → AdsReplenishmentSuggest + AdsDailyOpsReport
 ```
 
 每步带文件锁防并发、超时装饰器、失败回滚补偿(取消采购单/记审计待手工冲销/删 ADS 数据)。
+
+**自动触发**:FDE 时序异常检测(critical 级别)→ `check_auto_trigger_with_anomaly` → 重置闭环并自动执行 step1 生成补货建议 + 审计日志。Celery Beat 09:00-22:00 整点调度。
 
 ## 目录结构
 
@@ -165,9 +174,12 @@ intelligent-ops-platform/
 │   ├── rbac.py                  # 权限装饰器/角色初始化
 │   ├── aigc_service.py          # LLM 抽象/建议/日报/Text2SQL/语义检索
 │   ├── erp_service.py           # 库存/订单/财务/移动加权平均
-│   ├── rpa_service.py           # 采集/同步/调度
+│   ├── rpa_service.py           # 采集/同步/调度(接入多 Agent 博弈)
 │   ├── warehouse_service.py     # ETL 流水线/血缘/数据质量
-│   ├── closed_loop.py           # 五步状态机/文件锁/超时/回滚
+│   ├── closed_loop.py           # 五步状态机/文件锁/超时/回滚/异常触发
+│   ├── multiagent.py            # 改进7:多 Agent 采购博弈(MultiAgentNegotiator)
+│   ├── data_agent.py            # 改进8:Data Agent Text2SQL 全链路(AST 校验+执行)
+│   ├── anomaly_detector.py      # 改进9:时序异常检测(7日 MA + 2σ/3σ 分级)
 │   ├── notifier.py              # 多渠道告警(钉钉/微信/邮件)
 │   ├── idempotency.py           # Idempotency-Key 幂等装饰器
 │   └── password_policy.py       # 密码强度校验
@@ -215,8 +227,11 @@ intelligent-ops-platform/
 
 ### 核心业务逻辑
 
-- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环状态机。文件锁(fcntl + threading 兜底)、with_timeout 装饰器(multiprocessing + threading 兜底)、回滚补偿(取消采购单/记审计待手工冲销/删 ADS 数据)、Notifier 失败告警
-- **[services/aigc_service.py](services/aigc_service.py)**:LLM 抽象层 + 规则引擎兜底。补货建议生成(置信度算法)、经营日报、Text2SQL(白名单 + SQL 校验)、关键词语义检索、自然语言查询、审核反馈自学习
+- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环状态机。文件锁(fcntl + threading 兜底)、with_timeout 装饰器(multiprocessing + threading 兜底)、回滚补偿(取消采购单/记审计待手工冲销/删 ADS 数据)、Notifier 失败告警、`check_auto_trigger_with_anomaly` 异常自动触发
+- **[services/aigc_service.py](services/aigc_service.py)**:LLM 抽象层 + 规则引擎兜底。补货建议生成(置信度算法)、4 段式经营日报(昨日回顾+趋势+风险+建议,含 7 天趋势 + Notifier 推送)、Text2SQL(优先 DataAgent,回退规则)、关键词语义检索、自然语言查询、审核反馈自学习
+- **[services/multiagent.py](services/multiagent.py)**:改进7 多 Agent 采购博弈。`MultiAgentNegotiator` 三 Agent LLM 角色扮演(买方 + 双供应商),`score_quotes` 综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手,LLM 不可用走规则兜底
+- **[services/data_agent.py](services/data_agent.py)**:改进8 Data Agent Text2SQL 全链路。`DataAgent.query()` NL→SQL→校验→执行→NL 回复,`_validate_sql_ast` 4 层安全校验(单语句/SELECT-WITH/禁 DDL-DML/表白名单/强制 LIMIT 100),CTE 别名追踪,sqlparse 不可用回退正则
+- **[services/anomaly_detector.py](services/anomaly_detector.py)**:改进9 时序异常检测。`AnomalyDetector` 7 日 MA + 2σ/3σ 分级(critical/warning/info),`detect_and_trigger` critical→触发闭环 step1 + 审计日志,warning+→Notifier 多渠道告警
 - **[services/auth.py](services/auth.py)**:JWT 签发(access 2h + refresh 7d,带 jti)、Token 黑名单、refresh 旋转、登录失败 5 次锁定、首次登录随机密码 + 强制改密
 - **[services/rbac.py](services/rbac.py)**:权限装饰器 @require_permission。支持 TESTING 跳过、dev 无 token 放行、有 token 验证 JWT、RBAC_ENABLED 时校验权限。权限 JSON 解析异常显式记日志
 - **[services/idempotency.py](services/idempotency.py)**:@idempotent 装饰器。基于 Idempotency-Key Header + Redis 缓存 24h,缺少 Header 放行兼容旧客户端
@@ -232,7 +247,7 @@ intelligent-ops-platform/
 
 - **[middleware.py](middleware.py)**:request_id 注入(优先用客户端 X-Request-Id,否则生成 UUID 短格式)、响应头回写、日志过滤器让所有 handler 自动带 request_id
 - **[schemas.py](schemas.py)**:Marshmallow 校验(LoginSchema/ChangePasswordSchema/CreateReturnSchema/ReviewSuggestionSchema 等)
-- **[tasks.py](tasks.py)**:Celery 任务(闭环异步执行/ETL/RPA 同步/日报生成)。_NullTask 让 Celery 不可用时仍可 import。Celery Beat 定时调度(ETL 02:00 / 日报 02:30 / RPA 每 30min)
+- **[tasks.py](tasks.py)**:Celery 任务(闭环异步执行/ETL/RPA 同步/日报生成/异常检测)。_NullTask 让 Celery 不可用时仍可 import。Celery Beat 定时调度(ETL 02:00 / 日报 02:30 默认推送 / RPA 每 30min / 异常检测 09:00-22:00 整点)
 - **[adapters/](adapters/)**:外部系统抽象。RPABackend(Mock + Selenium 占位)/ LLMBackend(Rule + GLM/Qwen/OpenAI 兼容)。通过 RPA_BACKEND / LLM_PROVIDER 环境变量切换
 - **[services/notifier.py](services/notifier.py)**:多渠道告警。异步发送、单渠道失败不影响其他、无配置时降级为仅记日志
 
@@ -337,6 +352,7 @@ flask db upgrade
 | GET | /api/v1/fde/ads | fde:read | ADS 应用层数据 |
 | GET | /api/v1/fde/lineage | fde:read | 数据血缘 |
 | GET | /api/v1/fde/data-quality | fde:read | 数据质量报告 |
+| GET | /api/v1/fde/anomalies | fde:read | 改进9:时序异常检测(支持 date/trigger 参数,trigger=true 触发闭环+告警) |
 
 ### AIGC(aigc)
 
@@ -347,9 +363,11 @@ flask db upgrade
 | POST | /api/v1/aigc/review | aigc:review | 审核建议(支持 final_qty) |
 | POST | /api/v1/aigc/batch-review | aigc:review | 批量审核 |
 | GET | /api/v1/aigc/report | aigc:read | 最新日报 |
-| POST | /api/v1/aigc/generate-report | fde:run | 生成日报 |
+| POST | /api/v1/aigc/generate-report | fde:run | 改进10:生成 4 段式 LLM 日报(支持 push/date 参数,push=true 多渠道推送) |
 | POST | /api/v1/aigc/query | aigc:read | 同步智能问答 |
 | POST | /api/v1/aigc/query-stream | aigc:read | SSE 流式智能问答 |
+| POST | /api/v1/aigc/data-query | aigc:read | 改进8:Data Agent Text2SQL 全链路(NL→SQL→执行→NL) |
+| POST | /api/v1/aigc/negotiate | aigc:review | 改进7:多 Agent 采购博弈(买方+双供应商 LLM 角色扮演) |
 | GET | /api/v1/aigc/chat-history/<session_id> | aigc:read | 对话历史 |
 | GET | /api/v1/aigc/feedback-stats | aigc:read | 反馈统计 |
 
