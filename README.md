@@ -12,6 +12,7 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 - [快速启动](#快速启动)
 - [配置说明](#配置说明)
 - [API 接口](#api-接口)
+- [工程化](#工程化)
 - [部署](#部署)
 
 ## 项目概述
@@ -208,13 +209,31 @@ intelligent-ops-platform/
 │   ├── backup_db.sh             # pg_dump + 校验 + 保留清理
 │   └── restore_db.sh            # 交互式恢复 + 行数校验
 │
+├── tests/                       # 测试套件(pytest)
+│   ├── __init__.py
+│   ├── conftest.py              # 公共 fixtures(app/client/db_session/auth_headers/mock_llm)
+│   ├── test_health.py           # 健康检查端点
+│   ├── test_auth.py             # 认证模块
+│   ├── test_data_agent.py       # 改进8:Text2SQL AST 安全校验
+│   ├── test_anomaly_detector.py # 改进9:时序异常检测算法
+│   ├── test_multiagent.py       # 改进7:多 Agent 博弈评分
+│   └── test_daily_report.py     # 改进10:LLM 经营日报
+│
+├── .github/workflows/ci.yml     # GitHub Actions CI(lint + test 矩阵 + security + build)
+├── pyproject.toml               # 项目元数据 + ruff/black/mypy/pytest/coverage 配置
+├── .pre-commit-config.yaml      # Git 提交前钩子(ruff + black + mypy)
+├── .editorconfig                # IDE 风格统一(UTF-8/LF/4 空格/120 列)
+├── .gitattributes               # Git 换行符统一(LF) + 二进制文件标记
+├── Makefile                     # 便利命令(install/test/lint/format/run/docker/migrate)
+├── LICENSE                      # MIT License
 ├── Dockerfile                   # 多阶段构建 + 非 root 用户
 ├── docker-compose.yml           # 开发版(web + db + redis)
 ├── docker-compose.prod.yml      # 生产版(+ nginx + db-backup)
 ├── .dockerignore
 ├── .gitignore
 ├── .env.example                 # 环境变量示例
-└── requirements.txt
+├── requirements.txt             # 生产依赖
+└── requirements-dev.txt         # 开发依赖(pytest/ruff/black/mypy/bandit/pre-commit)
 ```
 
 ## 核心文件说明
@@ -398,6 +417,111 @@ flask db upgrade
 | GET | /health/ready | 就绪探针(依赖检查) |
 | GET | /metrics | Prometheus 指标(METRICS_ENABLED=1 时) |
 | GET | /docs/swagger | API 文档(API_DOCS_ENABLED=1 时) |
+
+## 工程化
+
+### CI/CD(GitHub Actions)
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 定义 4 个 job:
+
+| Job | 说明 |
+|---|---|
+| **lint** | ruff check + black --check + mypy 类型检查 |
+| **test** | Python 3.10/3.11/3.12 矩阵运行 pytest + coverage,3.11 上传 Codecov |
+| **security** | bandit 安全扫描 |
+| **build** | Docker 镜像构建(lint + test 通过后触发) |
+
+push/PR 到 main 自动触发。
+
+### 测试(pytest)
+
+```bash
+# 安装开发依赖
+pip install -r requirements-dev.txt
+
+# 运行测试
+pytest                              # 或 make test
+
+# 带覆盖率报告
+pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
+```
+
+测试套件覆盖 6 个模块 31 个用例:
+- `test_health.py`:健康检查端点
+- `test_auth.py`:登录/认证流程
+- `test_data_agent.py`:改进8 SQL AST 4 层安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT)
+- `test_anomaly_detector.py`:改进9 异常检测算法(正常/3σ/2σ/数据不足/空数据库)
+- `test_multiagent.py`:改进7 多 Agent 评分(价格权重/空列表/单供应商/min-max 归一化)
+- `test_daily_report.py`:改进10 4 段式日报(趋势加载/上下文构建/模板降级)
+
+[tests/conftest.py](tests/conftest.py) 提供公共 fixtures:
+- `app`:会话级 Flask app(临时 SQLite,`db.create_all()`)
+- `client`:测试客户端
+- `db_session`:函数级事务回滚,测试互不污染
+- `auth_headers`:JWT 认证头
+- `mock_llm`:Mock LLM 调用
+- `disable_timeout`:禁用闭环超时装饰器
+
+### 代码质量
+
+| 工具 | 配置位置 | 说明 |
+|---|---|---|
+| **ruff** | [pyproject.toml](pyproject.toml) `[tool.ruff]` | Lint + import 排序,line-length=120 |
+| **black** | [pyproject.toml](pyproject.toml) `[tool.black]` | 代码格式化,line-length=120 |
+| **mypy** | [pyproject.toml](pyproject.toml) `[tool.mypy]` | 类型检查(非 strict,渐进式启用) |
+| **bandit** | CI security job | 安全扫描 |
+| **pre-commit** | [.pre-commit-config.yaml](.pre-commit-config.yaml) | Git 提交前自动检查(ruff + black + mypy) |
+
+```bash
+# 安装 pre-commit 钩子
+pre-commit install
+
+# 手动运行所有检查
+pre-commit run --all-files    # 或 make pre-commit
+
+# 单独运行
+ruff check .                  # 或 make lint
+black .                       # 或 make format
+mypy app.py                   # 或 make type-check
+bandit -r . -x tests,.venv    # 或 make security
+```
+
+### Makefile 便利命令
+
+| 命令 | 说明 |
+|---|---|
+| `make help` | 显示所有可用命令 |
+| `make install` | 安装生产依赖 |
+| `make dev-install` | 安装生产 + 开发依赖 + pre-commit 钩子 |
+| `make test` | 运行测试 |
+| `make test-cov` | 测试 + 覆盖率报告(htmlcov/) |
+| `make lint` / `make format` | ruff 检查 / black 格式化 |
+| `make type-check` | mypy 类型检查 |
+| `make security` | bandit 安全扫描 |
+| `make run` | 启动开发服务器 |
+| `make docker-build` / `make docker-up` | Docker 构建 / 启动 |
+| `make migrate` / `make migrate-new m="描述"` | 数据库迁移 |
+| `make clean` | 清理缓存文件 |
+
+### 开发依赖
+
+[requirements-dev.txt](requirements-dev.txt) 单独管理开发依赖,与生产依赖分离:
+
+- 测试:pytest / pytest-cov / pytest-flask / coverage
+- 代码质量:ruff / black
+- 类型检查:mypy
+- 安全扫描:bandit
+- Git 钩子:pre-commit
+- 工具库:PyYAML
+
+```bash
+# 仅生产部署
+pip install -r requirements.txt
+
+# 开发环境
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+```
 
 ## 部署
 

@@ -1,0 +1,156 @@
+[project]
+name = "intelligent-ops-platform"
+version = "1.0.0"
+description = "中型企业智能运营平台 - RPA/ERP/FDE/AIGC 四层闭环协同原型系统"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "cgs123456" }]
+keywords = ["flask", "rpa", "erp", "fde", "aigc", "supply-chain", "闭环"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Flask",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/cgs123456/intelligent-ops-platform"
+Repository = "https://github.com/cgs123456/intelligent-ops-platform"
+
+# ==================== Ruff 配置 ====================
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "migrations",
+    ".venv",
+    "instance",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long（由 black 处理）
+    "B008",   # Do not perform function call in argument defaults（Flask 常用模式）
+    "B904",   # raise from（项目大量使用，统一改造影响大）
+    "SIM108", # if-else 三元表达式（可读性优先）
+    "N805",   # 方法第一个参数名（Flask 路由函数不强制 self）
+    "N806",   # 变量名大小写（业务代码有大量大写常量）
+    "E402",   # import 不是文件顶部（Flask app context 内 import 常见）
+    "F401",   # 未使用 import（models 的 __init__.py 有意 re-export）
+    "F403",   # from X import *（models 模式）
+    "F405",   # 可能未定义的名称（from X import * 的副作用）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]  # 测试中允许未使用 import 和重定义
+"migrations/*" = ["E", "W", "F"]  # 迁移文件不检查
+"seed.py" = ["E501"]  # 种子数据允许长行
+
+# ==================== Black 配置 ====================
+[tool.black]
+line-length = 120
+target-version = ["py310", "py311", "py312"]
+extend-exclude = '''
+/(
+    \.venv
+  | \.git
+  | __pycache__
+  | migrations
+  | instance
+  | build
+  | dist
+)/
+'''
+
+# ==================== Mypy 配置 ====================
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+no_strict_optional = true
+check_untyped_defs = false
+warn_unused_ignores = false
+warn_redundant_casts = false
+exclude = [
+    "migrations/",
+    "\\.venv/",
+    "instance/",
+    "build/",
+    "dist/",
+]
+# 项目未强制全量类型注解，按需逐步启用
+# 若要全量 strict，可改为：disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+# ==================== Pytest 配置 ====================
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--showlocals",
+    "--color=yes",
+]
+markers = [
+    "slow: 标记慢测试（deselect with '-m \"not slow\"')",
+    "integration: 集成测试（需要 DB/Redis）",
+    "unit: 单元测试",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# ==================== Coverage 配置 ====================
+[tool.coverage.run]
+source = ["app", "config", "extensions", "middleware", "schemas", "tasks", "adapters", "models", "routes", "services"]
+omit = [
+    "tests/*",
+    "migrations/*",
+    ".venv/*",
+    "instance/*",
+    "*/__pycache__/*",
+    "seed.py",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+]
+fail_under = 30  # 初始门槛 30%，逐步提升
+show_missing = true
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"

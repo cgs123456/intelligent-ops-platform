@@ -1,0 +1,61 @@
+# Git 属性配置
+# 文本文件统一 LF 换行（避免 Windows CRLF 跨平台问题）
+
+* text=auto eol=lf
+
+# Python 文件
+*.py text eol=lf
+*.pyi text eol=lf
+
+# 前端文件
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.vue text eol=lf
+
+# 配置文件
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+
+# Shell 脚本
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Markdown / 文档
+*.md text eol=lf
+*.txt text eol=lf
+
+# Makefile 必须用 tab 缩进
+Makefile text eol=lf
+
+# Dockerfile
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# 二进制文件（不进行换行符转换）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.sqlite binary
+*.xlsx binary
+*.docx binary
+
+# 导出时忽略
+.gitattributes export-ignore
+.gitignore export-ignore
+.editorconfig export-ignore
+.pre-commit-config.yaml export-ignore
+
+# 生成文件的 diff 策略
+*.min.js -diff
+*.min.css -diff
+*.lock -diff
