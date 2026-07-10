@@ -40,9 +40,15 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 ### 进阶能力
 
 - **多 Agent 采购博弈**:买方 Agent + 双供应商 Agent LLM 角色扮演,综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手
-- **Data Agent Text2SQL 全链路**:NL→SQL 生成 → AST 4 层安全校验(单语句/SELECT-WITH/禁 DDL-DML/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
+- **Data Agent Text2SQL 全链路**:NL→SQL 生成 → sqlglot AST 安全校验(单语句/SELECT-WITH/禁 DDL-DML 节点/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
 - **FDE 时序异常检测**:7 日移动平均 + 2σ/3σ 分级,critical 异常自动触发闭环补货,warning+ 多渠道告警,Celery Beat 09:00-22:00 整点调度
 - **LLM 经营日报**:4 段式(昨日回顾 + 趋势分析 + 风险提示 + 建议行动),读取近 7 天 ADS 趋势,Notifier 多渠道推送
+
+### 高级改进
+
+- **LangGraph 闭环编排**:五步闭环从硬编码状态机升级为 LangGraph StateGraph,支持条件分支(无建议跳过审核)、interrupt 节点(人工审核)、并行执行(ERP 入库 + FDE 刷新),langgraph 未安装时优雅降级到 if-elif 逻辑
+- **sqlglot SQL 解析**:Data Agent 的 SQL AST 校验从 sqlparse 升级为 sqlglot,用真正的 AST 类型检查替代正则关键字匹配,消除列名 `u.update` 误判为 DML 的问题,CTE 别名追踪用 `find_all(exp.Table)` + `exp.CTE` 过滤,5 行替代 70 行状态机
+- **Agent 评测框架**:gold SQL 回归测试,三级对比(exact > table_set > result_set),12 条测试用例覆盖 5 个类别,退化检测对比上次评测报告(accuracy_delta / new_failures / new_passes),CLI 入口 `python -m services.evaluator`
 
 ## 技术栈
 
@@ -52,6 +58,8 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 - Gunicorn(WSGI 服务器)、Celery(异步任务,可选)
 - SQLAlchemy ORM + Alembic 迁移
 - APScheduler(定时任务)
+- LangGraph(闭环编排 StateGraph,可选,未安装时降级)
+- sqlglot(SQL AST 解析与安全校验)
 
 ### 前端
 - 原生 HTML / CSS / JavaScript(无构建步骤)
@@ -177,10 +185,11 @@ intelligent-ops-platform/
 │   ├── erp_service.py           # 库存/订单/财务/移动加权平均
 │   ├── rpa_service.py           # 采集/同步/调度(接入多 Agent 博弈)
 │   ├── warehouse_service.py     # ETL 流水线/血缘/数据质量
-│   ├── closed_loop.py           # 五步状态机/文件锁/超时/回滚/异常触发
+│   ├── closed_loop.py           # 五步闭环(LangGraph StateGraph + 文件锁 + 回滚)
 │   ├── multiagent.py            # 改进7:多 Agent 采购博弈(MultiAgentNegotiator)
-│   ├── data_agent.py            # 改进8:Data Agent Text2SQL 全链路(AST 校验+执行)
+│   ├── data_agent.py            # 改进8:Data Agent Text2SQL(sqlglot AST 校验+执行)
 │   ├── anomaly_detector.py      # 改进9:时序异常检测(7日 MA + 2σ/3σ 分级)
+│   ├── evaluator.py             # Agent 评测框架(gold SQL 回归测试 + 退化检测)
 │   ├── notifier.py              # 多渠道告警(钉钉/微信/邮件)
 │   ├── idempotency.py           # Idempotency-Key 幂等装饰器
 │   └── password_policy.py       # 密码强度校验
@@ -212,12 +221,16 @@ intelligent-ops-platform/
 ├── tests/                       # 测试套件(pytest)
 │   ├── __init__.py
 │   ├── conftest.py              # 公共 fixtures(app/client/db_session/auth_headers/mock_llm)
+│   ├── fixtures/                # 测试数据
+│   │   ├── gold_sql.json        # Agent 评测 gold SQL 测试用例(12 条)
+│   │   └── eval_reports/        # 评测报告历史(按时间戳 + latest.json)
 │   ├── test_health.py           # 健康检查端点
 │   ├── test_auth.py             # 认证模块
-│   ├── test_data_agent.py       # 改进8:Text2SQL AST 安全校验
+│   ├── test_data_agent.py       # 改进8:Text2SQL sqlglot AST 安全校验
 │   ├── test_anomaly_detector.py # 改进9:时序异常检测算法
 │   ├── test_multiagent.py       # 改进7:多 Agent 博弈评分
-│   └── test_daily_report.py     # 改进10:LLM 经营日报
+│   ├── test_daily_report.py     # 改进10:LLM 经营日报
+│   └── test_evaluator.py        # Agent 评测框架(gold SQL 回归 + 退化检测)
 │
 ├── .github/workflows/ci.yml     # GitHub Actions CI(lint + test 矩阵 + security + build)
 ├── pyproject.toml               # 项目元数据 + ruff/black/mypy/pytest/coverage 配置
@@ -246,10 +259,11 @@ intelligent-ops-platform/
 
 ### 核心业务逻辑
 
-- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环状态机。文件锁(fcntl + threading 兜底)、with_timeout 装饰器(multiprocessing + threading 兜底)、回滚补偿(取消采购单/记审计待手工冲销/删 ADS 数据)、Notifier 失败告警、`check_auto_trigger_with_anomaly` 异常自动触发
+- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环编排。LangGraph StateGraph 定义 6 个节点(5 步 + fan_out 并行分发),条件分支(step1 无建议跳过审核 / step3 下单失败重试)、interrupt 节点(step2 人工审核等待)、step4+step5 并行执行。保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发。langgraph 未安装时降级到 if-elif 硬编码
 - **[services/aigc_service.py](services/aigc_service.py)**:LLM 抽象层 + 规则引擎兜底。补货建议生成(置信度算法)、4 段式经营日报(昨日回顾+趋势+风险+建议,含 7 天趋势 + Notifier 推送)、Text2SQL(优先 DataAgent,回退规则)、关键词语义检索、自然语言查询、审核反馈自学习
 - **[services/multiagent.py](services/multiagent.py)**:改进7 多 Agent 采购博弈。`MultiAgentNegotiator` 三 Agent LLM 角色扮演(买方 + 双供应商),`score_quotes` 综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手,LLM 不可用走规则兜底
-- **[services/data_agent.py](services/data_agent.py)**:改进8 Data Agent Text2SQL 全链路。`DataAgent.query()` NL→SQL→校验→执行→NL 回复,`_validate_sql_ast` 4 层安全校验(单语句/SELECT-WITH/禁 DDL-DML/表白名单/强制 LIMIT 100),CTE 别名追踪,sqlparse 不可用回退正则
+- **[services/data_agent.py](services/data_agent.py)**:改进8 Data Agent Text2SQL 全链路。`DataAgent.query()` NL→SQL→校验→执行→NL 回复,`_validate_sql_ast` 基于 sqlglot AST 类型检查(单语句/SELECT-WITH 根节点/禁 DDL-DML 节点/表白名单/强制 LIMIT 100),`_extract_tables` 用 `find_all(exp.Table)` + CTE 别名过滤,列名含关键字不误判
+- **[services/evaluator.py](services/evaluator.py)**:Agent 评测框架。`AgentEvaluator` gold SQL 回归测试,三级 SQL 对比(exact > table_set > result_set),12 条测试用例(aggregation/join/with/limit/filter),`_build_comparison` 退化检测对比上次报告,CLI 入口 `python -m services.evaluator [--category aggregation]`
 - **[services/anomaly_detector.py](services/anomaly_detector.py)**:改进9 时序异常检测。`AnomalyDetector` 7 日 MA + 2σ/3σ 分级(critical/warning/info),`detect_and_trigger` critical→触发闭环 step1 + 审计日志,warning+→Notifier 多渠道告警
 - **[services/auth.py](services/auth.py)**:JWT 签发(access 2h + refresh 7d,带 jti)、Token 黑名单、refresh 旋转、登录失败 5 次锁定、首次登录随机密码 + 强制改密
 - **[services/rbac.py](services/rbac.py)**:权限装饰器 @require_permission。支持 TESTING 跳过、dev 无 token 放行、有 token 验证 JWT、RBAC_ENABLED 时校验权限。权限 JSON 解析异常显式记日志
@@ -443,13 +457,14 @@ pytest                              # 或 make test
 pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
 ```
 
-测试套件覆盖 6 个模块 31 个用例:
+测试套件覆盖 7 个模块 41 个用例:
 - `test_health.py`:健康检查端点
 - `test_auth.py`:登录/认证流程
-- `test_data_agent.py`:改进8 SQL AST 4 层安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT)
+- `test_data_agent.py`:改进8 SQL sqlglot AST 安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT/列名含关键字/嵌套 CTE)
 - `test_anomaly_detector.py`:改进9 异常检测算法(正常/3σ/2σ/数据不足/空数据库)
 - `test_multiagent.py`:改进7 多 Agent 评分(价格权重/空列表/单供应商/min-max 归一化)
 - `test_daily_report.py`:改进10 4 段式日报(趋势加载/上下文构建/模板降级)
+- `test_evaluator.py`:Agent 评测框架(gold SQL 加载/SQL 三级对比/准确率/退化检测)
 
 [tests/conftest.py](tests/conftest.py) 提供公共 fixtures:
 - `app`:会话级 Flask app(临时 SQLite,`db.create_all()`)

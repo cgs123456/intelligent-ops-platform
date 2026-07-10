@@ -5,14 +5,14 @@ Data Agent — Text2SQL 全链路（改进8）
 
 1. 保留白名单安全底座（沿用 AIGCService.WHITELIST_TABLES）
 2. LLM NL→SQL 生成（注入 AIGCService 复用 LLM 后端）
-3. SQL AST 安全校验层（sqlparse 解析，验证所有 table 在白名单内 + 禁止 DDL/DML + 强制 LIMIT）
+3. SQL AST 安全校验层（sqlglot 解析，验证所有 table 在白名单内 + 禁止 DDL/DML + 强制 LIMIT）
 4. 执行查询（通过 SQLAlchemy session.execute 真执行，仅 SELECT，只读事务）
 5. LLM 将结果转为自然语言回复（含历史上下文，支持多轮）
 
 设计要点：
 - 与 AIGCService 解耦但可注入复用其 LLM 抽象层与 db_session
 - SQL 真执行：通过 db.session.execute(text(sql)) 执行，仅 SELECT，结果转 dict 列表
-- 安全兜底：sqlparse 不可用 / SQL 校验失败 / 执行异常 → 回退到 AIGCService._rule_query_ads()
+- 安全兜底：sqlglot 解析失败 / SQL 校验失败 / 执行异常 → 回退到 AIGCService._rule_query_ads()
 - 结果大小限制：最多 100 行，避免 LLM 上下文爆炸
 """
 
@@ -167,157 +167,107 @@ class DataAgent:
     # ---------------- 2. SQL AST 安全校验 ----------------
 
     def _validate_sql_ast(self, sql):
-        """SQL AST 安全校验：使用 sqlparse 解析 + 多层校验。
+        """SQL AST 安全校验：使用 sqlglot 解析 + AST 类型检查。
 
         校验项：
-        - 必须是单个 SELECT/WITH 语句
-        - 禁止 DDL/DML 关键字
+        - 必须是单个 SELECT/WITH 语句（parse_one 天然保证）
+        - 禁止 DDL/DML 节点（AST 类型检查，非正则匹配）
         - 所有 table 必须在白名单内
         - 必须有 LIMIT（没有则自动补 LIMIT 100）
-        - 禁止子查询中的写操作
         :return: 校验通过返回规范化 SQL，否则 None
         """
         if not sql:
             return None
 
         try:
-            import sqlparse
+            import sqlglot
+            from sqlglot import exp
         except ImportError:
-            logger.warning("[DataAgent] sqlparse 未安装，回退关键字校验")
-            return self._fallback_keyword_validate(sql)
+            logger.warning("[DataAgent] sqlglot 未安装，SQL 校验失败")
+            return None
 
+        # 清理 markdown 包裹
+        sql = sql.strip()
+        sql = re.sub(r"^```(?:sql)?\s*", "", sql)
+        sql = re.sub(r"\s*```$", "", sql)
+        sql = sql.strip().strip("`").rstrip(";").strip()
+
+        # 1. 解析（parse_one 天然保证单语句，多语句抛 ParseError）
         try:
-            statements = sqlparse.parse(sql)
+            expression = sqlglot.parse_one(sql, dialect="sqlite")
         except Exception as e:
             logger.warning("[DataAgent] SQL 解析失败: %s", e)
             return None
 
-        if not statements or len(statements) != 1:
-            logger.warning("[DataAgent] SQL 必须为单条语句，实际 %d 条", len(statements) if statements else 0)
+        # 2. 根节点类型校验：必须是 SELECT / Union（WITH 子句的 SELECT 也返回 exp.Select）
+        if not isinstance(expression, (exp.Select, exp.Union)):
+            logger.warning("[DataAgent] SQL 校验失败：非 SELECT/WITH 根节点，类型=%s", type(expression).__name__)
             return None
 
-        stmt = statements[0]
-        sql_text = str(stmt).strip().rstrip(";").strip()
-        low = sql_text.lower()
+        # 3. 禁止 DDL/DML 节点检查（AST 类型，非正则）
+        forbidden_node_types = (
+            exp.Insert,
+            exp.Update,
+            exp.Delete,
+            exp.Drop,
+            exp.Alter,
+            exp.Create,
+            exp.Merge,
+            exp.TruncateTable,
+        )
+        for node_type in forbidden_node_types:
+            if expression.find(node_type):
+                logger.warning("[DataAgent] SQL 校验失败：包含禁止节点 %s", node_type.__name__)
+                return None
 
-        # 1. 必须以 SELECT 或 WITH 开头
-        if not (low.startswith("select") or low.startswith("with")):
-            logger.warning("[DataAgent] SQL 校验失败：非 SELECT/WITH 开头")
-            return None
-
-        # 2. 遍历所有 token，检查禁止关键字 + 提取表名
-        tables_in_sql = set()
-        for token in stmt.flatten():
-            token_str = str(token).lower()
-            # 禁止关键字检查
-            for kw in self.FORBIDDEN_KEYWORDS:
-                # 精确匹配关键字（避免误判字段名包含 update 等）
-                if re.search(rf"\b{kw}\b", token_str):
-                    logger.warning("[DataAgent] SQL 校验失败：包含禁止关键字 %s", kw)
-                    return None
-
-        # 提取表名：查找 FROM / JOIN 后面的标识符
-        tables_in_sql = self._extract_tables(stmt)
-
-        # 3. 白名单校验
+        # 4. 表名提取 + 白名单校验
+        tables_in_sql = self._extract_tables(expression)
         for t in tables_in_sql:
             if t not in self.whitelist_tables:
                 logger.warning("[DataAgent] SQL 校验失败：表 %s 不在白名单内", t)
                 return None
 
-        # 4. 强制 LIMIT
-        if "limit" not in low:
-            sql_text = sql_text + " LIMIT 100"
-            logger.info("[DataAgent] SQL 无 LIMIT，自动补 LIMIT 100")
+        # 5. 强制 LIMIT（AST 操作）
+        if not expression.find(exp.Limit):
+            try:
+                expression.set("limit", exp.Limit(expression=exp.Literal.number(100)))
+                logger.info("[DataAgent] SQL 无 LIMIT，自动补 LIMIT 100")
+            except Exception as e:
+                logger.warning("[DataAgent] 追加 LIMIT 失败: %s", e)
+                return None
+
+        # 6. 生成规范化 SQL
+        try:
+            result_sql = expression.sql(dialect="sqlite")
+        except Exception as e:
+            logger.warning("[DataAgent] SQL 生成失败: %s", e)
+            return None
 
         logger.info("[DataAgent] SQL AST 校验通过，表=%s", tables_in_sql)
-        return sql_text
+        return result_sql
 
-    def _extract_tables(self, stmt, cte_aliases=None):
-        """从 sqlparse Statement 中提取 FROM / JOIN 后的表名。
+    def _extract_tables(self, expression):
+        """从 sqlglot Expression 中提取真实表名（过滤 CTE 别名）。
 
-        :param cte_aliases: WITH 子句定义的 CTE 别名集合（这些别名不是真实表，跳过白名单校验）
+        sqlglot AST 优势：
+        - exp.Table 节点的 .name 是表名（已去除 schema/db 前缀）
+        - exp.CTE 节点的 .alias 是 WITH 子句定义的别名
+        - 嵌套 WITH 作用域由 AST 结构天然区分，不需要手动维护 cte_aliases 状态
+
+        :param expression: sqlglot Expression 对象
+        :return: set[str] 真实表名集合（小写）
         """
-        if cte_aliases is None:
-            cte_aliases = set()
-        tables = set()
-        from_seen = False
-        join_seen = False
-        with_seen = False
-        for token in stmt.tokens:
-            # 跳过 whitespace 和 punctuation（不重置 from_seen/join_seen）
-            if token.is_whitespace or str(token).strip() in (",", ""):
-                continue
-            if token.is_keyword:
-                kw = str(token).lower()
-                if kw == "from":
-                    from_seen = True
-                    join_seen = False
-                    with_seen = False
-                    continue
-                elif kw.startswith("join"):
-                    join_seen = True
-                    from_seen = False
-                    with_seen = False
-                    continue
-                elif kw == "with":
-                    with_seen = True
-                    continue
-                elif kw in ("where", "group", "order", "limit", "having", "union"):
-                    from_seen = False
-                    join_seen = False
-                    with_seen = False
-                    continue
-            # WITH 子句：提取 CTE 别名 + 递归处理 CTE 内的真实表名
-            if with_seen and hasattr(token, "tokens"):
-                # CTE 定义形如 "alias AS (SELECT ...)"，alias 是 CTE 名
-                if hasattr(token, "get_real_name"):
-                    cte_name = token.get_real_name()
-                    if cte_name:
-                        cte_aliases.add(cte_name.lower())
-                # 递归提取 CTE 子查询内的真实表名
-                tables.update(self._extract_tables(token, cte_aliases))
-                continue
-            if from_seen or join_seen:
-                # 处理 Identifier 或 IdentifierList
-                if hasattr(token, "get_real_name"):
-                    name = token.get_real_name()
-                    if name:
-                        name_lower = name.lower()
-                        # CTE 别名跳过白名单校验（不是真实表）
-                        if name_lower not in cte_aliases:
-                            tables.add(name_lower)
-                elif hasattr(token, "get_identifiers"):
-                    for ident in token.get_identifiers():
-                        if hasattr(ident, "get_real_name"):
-                            name = ident.get_real_name()
-                            if name:
-                                name_lower = name.lower()
-                                if name_lower not in cte_aliases:
-                                    tables.add(name_lower)
-                elif token.ttype is None and hasattr(token, "tokens"):
-                    # 子查询 — 递归处理
-                    tables.update(self._extract_tables(token, cte_aliases))
-                from_seen = False
-                join_seen = False
-        return tables
+        from sqlglot import exp
 
-    def _fallback_keyword_validate(self, sql):
-        """sqlparse 不可用时的关键字校验兜底（与 AIGCService._validate_sql 一致）。"""
-        if not sql:
-            return None
-        s = sql.strip().strip("`").rstrip(";").strip()
-        low = s.lower()
-        if not (low.startswith("select") or low.startswith("with")):
-            return None
-        for kw in self.FORBIDDEN_KEYWORDS:
-            if re.search(rf"\b{kw}\b", low):
-                return None
-        if re.search(r"\(\s*(insert|update|delete|drop|alter|create)\s", low):
-            return None
-        if "limit" not in low:
-            s = s + " LIMIT 100"
-        return s
+        tables = set()
+        # 1. 收集所有 CTE 别名（WITH 子句定义的临时表名）
+        cte_aliases = {cte.alias.lower() for cte in expression.find_all(exp.CTE) if cte.alias}
+        # 2. 收集所有表引用，过滤掉 CTE 别名
+        for table in expression.find_all(exp.Table):
+            name = (table.name or "").lower()
+            if name and name not in cte_aliases:
+                tables.add(name)
+        return tables
 
     # ---------------- 3. 执行查询 ----------------
 

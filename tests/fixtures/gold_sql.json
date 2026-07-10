@@ -1,0 +1,86 @@
+[
+    {
+        "id": "case_001",
+        "question": "今天总销售额是多少？",
+        "expected_sql": "SELECT SUM(total_sales_amount) AS total FROM ads_daily_ops_report WHERE dt = date('now') LIMIT 100",
+        "expected_tables": ["ads_daily_ops_report"],
+        "category": "aggregation"
+    },
+    {
+        "id": "case_002",
+        "question": "近7天总采购额是多少？",
+        "expected_sql": "SELECT SUM(total_purchase_amount) AS total FROM ads_daily_ops_report WHERE dt >= date('now', '-6 days') LIMIT 100",
+        "expected_tables": ["ads_daily_ops_report"],
+        "category": "aggregation"
+    },
+    {
+        "id": "case_003",
+        "question": "当前库存货值是多少？",
+        "expected_sql": "SELECT SUM(inventory_value) AS total FROM ads_daily_ops_report WHERE dt = date('now') LIMIT 100",
+        "expected_tables": ["ads_daily_ops_report"],
+        "category": "aggregation"
+    },
+    {
+        "id": "case_004",
+        "question": "哪些产品有补货建议且近7天有销售记录？",
+        "expected_sql": "SELECT r.product_name, r.suggested_qty, s.sale_qty FROM ads_replenishment_suggest r JOIN dws_sales_sku_daily s ON r.product_id = s.product_id WHERE r.suggested_qty > 0 LIMIT 100",
+        "expected_tables": ["ads_replenishment_suggest", "dws_sales_sku_daily"],
+        "category": "join"
+    },
+    {
+        "id": "case_005",
+        "question": "查询补货建议与销量明细的关联，包含产品名和建议补货量",
+        "expected_sql": "SELECT r.product_name, r.recent_7d_sales, r.suggested_qty, s.sale_amount FROM ads_replenishment_suggest r JOIN dws_sales_sku_daily s ON r.product_id = s.product_id LIMIT 100",
+        "expected_tables": ["ads_replenishment_suggest", "dws_sales_sku_daily"],
+        "category": "join"
+    },
+    {
+        "id": "case_006",
+        "question": "最近7天日均销量是多少？",
+        "expected_sql": "WITH daily_sales AS (SELECT dt, SUM(sale_qty) AS daily_qty FROM dws_sales_sku_daily WHERE dt >= date('now', '-6 days') GROUP BY dt) SELECT AVG(daily_qty) AS avg_daily_qty FROM daily_sales LIMIT 100",
+        "expected_tables": ["dws_sales_sku_daily"],
+        "category": "with"
+    },
+    {
+        "id": "case_007",
+        "question": "最近7天日均销售额是多少？",
+        "expected_sql": "WITH daily_sales AS (SELECT dt, SUM(sale_amount) AS daily_amt FROM dws_sales_sku_daily WHERE dt >= date('now', '-6 days') GROUP BY dt) SELECT AVG(daily_amt) AS avg_daily_amt FROM daily_sales LIMIT 100",
+        "expected_tables": ["dws_sales_sku_daily"],
+        "category": "with"
+    },
+    {
+        "id": "case_008",
+        "question": "销量TOP5产品是哪些？",
+        "expected_sql": "SELECT product_name, sale_qty, sale_amount FROM dws_sales_sku_daily ORDER BY sale_qty DESC LIMIT 5",
+        "expected_tables": ["dws_sales_sku_daily"],
+        "category": "limit"
+    },
+    {
+        "id": "case_009",
+        "question": "补货建议量最大的前3个产品",
+        "expected_sql": "SELECT product_name, suggested_qty, suggested_supplier_name FROM ads_replenishment_suggest ORDER BY suggested_qty DESC LIMIT 3",
+        "expected_tables": ["ads_replenishment_suggest"],
+        "category": "limit"
+    },
+    {
+        "id": "case_010",
+        "question": "销售额最高的产品是哪个？",
+        "expected_sql": "SELECT product_name, sale_amount FROM dws_sales_sku_daily ORDER BY sale_amount DESC LIMIT 1",
+        "expected_tables": ["dws_sales_sku_daily"],
+        "category": "limit"
+    },
+    {
+        "id": "case_011",
+        "question": "昨天有哪些补货建议？",
+        "expected_sql": "SELECT product_name, suggested_qty, current_stock FROM ads_replenishment_suggest WHERE dt = date('now', '-1 day') LIMIT 100",
+        "expected_tables": ["ads_replenishment_suggest"],
+        "category": "filter"
+    },
+    {
+        "id": "case_012",
+        "question": "补货建议量大于50的产品有哪些？",
+        "expected_sql": "SELECT product_name, suggested_qty, current_stock FROM ads_replenishment_suggest WHERE suggested_qty > 50 LIMIT 100",
+        "expected_tables": ["ads_replenishment_suggest"],
+        "category": "filter"
+    }
+]
