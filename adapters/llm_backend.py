@@ -13,6 +13,7 @@
     LLM_PROVIDER=qwen    通义千问
     LLM_PROVIDER=openai  OpenAI 兼容协议（vLLM/Ollama/LM Studio 等）
 """
+
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -53,59 +54,60 @@ class OpenAICompatibleBackend(LLMBackend):
         Body: {"model": "...", "messages": [...], "temperature": ...}
         Response: {"choices": [{"message": {"content": "..."}}]}
     """
-    provider_name = 'openai-compatible'
+
+    provider_name = "openai-compatible"
 
     def __init__(self):
-        self.api_key = current_app.config.get('LLM_API_KEY', '')
-        self.api_url = current_app.config.get('LLM_API_URL', '')
-        self.model = current_app.config.get('LLM_MODEL', 'glm-4-flash')
+        self.api_key = current_app.config.get("LLM_API_KEY", "")
+        self.api_url = current_app.config.get("LLM_API_URL", "")
+        self.model = current_app.config.get("LLM_MODEL", "glm-4-flash")
 
     def available(self) -> bool:
         return bool(self.api_key) and bool(self.api_url)
 
     def call(self, messages, temperature=0.3):
         if not self.available():
-            logger.warning('[LLM-%s] api_key 或 api_url 未配置', self.provider_name)
+            logger.warning("[LLM-%s] api_key 或 api_url 未配置", self.provider_name)
             return None
         try:
             import requests
+
             headers = {
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json',
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
             }
             payload = {
-                'model': self.model,
-                'messages': messages,
-                'temperature': temperature,
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
             }
             resp = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            return data['choices'][0]['message']['content']
+            return data["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.warning('[LLM-%s] 调用失败 err=%s，回退规则引擎',
-                           self.provider_name, e)
+            logger.warning("[LLM-%s] 调用失败 err=%s，回退规则引擎", self.provider_name, e)
             return None
 
 
 class GLMBackend(OpenAICompatibleBackend):
-    provider_name = 'glm'
+    provider_name = "glm"
 
 
 class QwenBackend(OpenAICompatibleBackend):
-    provider_name = 'qwen'
+    provider_name = "qwen"
 
 
 def get_llm_backend() -> LLMBackend:
     """根据 LLM_PROVIDER 环境变量返回对应后端实例"""
-    provider = current_app.config.get('LLM_PROVIDER', 'rule').lower()
-    if provider == 'glm':
+    provider = current_app.config.get("LLM_PROVIDER", "rule").lower()
+    if provider == "glm":
         return GLMBackend()
-    if provider == 'qwen':
+    if provider == "qwen":
         return QwenBackend()
-    if provider == 'openai':
+    if provider == "openai":
         return OpenAICompatibleBackend()
-    if provider == 'rule':
+    if provider == "rule":
         return RuleLLMBackend()
-    logger.warning('未知 LLM_PROVIDER=%s，回退 rule', provider)
+    logger.warning("未知 LLM_PROVIDER=%s，回退 rule", provider)
     return RuleLLMBackend()

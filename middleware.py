@@ -6,6 +6,7 @@
 - request_id 写入 g 对象 + 响应头 X-Request-Id
 - 日志格式自动带上 request_id，便于全链路排查
 """
+
 import logging
 import uuid
 
@@ -15,12 +16,14 @@ from flask import current_app, g, request
 # 全局 request_id 过滤器（所有日志自动带上）
 class RequestIdFilter(logging.Filter):
     """日志过滤器：从 Flask g 对象读取 request_id 注入到 LogRecord"""
+
     def filter(self, record):
         try:
             from flask import g
-            record.request_id = getattr(g, 'request_id', '-')
+
+            record.request_id = getattr(g, "request_id", "-")
         except Exception:
-            record.request_id = '-'
+            record.request_id = "-"
         return True
 
 
@@ -31,18 +34,18 @@ def init_request_id(app):
     @app.before_request
     def _attach_request_id():
         # 1. 优先使用客户端透传的 X-Request-Id
-        rid = request.headers.get('X-Request-Id', '').strip()
+        rid = request.headers.get("X-Request-Id", "").strip()
         # 2. 校验格式（防止注入异常字符到日志）
-        if not rid or len(rid) > 64 or not all(c.isalnum() or c in '-_' for c in rid):
+        if not rid or len(rid) > 64 or not all(c.isalnum() or c in "-_" for c in rid):
             rid = uuid.uuid4().hex[:16]
         g.request_id = rid
 
     @app.after_request
     def _expose_request_id(response):
         # 响应头带 X-Request-Id，便于客户端 + 日志关联
-        rid = getattr(g, 'request_id', None)
+        rid = getattr(g, "request_id", None)
         if rid:
-            response.headers['X-Request-Id'] = rid
+            response.headers["X-Request-Id"] = rid
         return response
 
 
@@ -55,7 +58,7 @@ def configure_request_id_logging():
     for handler in root.handlers:
         handler.addFilter(filter_obj)
     # 也加到 app logger
-    for name in ('app', 'services', 'routes', 'models'):
+    for name in ("app", "services", "routes", "models"):
         lg = logging.getLogger(name)
         for handler in lg.handlers:
             handler.addFilter(filter_obj)

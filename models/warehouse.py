@@ -2,14 +2,16 @@
 ODS 贴源 / DWD 明细 / DWS 汇总 / ADS 应用
 + ETL 元数据 + 数据质量日志 + 血缘追踪
 """
+
 from datetime import date, datetime
 
 from extensions import db
 
 # ==================== ODS 贴源层 ====================
 
+
 class OdsSaleOrder(db.Model):
-    __tablename__ = 'ods_sale_order'
+    __tablename__ = "ods_sale_order"
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     product_id = db.Column(db.Integer, index=True)
@@ -23,7 +25,7 @@ class OdsSaleOrder(db.Model):
 
 
 class OdsPurchaseOrder(db.Model):
-    __tablename__ = 'ods_purchase_order'
+    __tablename__ = "ods_purchase_order"
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     supplier_id = db.Column(db.Integer)
@@ -37,7 +39,7 @@ class OdsPurchaseOrder(db.Model):
 
 
 class OdsStockMove(db.Model):
-    __tablename__ = 'ods_stock_move'
+    __tablename__ = "ods_stock_move"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     qty = db.Column(db.Integer)
@@ -50,9 +52,11 @@ class OdsStockMove(db.Model):
 
 # ==================== DWD 明细层 ====================
 
+
 class DwdSalesFact(db.Model):
     """销售事实表（星型模型事实表）"""
-    __tablename__ = 'dwd_sales_order_di'
+
+    __tablename__ = "dwd_sales_order_di"
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     product_id = db.Column(db.Integer, index=True)
@@ -66,7 +70,8 @@ class DwdSalesFact(db.Model):
 
 class DwdStockFact(db.Model):
     """库存移动事实表"""
-    __tablename__ = 'dwd_stock_move_di'
+
+    __tablename__ = "dwd_stock_move_di"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -78,9 +83,11 @@ class DwdStockFact(db.Model):
 
 # ==================== DWS 汇总层 ====================
 
+
 class DwsSalesSkuDaily(db.Model):
     """SKU 日销售汇总"""
-    __tablename__ = 'dws_sales_sku_daily'
+
+    __tablename__ = "dws_sales_sku_daily"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -91,7 +98,8 @@ class DwsSalesSkuDaily(db.Model):
 
 class DwsInventoryDaily(db.Model):
     """库存日快照"""
-    __tablename__ = 'dws_inventory_snapshot_daily'
+
+    __tablename__ = "dws_inventory_snapshot_daily"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -101,9 +109,11 @@ class DwsInventoryDaily(db.Model):
 
 # ==================== ADS 应用层 ====================
 
+
 class AdsReplenishmentSuggest(db.Model):
     """补货建议源数据"""
-    __tablename__ = 'ads_replenishment_suggest'
+
+    __tablename__ = "ads_replenishment_suggest"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -119,7 +129,8 @@ class AdsReplenishmentSuggest(db.Model):
 
 class AdsDailyOpsReport(db.Model):
     """经营日报"""
-    __tablename__ = 'ads_daily_ops_report'
+
+    __tablename__ = "ads_daily_ops_report"
     id = db.Column(db.Integer, primary_key=True)
     dt = db.Column(db.Date, unique=True, index=True)
     total_sales_amount = db.Column(db.Numeric(12, 2))
@@ -132,9 +143,11 @@ class AdsDailyOpsReport(db.Model):
 
 # ==================== ETL 元数据与治理 ====================
 
+
 class EtlMeta(db.Model):
     """ETL 执行元数据（增量拉取的水位线）"""
-    __tablename__ = 'etl_meta'
+
+    __tablename__ = "etl_meta"
     id = db.Column(db.Integer, primary_key=True)
     layer = db.Column(db.String(8), nullable=False, index=True)  # ODS/DWD/DWS/ADS
     table_name = db.Column(db.String(64), nullable=False, index=True)
@@ -142,13 +155,14 @@ class EtlMeta(db.Model):
     last_success_at = db.Column(db.DateTime)
     last_watermark = db.Column(db.DateTime)  # 增量水位线（最后处理的业务时间）
     rows_processed = db.Column(db.Integer, default=0)
-    status = db.Column(db.String(16), default='pending')  # pending/running/success/failed
+    status = db.Column(db.String(16), default="pending")  # pending/running/success/failed
     error_msg = db.Column(db.Text)
 
 
 class DataQualityLog(db.Model):
     """数据质量测试日志（模拟 dbt tests）"""
-    __tablename__ = 'data_quality_log'
+
+    __tablename__ = "data_quality_log"
     id = db.Column(db.Integer, primary_key=True)
     table_name = db.Column(db.String(64), nullable=False, index=True)
     test_name = db.Column(db.String(64), nullable=False)  # not_null/unique/accepted_values/range
@@ -161,7 +175,8 @@ class DataQualityLog(db.Model):
 
 class DataLineage(db.Model):
     """数据血缘追踪（上游表 → 下游表）"""
-    __tablename__ = 'data_lineage'
+
+    __tablename__ = "data_lineage"
     id = db.Column(db.Integer, primary_key=True)
     upstream_table = db.Column(db.String(64), nullable=False, index=True)
     downstream_table = db.Column(db.String(64), nullable=False, index=True)
