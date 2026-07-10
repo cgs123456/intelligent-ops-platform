@@ -7,9 +7,11 @@ P0-2: JWT 认证 + RBAC 权限校验。
 import json
 import logging
 from functools import wraps
-from flask import request, jsonify, g, current_app
+
+from flask import current_app, g, jsonify, request
+
 from extensions import db
-from models.system import User, Role
+from models.system import Role, User
 
 logger = logging.getLogger(__name__)
 

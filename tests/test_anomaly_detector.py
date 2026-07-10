@@ -1,5 +1,6 @@
 """FDE 时序异常检测测试"""
 from datetime import date, timedelta
+
 import pytest
 
 

@@ -14,8 +14,8 @@
 新增真实实现：在 adapters/rpa_backends/selenium_backend.py 实现.SeleniumBackend 类，
 然后在 RPA_BACKEND 环境变量配置 selenium 即可。
 """
-from .rpa_backend import RPABackend, get_rpa_backend
 from .llm_backend import LLMBackend, get_llm_backend
+from .rpa_backend import RPABackend, get_rpa_backend
 
 __all__ = [
     'RPABackend', 'get_rpa_backend',

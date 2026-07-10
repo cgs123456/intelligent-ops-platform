@@ -50,7 +50,9 @@ ignore = [
     "E501",   # line too long（由 black 处理）
     "B008",   # Do not perform function call in argument defaults（Flask 常用模式）
     "B904",   # raise from（项目大量使用，统一改造影响大）
+    "SIM105", # try-except-pass → contextlib.suppress（项目容错模式，保持显式可读性）
     "SIM108", # if-else 三元表达式（可读性优先）
+    "SIM115", # 文件打开未用 context manager（_file_lock 需返回句柄，不能用 with）
     "N805",   # 方法第一个参数名（Flask 路由函数不强制 self）
     "N806",   # 变量名大小写（业务代码有大量大写常量）
     "E402",   # import 不是文件顶部（Flask app context 内 import 常见）

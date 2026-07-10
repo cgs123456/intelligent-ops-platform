@@ -1,5 +1,6 @@
 """外部数据源模型（供 RPA 采集）"""
-from datetime import datetime, date
+from datetime import date, datetime
+
 from extensions import db
 
 

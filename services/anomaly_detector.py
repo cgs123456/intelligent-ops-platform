@@ -16,8 +16,8 @@ FDE 时序异常检测（改进9）
 """
 import logging
 import statistics
-from datetime import date, timedelta
 from collections import defaultdict
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -166,12 +166,11 @@ class AnomalyDetector:
         # 连续 3 天低于均值 50% → info（销量下滑趋势）
         if severity is None:
             recent_3 = history_before[-3:] if len(history_before) >= 3 else []
-            if len(recent_3) == 3 and mean > 0:
-                if all(q < mean * 0.5 for q in recent_3):
-                    severity = 'info'
-                    deviation = (sum(recent_3) / 3 - mean) / mean
-                    reason = (f'连续 3 天销量低于均值 50%'
-                              f'（近3日 {recent_3}，均值 {mean:.1f}）')
+            if len(recent_3) == 3 and mean > 0 and all(q < mean * 0.5 for q in recent_3):
+                severity = 'info'
+                deviation = (sum(recent_3) / 3 - mean) / mean
+                reason = (f'连续 3 天销量低于均值 50%'
+                          f'（近3日 {recent_3}，均值 {mean:.1f}）')
 
         if severity is None:
             return None

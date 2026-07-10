@@ -76,7 +76,7 @@ def db_session(app):
     connection = db.engine.connect()
     transaction = connection.begin()
 
-    options = dict(bind=connection, binds={})
+    options = {'bind': connection, 'binds': {}}
     session = db._make_scoped_session(options=options)
 
     # 替换 db.session 让业务代码使用带事务的 session
@@ -98,11 +98,12 @@ def auth_headers(app, client):
     RBAC_ENABLED=False 时返回空 dict（dev 模式放行）。
     需要认证的测试用例应显式开启 RBAC 并使用此 fixture。
     """
+    import json
+
+    from extensions import db
+    from models.system import Role, User
     from services.auth import AuthService
     from services.password_policy import hash_password
-    from models.system import User, Role
-    from extensions import db
-    import json
 
     with app.app_context():
         # 确保 admin 角色和用户存在（密码已知）

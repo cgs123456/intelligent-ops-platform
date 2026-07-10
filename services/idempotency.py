@@ -13,7 +13,9 @@
 import json
 import logging
 from functools import wraps
-from flask import request, jsonify, current_app
+
+from flask import current_app, jsonify, request
+
 from extensions import cache
 
 logger = logging.getLogger(__name__)

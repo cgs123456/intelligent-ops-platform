@@ -22,14 +22,14 @@ FDE 数仓服务层（WarehouseService）
      services.rpa_service（延迟导入，避免循环依赖）。
 """
 import logging
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 
-from sqlalchemy import text, func
 from flask import current_app
+from sqlalchemy import func, text
 
-from extensions import db, cache
+from extensions import cache, db
+from models.erp import Product, PurchaseOrder, SaleOrder, StockMove
 from models.warehouse import *  # noqa: F401,F403  ODS/DWD/DWS/ADS 模型及治理表
-from models.erp import Product, SaleOrder, PurchaseOrder, StockMove
 
 logger = logging.getLogger(__name__)
 

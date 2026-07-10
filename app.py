@@ -2,14 +2,16 @@
 Flask 主应用 · 中型企业智能运营平台（重构版）
 启动：python app.py → http://127.0.0.1:5000
 """
-import os
-import signal
 import atexit
 import logging
+import os
+import signal
 from logging.handlers import RotatingFileHandler
-from flask import Flask, render_template, jsonify
+
+from flask import Flask, jsonify, render_template
+
 from config import config
-from extensions import db, cache, migrate, limiter
+from extensions import cache, db, limiter, migrate
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +135,7 @@ def create_app(config_class=None):
             app.config['OPENAPI_URL_PREFIX'] = '/docs'
             app.config['OPENAPI_SWAGGER_UI_PATH'] = '/swagger'
             app.config['OPENAPI_SWAGGER_UI_URL'] = 'https://cdn.jsdelivr.net/npm/swagger-ui-dist/'
-            api = Api(app)
+            Api(app)
             logger.info('API 文档已启用: /docs/swagger')
         except ImportError:
             logger.warning('flask-smorest 未安装，跳过 API 文档')

@@ -12,8 +12,8 @@ LLM 不可用时回退到规则模拟（确保 Demo 永远可用）。
 
 模块独立，但通过注入 AIGCService 复用其 LLM 抽象层。
 """
-import random
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 

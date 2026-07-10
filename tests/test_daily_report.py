@@ -1,5 +1,6 @@
 """LLM 经营日报测试"""
 from datetime import date, timedelta
+
 import pytest
 
 
@@ -8,9 +9,9 @@ class TestDailyReport:
 
     def test_load_7d_trend_empty(self, app):
         """空数据库 _load_7d_trend 返回空列表"""
-        from services.aigc_service import AIGCService
-        from models.warehouse import AdsDailyOpsReport
         from extensions import db
+        from models.warehouse import AdsDailyOpsReport
+        from services.aigc_service import AIGCService
         with app.app_context():
             # 清理可能残留的 ADS 数据
             db.session.query(AdsDailyOpsReport).delete()
@@ -21,8 +22,8 @@ class TestDailyReport:
 
     def test_build_report_context_no_trend(self, app):
         """无趋势时上下文仅含当日指标"""
-        from services.aigc_service import AIGCService
         from models.warehouse import AdsDailyOpsReport
+        from services.aigc_service import AIGCService
         with app.app_context():
             svc = AIGCService()
             fake = AdsDailyOpsReport(
@@ -36,8 +37,8 @@ class TestDailyReport:
 
     def test_build_report_context_with_trend(self, app):
         """有趋势时上下文含 7 天趋势表 + 变化统计"""
-        from services.aigc_service import AIGCService
         from models.warehouse import AdsDailyOpsReport
+        from services.aigc_service import AIGCService
         with app.app_context():
             svc = AIGCService()
             fake = AdsDailyOpsReport(
@@ -57,8 +58,8 @@ class TestDailyReport:
 
     def test_template_4_sections_with_trend(self, app):
         """规则模板 4 段式输出（含趋势）"""
-        from services.aigc_service import AIGCService
         from models.warehouse import AdsDailyOpsReport
+        from services.aigc_service import AIGCService
         with app.app_context():
             svc = AIGCService()
             fake = AdsDailyOpsReport(
@@ -78,8 +79,8 @@ class TestDailyReport:
 
     def test_template_no_trend_fallback(self, app):
         """无趋势时模板降级"""
-        from services.aigc_service import AIGCService
         from models.warehouse import AdsDailyOpsReport
+        from services.aigc_service import AIGCService
         with app.app_context():
             svc = AIGCService()
             fake = AdsDailyOpsReport(

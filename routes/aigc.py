@@ -6,7 +6,9 @@ P1-1 架构: 已移除内嵌 Celery 任务定义，统一到 tasks.py
 import json
 import time
 import uuid
-from flask import Blueprint, jsonify, request, Response, stream_with_context
+
+from flask import Blueprint, Response, jsonify, request, stream_with_context
+
 from services.aigc_service import AIGCService
 from services.rbac import require_permission
 

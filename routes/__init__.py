@@ -5,15 +5,17 @@
   现统一改为 redirect 到对应 /api/v1/xxx 新路径，让新路径的 @require_permission
   装饰器统一生效。/api/dashboard 无对应 v1 路由，保留实现但加 @require_permission。
 """
-from flask import jsonify, request, redirect, url_for
-from .erp import bp as erp_bp
-from .rpa import bp as rpa_bp
-from .fde import bp as fde_bp
-from .aigc import bp as aigc_bp
-from .loop import bp as loop_bp
-from .auth import bp as auth_bp
-from .audit import bp as audit_bp
+from flask import jsonify, redirect, request, url_for
+
 from services.rbac import require_permission
+
+from .aigc import bp as aigc_bp
+from .audit import bp as audit_bp
+from .auth import bp as auth_bp
+from .erp import bp as erp_bp
+from .fde import bp as fde_bp
+from .loop import bp as loop_bp
+from .rpa import bp as rpa_bp
 
 
 def register_blueprints(app):
@@ -30,9 +32,9 @@ def register_blueprints(app):
     @app.route('/api/dashboard')
     @require_permission('erp:read')
     def dashboard():
+        from services.aigc_service import AIGCService
         from services.erp_service import ERPService
         from services.warehouse_service import WarehouseService
-        from services.aigc_service import AIGCService
         inv = ERPService().get_inventory_summary()
         acct = ERPService().get_account_summary()
         ads = WarehouseService().get_ads_data()

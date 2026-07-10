@@ -11,17 +11,18 @@ AIGC 服务层
 - 向量检索用关键词重叠度模拟语义匹配，避免引入向量库依赖。
 - 所有写操作有显式事务边界（commit / rollback）。
 """
+import logging
 import re
 import uuid
-import logging
-import requests
-from datetime import datetime, date
 from collections import Counter
+from datetime import date, datetime
 
+import requests
 from flask import current_app
+
 from extensions import db
-from models.aigc import Suggestion, DailyReport, ChatHistory, SuggestionFeedback
-from models.warehouse import AdsReplenishmentSuggest, AdsDailyOpsReport
+from models.aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
+from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
 
 logger = logging.getLogger(__name__)
 
@@ -981,8 +982,6 @@ class AIGCService:
         )
 
 # 多 Agent 采购博弈（改进7）：从独立模块 re-export，保持 AIGCService 模块统一入口
-from services.multiagent import MultiAgentNegotiator  # noqa: E402,F401
-
-
 # Data Agent（改进8）：Text2SQL 全链路 re-export，保持 AIGCService 模块统一入口
 from services.data_agent import DataAgent  # noqa: E402,F401
+from services.multiagent import MultiAgentNegotiator  # noqa: E402,F401

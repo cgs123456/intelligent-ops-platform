@@ -13,15 +13,15 @@ RPA 层服务（模拟影刀/Selenium 采集）
 - 调度接口（状态查询 + 定时任务入口，供 APScheduler 调用）
 - 审计日志（采集/下单/同步留痕）
 """
-import time
-import random
 import logging
-from datetime import datetime, date
+import random
+import time
+from datetime import date, datetime
 
 from config import Config
 from extensions import db
-from models.external import ExtSupplierQuote, ExtEcommerceOrder
 from models.erp import Product, Supplier
+from models.external import ExtEcommerceOrder, ExtSupplierQuote
 from models.system import AuditLog
 
 logger = logging.getLogger(__name__)
@@ -98,8 +98,8 @@ class RPAService:
         """
         logger.info('[RPA-quote] 当天无报价，启动多 Agent 博弈模拟')
         try:
-            from services.multiagent import MultiAgentNegotiator
             from models.erp import Product, Supplier
+            from services.multiagent import MultiAgentNegotiator
             negotiator = MultiAgentNegotiator(db_session=self.session)
 
             # 取低库存产品（stock_qty < safety_stock * 2），最多 12 个

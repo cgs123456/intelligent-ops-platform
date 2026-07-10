@@ -1,10 +1,11 @@
 """种子数据初始化 · 含多仓库、供应商联系人、电商订单（带重试字段）"""
-from datetime import datetime, timedelta, date
-import random
 import logging
+import random
+from datetime import date, datetime, timedelta
+
 from extensions import db
-from models.erp import (Product, Supplier, Warehouse, SaleOrder, StockMove)
-from models.external import ExtSupplierQuote, ExtEcommerceOrder
+from models.erp import Product, SaleOrder, StockMove, Supplier, Warehouse
+from models.external import ExtEcommerceOrder, ExtSupplierQuote
 
 logger = logging.getLogger(__name__)
 

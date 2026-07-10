@@ -15,8 +15,8 @@
     RPA_BACKEND=selenium  使用 SeleniumRpaBackend（需 pip install selenium）
     RPA_BACKEND=yidao     使用影刀 SDK 调用（需影刀运行时）
 """
-import os
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 

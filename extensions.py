@@ -2,11 +2,11 @@
 
 所有扩展在此实例化，app 初始化时调用 init_app 绑定。
 """
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
 from flask_caching import Cache
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_migrate import Migrate
+from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 migrate = Migrate()

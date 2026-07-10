@@ -9,10 +9,11 @@
 注意：Celery 未安装时，本模块的 task 装饰器退化为 no-op，相关 import 仍可用，
     但 .delay() 调用会抛 RuntimeError。路由层已捕获并返回 503。
 """
-import os
 import logging
-from extensions import celery_app
+import os
+
 from config import config as default_config
+from extensions import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,9 @@ def generate_daily_report_async(self, dt_str=None, push=True):
     """
     try:
         _get_app()
-        from services.aigc_service import AIGCService
         from datetime import datetime
+
+        from services.aigc_service import AIGCService
         dt = datetime.strptime(dt_str, '%Y-%m-%d').date() if dt_str else None
         result = AIGCService().generate_daily_report(dt, push=push)
         logger.info('[celery] daily report generated, pushed=%s', push)

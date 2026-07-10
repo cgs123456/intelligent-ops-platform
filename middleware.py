@@ -6,9 +6,10 @@
 - request_id 写入 g 对象 + 响应头 X-Request-Id
 - 日志格式自动带上 request_id，便于全链路排查
 """
-import uuid
 import logging
-from flask import g, request, current_app
+import uuid
+
+from flask import current_app, g, request
 
 
 # 全局 request_id 过滤器（所有日志自动带上）

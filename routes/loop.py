@@ -1,7 +1,9 @@
 """闭环路由 Blueprint + SSE 进度推送（含心跳）"""
 import json
 import time
-from flask import Blueprint, jsonify, request, Response, stream_with_context
+
+from flask import Blueprint, Response, jsonify, request, stream_with_context
+
 from services.closed_loop import ClosedLoop
 from services.rbac import require_permission
 
@@ -53,8 +55,9 @@ def run_step_async():
 def get_task_status(task_id):
     """查询异步任务状态"""
     try:
-        from extensions import celery_app
         from celery.result import AsyncResult
+
+        from extensions import celery_app
         if celery_app is None:
             return jsonify({'error': 'Celery 未启用'}), 503
         r = AsyncResult(task_id, app=celery_app)

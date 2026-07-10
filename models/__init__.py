@@ -1,14 +1,22 @@
 """models 包初始化 · 按层组织数据模型"""
-from .erp import (Product, Supplier, Warehouse, PurchaseOrder, SaleOrder,
-                  StockMove, AccountMove, ReturnOrder)
-from .external import ExtSupplierQuote, ExtEcommerceOrder
-from .warehouse import (OdsSaleOrder, OdsPurchaseOrder, OdsStockMove,
-                        DwdSalesFact, DwdStockFact,
-                        DwsSalesSkuDaily, DwsInventoryDaily,
-                        AdsReplenishmentSuggest, AdsDailyOpsReport,
-                        EtlMeta, DataQualityLog, DataLineage)
-from .aigc import Suggestion, DailyReport, ChatHistory, SuggestionFeedback
-from .system import LoopState, AuditLog, User, Role, user_roles
+from .aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
+from .erp import AccountMove, Product, PurchaseOrder, ReturnOrder, SaleOrder, StockMove, Supplier, Warehouse
+from .external import ExtEcommerceOrder, ExtSupplierQuote
+from .system import AuditLog, LoopState, Role, User, user_roles
+from .warehouse import (
+                  AdsDailyOpsReport,
+                  AdsReplenishmentSuggest,
+                  DataLineage,
+                  DataQualityLog,
+                  DwdSalesFact,
+                  DwdStockFact,
+                  DwsInventoryDaily,
+                  DwsSalesSkuDaily,
+                  EtlMeta,
+                  OdsPurchaseOrder,
+                  OdsSaleOrder,
+                  OdsStockMove,
+)
 
 __all__ = [
     # ERP

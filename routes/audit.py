@@ -6,10 +6,12 @@
 - 仅 admin 角色可访问
 """
 from datetime import datetime
+
 from flask import Blueprint, jsonify, request
-from services.rbac import require_permission
-from models.system import AuditLog
+
 from extensions import db
+from models.system import AuditLog
+from services.rbac import require_permission
 
 bp = Blueprint('audit', __name__, url_prefix='/api/v1/audit')
 
@@ -95,8 +97,9 @@ def list_logs():
 @require_permission('audit:read')
 def stats():
     """审计日志统计：按 action 聚合最近 30 天"""
-    from sqlalchemy import func
     from datetime import datetime, timedelta
+
+    from sqlalchemy import func
     since = datetime.now() - timedelta(days=30)
     rows = (db.session.query(AuditLog.action, func.count(AuditLog.id))
             .filter(AuditLog.created_at >= since)

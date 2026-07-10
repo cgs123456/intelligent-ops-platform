@@ -1,8 +1,9 @@
 """ERP 路由 Blueprint"""
 from flask import Blueprint, jsonify, request
+
 from services.erp_service import ERPService
-from services.rbac import require_permission
 from services.idempotency import idempotent
+from services.rbac import require_permission
 
 bp = Blueprint('erp', __name__, url_prefix='/api/v1/erp')
 

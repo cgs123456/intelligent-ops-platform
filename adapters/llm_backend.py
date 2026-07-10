@@ -13,9 +13,10 @@
     LLM_PROVIDER=qwen    通义千问
     LLM_PROVIDER=openai  OpenAI 兼容协议（vLLM/Ollama/LM Studio 等）
 """
-import os
 import logging
+import os
 from abc import ABC, abstractmethod
+
 from flask import current_app
 
 logger = logging.getLogger(__name__)

@@ -1,7 +1,8 @@
 """RPA 路由 Blueprint"""
 from flask import Blueprint, jsonify, request
-from services.rpa_service import RPAService
+
 from services.rbac import require_permission
+from services.rpa_service import RPAService
 
 bp = Blueprint('rpa', __name__, url_prefix='/api/v1/rpa')
 

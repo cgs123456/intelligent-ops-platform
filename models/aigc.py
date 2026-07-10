@@ -1,5 +1,6 @@
 """AIGC 层模型"""
-from datetime import datetime, date
+from datetime import date, datetime
+
 from extensions import db
 
 

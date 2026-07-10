@@ -1,8 +1,9 @@
 """认证路由 Blueprint（P0-2 + P0 安全加固）"""
-from flask import Blueprint, jsonify, request, g
+from flask import Blueprint, g, jsonify, request
+
+from extensions import limiter
 from services.auth import AuthService, jwt_required
 from services.rbac import require_permission
-from extensions import limiter
 
 bp = Blueprint('auth', __name__, url_prefix='/api/v1/auth')
 

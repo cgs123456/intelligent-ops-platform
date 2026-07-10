@@ -20,9 +20,10 @@
 - 单渠道失败不影响其他渠道
 - 无任何配置时降级为仅记日志（dev 模式可接受）
 """
-import os
 import logging
+import os
 import threading
+
 from flask import current_app
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,6 @@ class Notifier:
             return
         try:
             import requests
-            color = self._DINGTALK_COLORS.get(level, 'red')
             ctx_str = '\n'.join(f'- {k}: {v}' for k, v in context.items()) if context else ''
             payload = {
                 'msgtype': 'markdown',
@@ -149,8 +149,8 @@ class Notifier:
             return
         try:
             import smtplib
-            from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
+            from email.mime.text import MIMEText
             cfg = self._mail_config
             ctx_str = '\n'.join(f'  {k}: {v}' for k, v in context.items()) if context else ''
             body = (

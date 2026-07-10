@@ -12,15 +12,21 @@ ERP 服务层（模拟 Odoo 进销存 + 财务核心链路）
 
 对应 Odoo 模块：purchase / sale / stock / account / inventory。
 """
-import random
 import logging
+import random
 from datetime import datetime
 from decimal import Decimal
 
 from extensions import db
 from models.erp import (
-    Product, Supplier, Warehouse,
-    PurchaseOrder, SaleOrder, StockMove, AccountMove, ReturnOrder,
+    AccountMove,
+    Product,
+    PurchaseOrder,
+    ReturnOrder,
+    SaleOrder,
+    StockMove,
+    Supplier,
+    Warehouse,
 )
 from models.system import AuditLog
 

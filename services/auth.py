@@ -10,16 +10,18 @@
 - 权限 JSON 解析异常显式记日志，不静默吞
 """
 import json
-import uuid
-import secrets
 import logging
+import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+
 import jwt
-from flask import request, jsonify, g, current_app
+from flask import current_app, g, jsonify, request
 from werkzeug.security import check_password_hash
-from models.system import User, AuditLog, TokenBlacklist
+
 from extensions import db
+from models.system import AuditLog, TokenBlacklist, User
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +221,7 @@ class AuthService:
     @staticmethod
     def change_password(user_id, old_password, new_password, ip=None):
         """修改密码：校验旧密码 → 校验新密码强度 → 更新 + 吊销所有旧 token"""
-        from services.password_policy import validate_password, hash_password
+        from services.password_policy import hash_password, validate_password
         user = db.session.get(User, user_id)
         if not user:
             raise ValueError('用户不存在')

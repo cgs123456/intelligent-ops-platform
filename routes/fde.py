@@ -1,9 +1,11 @@
 """FDE 路由 Blueprint"""
 import re
 from datetime import datetime
+
 from flask import Blueprint, jsonify, request
-from services.warehouse_service import WarehouseService
+
 from services.rbac import require_permission
+from services.warehouse_service import WarehouseService
 
 bp = Blueprint('fde', __name__, url_prefix='/api/v1/fde')
 
@@ -59,7 +61,7 @@ def backfill():
     try:
         start = datetime.strptime(start_str, '%Y-%m-%d').date()
         end = datetime.strptime(end_str, '%Y-%m-%d').date()
-    except ValueError as e:
+    except ValueError:
         return jsonify({'error': '无效日期'}), 400
 
     if start > end:
@@ -84,8 +86,9 @@ def anomalies():
         date: 可选，检测日期（YYYY-MM-DD，默认今天）
         trigger: 可选，是否自动触发闭环补货（true/false，默认 false）
     """
+    from datetime import date, datetime
+
     from services.anomaly_detector import AnomalyDetector
-    from datetime import datetime, date
 
     detector = AnomalyDetector()
     target_date = None

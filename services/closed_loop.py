@@ -2,14 +2,15 @@
 五步闭环：AIGC建议 → 人审核 → RPA下单 → ERP记账 → FDE刷新
 支持：跨进程文件锁、超时处理、回滚机制、自动触发、SSE进度
 """
-import os
-import time
 import logging
+import os
 import threading
+import time
 from datetime import datetime
 from functools import wraps
+
 from extensions import db
-from models.system import LoopState, AuditLog
+from models.system import AuditLog, LoopState
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def _try_acquire_file_lock(f):
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
-    except (IOError, OSError):
+    except OSError:
         return False
 
 
@@ -161,8 +162,8 @@ class ClosedLoop:
     @staticmethod
     def _services():
         from services.aigc_service import AIGCService
-        from services.rpa_service import RPAService
         from services.erp_service import ERPService
+        from services.rpa_service import RPAService
         from services.warehouse_service import WarehouseService
         return AIGCService, RPAService, ERPService, WarehouseService
 
@@ -407,7 +408,7 @@ class ClosedLoop:
         ).all()
         # 直接查本轮新增的采购单（按 run_id 关联的 suggestion_id 反查）
         sug_ids = []
-        step3_detail = step3_logs[0].detail if step3_logs else ''
+        _step3_detail = step3_logs[0].detail if step3_logs else ''  # noqa: F841
         # 从 detail 中提取 PO ID（detail 形如 '下单 产品A→供应商(...); ...'）
         # 更可靠的方式：通过 suggestion_id 关联
         from models.aigc import Suggestion
@@ -433,7 +434,7 @@ class ClosedLoop:
         仅记审计 + 提示人工冲红。
         """
         # 通过 audit_log 查本轮 step4 入库的采购单
-        step4_logs = AuditLog.query.filter_by(
+        _step4_logs = AuditLog.query.filter_by(  # noqa: F841
             action='loop_step_done', target_type='loop',
             target_id=f'{run_id}-4',
         ).all()
@@ -445,7 +446,9 @@ class ClosedLoop:
         通过 EtlMeta 的 last_run_at 关联本轮时间。
         """
         from models.warehouse import (
-            AdsReplenishmentSuggest, AdsDailyOpsReport, EtlMeta,
+            AdsDailyOpsReport,
+            AdsReplenishmentSuggest,
+            EtlMeta,
         )
         compensations = []
         # 找到本轮 step5 执行的 ETL 元数据
@@ -511,8 +514,8 @@ class ClosedLoop:
 
     @staticmethod
     def _step4_erp_receive(actor='system'):
-        from models.erp import PurchaseOrder, Product
         from extensions import db as _db
+        from models.erp import Product, PurchaseOrder
         _, _, ERPService, _ = ClosedLoop._services()
         confirmed_pos = PurchaseOrder.query.filter_by(status='confirmed').all()
         if not confirmed_pos:

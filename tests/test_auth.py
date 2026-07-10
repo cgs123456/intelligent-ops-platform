@@ -11,10 +11,11 @@ class TestAuth:
 
     def test_login_wrong_password(self, client, app):
         """错误密码登录失败"""
-        from services.password_policy import hash_password
-        from models.system import User, Role
-        from extensions import db
         import json
+
+        from extensions import db
+        from models.system import Role, User
+        from services.password_policy import hash_password
 
         with app.app_context():
             role = Role.query.filter_by(name='admin').first()
@@ -36,10 +37,11 @@ class TestAuth:
 
     def test_login_success(self, client, app):
         """正确密码登录成功并返回 token"""
-        from services.password_policy import hash_password
-        from models.system import User, Role
-        from extensions import db
         import json
+
+        from extensions import db
+        from models.system import Role, User
+        from services.password_policy import hash_password
 
         with app.app_context():
             role = Role.query.filter_by(name='admin').first()

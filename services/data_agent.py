@@ -15,8 +15,8 @@ Data Agent — Text2SQL 全链路（改进8）
 - 安全兜底：sqlparse 不可用 / SQL 校验失败 / 执行异常 → 回退到 AIGCService._rule_query_ads()
 - 结果大小限制：最多 100 行，避免 LLM 上下文爆炸
 """
-import re
 import logging
+import re
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
