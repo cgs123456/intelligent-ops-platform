@@ -37,7 +37,7 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 - 健康检查端点(live/ready/deep)
 - Prometheus 指标 + Swagger API 文档(可选)
 
-### 进阶能力(改进 7-10)
+### 进阶能力
 
 - **多 Agent 采购博弈**:买方 Agent + 双供应商 Agent LLM 角色扮演,综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手
 - **Data Agent Text2SQL 全链路**:NL→SQL 生成 → AST 4 层安全校验(单语句/SELECT-WITH/禁 DDL-DML/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
@@ -277,8 +277,6 @@ intelligent-ops-platform/
 ```bash
 pip install -r requirements.txt
 python app.py
-# 访问 http://127.0.0.1:5000
-```
 
 默认使用 SQLite + 内存缓存,无需 Redis/PostgreSQL。开发环境会自动加载种子数据。
 
@@ -563,10 +561,4 @@ celery -A tasks.celery_app beat --loglevel=info
 
 未启动 worker 时,异步接口 `/loop/run-step-async` 返回 503,同步接口仍可用。
 
-### 健康检查
-
-```bash
-curl http://localhost/health/live   # 存活
-curl http://localhost/health/ready  # 就绪
-curl http://localhost/health        # 深度(含磁盘)
 ```
