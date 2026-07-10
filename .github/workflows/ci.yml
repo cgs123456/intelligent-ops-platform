@@ -51,7 +51,7 @@ jobs:
         env:
           FLASK_ENV: development
           TESTING: '1'
-        run: pytest --cov=. --cov-report=xml --cov-report=term-missing -v
+        run: pytest --cov=. --cov-report=xml --cov-report=term-missing -v --no-cov-on-fail
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4
