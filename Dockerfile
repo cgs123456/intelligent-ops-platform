@@ -1,5 +1,5 @@
 # 语法说明：使用多阶段构建的 BuildKit 语法（向后兼容）
-FROM python:3.13-slim AS base
+FROM python:3.12-slim AS base
 
 WORKDIR /app
 
