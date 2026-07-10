@@ -287,7 +287,6 @@ cp .env.example .env
 # 编辑 .env,必须设置:SECRET_KEY、DB_PASSWORD、CORS_ORIGINS
 
 docker compose -f docker-compose.prod.yml up -d
-# 访问 https://localhost(自签证书需浏览器放行)
 ```
 
 启动的服务:nginx(80/443)、web(5000)、db(PostgreSQL)、redis、db-backup(cron)。
