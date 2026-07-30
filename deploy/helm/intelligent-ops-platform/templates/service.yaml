@@ -1,0 +1,16 @@
+{{- /* ClusterIP Service：集群内访问 web 容器 */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "intelligent-ops-platform.selectorLabels" . | nindent 4 }}

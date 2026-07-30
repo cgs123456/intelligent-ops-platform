@@ -26,7 +26,9 @@ jobs:
       - name: Black format check
         run: black --check .
       - name: Mypy type check
-        run: mypy --ignore-missing-imports --no-strict-optional app.py config.py extensions.py || true
+        # P1-18: 逐步扩大 mypy 检查范围，当前覆盖核心模块
+        # 禁用 no-untyped-def（项目大量函数无注解）+ import-untyped（Flask 库类型缺失）
+        run: mypy --ignore-missing-imports --no-strict-optional --disable-error-code=no-untyped-def --disable-error-code=import-untyped app.py config.py extensions.py middleware.py schemas.py services/
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -51,7 +53,8 @@ jobs:
         env:
           FLASK_ENV: development
           TESTING: '1'
-        run: pytest --cov=. --cov-report=xml --cov-report=term-missing -v --no-cov-on-fail
+        # P1: 强制 coverage 门槛 40%，未达标 CI 失败
+        run: pytest --cov=. --cov-report=xml --cov-report=term-missing --cov-fail-under=40 -v
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4
@@ -73,13 +76,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
       - name: Run bandit security scan
-        run: bandit -r . -x tests,.venv,migrations -ll || true
+        # P1-20: HIGH 级别安全漏洞阻断 CI，MEDIUM 仅告警（-lll = 只报 HIGH）
+        run: bandit -r . -x tests,.venv,migrations -lll
+      - name: Run pip-audit for dependency CVE scan
+        # P2-5: 依赖 CVE 扫描，允许失败（新 CVE 不阻断 CI，需人工审查）
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
 
   build:
-    name: Docker Build
+    name: Docker Build & Scan
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    # P2-25: build 依赖 security，确保安全扫描通过后才构建镜像
+    needs: [lint, test, security]
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t intelligent-ops-platform:ci .
+      - name: Trivy image security scan
+        # P1-19: 镜像漏洞扫描，HIGH/CRITICAL 阻断
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: intelligent-ops-platform:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Save image SHA tag
+        run: docker tag intelligent-ops-platform:ci intelligent-ops-platform:$(git rev-parse --short HEAD)

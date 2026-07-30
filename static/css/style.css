@@ -246,3 +246,68 @@ th.sortable:hover { background: var(--primary-bg); }
 .guide-card p { color: var(--text2); margin-bottom: 12px; }
 .guide-card ol { margin: 0 0 20px 20px; color: var(--text); line-height: 1.8; }
 .guide-card .btn { width: 100%; }
+
+/* P1-12: 可访问性增强 */
+/* 跳转链接：默认隐藏，键盘聚焦时显示 */
+.skip-link {
+    position: absolute; top: -40px; left: 0;
+    background: var(--primary); color: #fff;
+    padding: 8px 16px; z-index: 10000;
+    text-decoration: none; border-radius: 0 0 4px 0;
+    transition: top 0.2s;
+}
+.skip-link:focus { top: 0; }
+
+/* 键盘焦点环：所有可交互元素聚焦时显示 */
+*:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+/* 屏幕阅读器专用文本（视觉隐藏但可读） */
+.sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+
+/* Tab 按钮 ARIA 选中状态 */
+.tab[aria-selected="true"] {
+    background: var(--primary); color: #fff;
+}
+
+/* 模态框焦点陷阱样式 */
+.modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 9998; display: flex; align-items: center; justify-content: center;
+}
+
+/* P1-12: 响应式增强 - 移动端卡片式布局 */
+@media (max-width: 768px) {
+    .tabs {
+        flex-wrap: wrap; gap: 4px;
+    }
+    .tab { flex: 1 1 30%; min-width: 80px; font-size: 12px; padding: 8px 4px; }
+    .header-title h1 { font-size: 16px; }
+    .header-meta { font-size: 12px; flex-wrap: wrap; gap: 4px; }
+    .metric-card { padding: 12px; }
+    .metric-value { font-size: 20px; }
+    .card { padding: 12px; }
+    .panel-grid { gap: 12px; }
+}
+
+@media (max-width: 480px) {
+    .tabs { flex-direction: column; }
+    .tab { width: 100%; text-align: left; }
+    .metrics { grid-template-columns: 1fr; }
+    .header { padding: 8px 12px; }
+    .header-title .logo { display: none; }
+}
+
+/* 减少动画（尊重用户偏好） */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}

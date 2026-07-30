@@ -16,9 +16,16 @@ from extensions import cache, db, limiter, migrate
 
 logger = logging.getLogger(__name__)
 
+# P1-12: 优雅关闭标志位，防止信号 + atexit 重复触发
+_shutdown_done = False
+
 
 def setup_logging(app):
-    """P1-3: 配置日志：stdout + 文件轮转 + request_id 贯穿（便于 ELK 采集）"""
+    """P1-3: 配置日志：stdout + 文件轮转 + request_id 贯穿（便于 ELK 采集）。
+
+    P0-2: 生产环境默认 JSON 结构化日志（便于 Loki/ELK 解析），
+    开发环境保留可读文本格式。可通过 LOG_JSON=false 强制关闭。
+    """
     log_level = logging.INFO if app.config.get("ENV") == "production" else logging.DEBUG
     log_dir = os.path.join(app.instance_path, "logs")
     try:
@@ -26,10 +33,30 @@ def setup_logging(app):
     except Exception:
         pass
 
-    # P0-4: 日志格式带 request_id，便于全链路排查
-    fmt = "%(asctime)s [%(levelname)s] %(name)s [req=%(request_id)s] [%(filename)s:%(lineno)d]: %(message)s"
+    # P0-2: 生产默认 JSON，开发默认文本；环境变量可覆盖
+    use_json = os.getenv("LOG_JSON", "1" if app.config.get("ENV") == "production" else "0") == "1"
 
-    handlers = [logging.StreamHandler()]  # stdout
+    if use_json:
+        # JSON 结构化日志（python-json-logger）
+        try:
+            from pythonjsonlogger import jsonlogger
+
+            fmt = jsonlogger.JsonFormatter(
+                "%(timestamp)s %(level)s %(name)s %(message)s %(request_id)s %(filename)s %(lineno)d",
+                rename_fields={"timestamp": "@timestamp", "level": "severity", "name": "logger"},
+                json_ensure_ascii=False,
+            )
+        except ImportError:
+            # 降级为文本格式
+            fmt = "%(asctime)s [%(levelname)s] %(name)s [req=%(request_id)s] [%(filename)s:%(lineno)d]: %(message)s"
+    else:
+        # P0-4: 文本格式带 request_id，便于全链路排查
+        fmt = "%(asctime)s [%(levelname)s] %(name)s [req=%(request_id)s] [%(filename)s:%(lineno)d]: %(message)s"
+
+    formatter = fmt if isinstance(fmt, str) else fmt
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    handlers = [stream_handler]
 
     # 文件轮转：每个文件最大 10MB，保留 10 个
     try:
@@ -39,12 +66,12 @@ def setup_logging(app):
             backupCount=10,
             encoding="utf-8",
         )
-        file_handler.setFormatter(logging.Formatter(fmt))
+        file_handler.setFormatter(formatter)
         handlers.append(file_handler)
     except Exception as e:
         logger.warning(f"文件日志初始化失败：{e}")
 
-    logging.basicConfig(level=log_level, format=fmt, handlers=handlers)
+    logging.basicConfig(level=log_level, handlers=handlers)
     # P0-4: 给所有 handler 注入 request_id 过滤器
     from middleware import configure_request_id_logging
 
@@ -75,6 +102,32 @@ def create_app(config_class=None):
     # 初始化扩展
     db.init_app(app)
     migrate.init_app(app, db)  # P2-1: Flask-Migrate
+
+    # P0-2: OpenTelemetry 分布式追踪（必须在 db.init_app 之后，才能 instrument db.engine）
+    if os.getenv("OTEL_ENABLED", "0") == "1":
+        try:
+            from opentelemetry import trace
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.instrumentation.flask import FlaskInstrumentor
+            from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+            service_name = os.getenv("OTEL_SERVICE_NAME", "intelligent-ops-platform")
+            resource = Resource.create({"service.name": service_name, "deployment.env": app.config.get("ENV", "dev")})
+            provider = TracerProvider(resource=resource)
+            otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
+            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint)))
+            trace.set_tracer_provider(provider)
+
+            FlaskInstrumentor().instrument_app(app)
+            SQLAlchemyInstrumentor().instrument(engine=db.engine)
+            logger.info("OpenTelemetry 已启用: service=%s endpoint=%s", service_name, otlp_endpoint)
+        except ImportError:
+            logger.warning("opentelemetry 包未安装，跳过分布式追踪")
+        except Exception as e:
+            logger.warning("OpenTelemetry 初始化失败：%s", e)
 
     # 缓存：未配 Redis 用 simple
     cache_config = {"CACHE_TYPE": app.config["CACHE_TYPE"]}
@@ -127,6 +180,10 @@ def create_app(config_class=None):
 
             metrics = PrometheusMetrics(app, path="/metrics")
             metrics.info("app_info", "Application info", version="1.0.0", env=app.config["ENV"])
+            # P1-10: 业务 KPI 指标 + 慢查询监控
+            from services.metrics import init_metrics
+
+            init_metrics(app)
         except ImportError:
             logger.warning("prometheus-flask-exporter 未安装，跳过指标采集")
 
@@ -220,44 +277,44 @@ def create_app(config_class=None):
                 return jsonify({"status": "not_ready", "redis": "fail"}), 503
         return jsonify({"status": "ready"}), 200
 
-    # P1-10: 统一错误处理（不暴露内部异常详情）
+    # P0-3: 统一错误处理（使用统一 envelope，不暴露内部异常详情）
+    from services.response import ErrorCode, error_response
+
     @app.errorhandler(400)
     def bad_request(e):
-        # 仅返回通用消息，不返回 str(e) 防止泄漏内部字段
-        # 业务层如需带具体错误信息，应自行 jsonify({'error': 'xxx'}), 400
-        return jsonify({"error": "请求参数错误"}), 400
+        return error_response(ErrorCode.BAD_REQUEST, "请求参数错误")
 
     @app.errorhandler(401)
     def unauthorized(e):
-        return jsonify({"error": "未认证，请先登录"}), 401
+        return error_response(ErrorCode.UNAUTHORIZED, "未认证，请先登录")
 
     @app.errorhandler(403)
     def forbidden(e):
-        return jsonify({"error": "无权限访问"}), 403
+        return error_response(ErrorCode.FORBIDDEN, "无权限访问")
 
     @app.errorhandler(404)
     def not_found(e):
-        return jsonify({"error": "接口不存在"}), 404
+        return error_response(ErrorCode.NOT_FOUND, "接口不存在")
 
     @app.errorhandler(429)
     def rate_limited(e):
-        return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
+        return error_response(ErrorCode.RATE_LIMITED, "请求过于频繁，请稍后再试")
 
     @app.errorhandler(500)
     def server_error(e):
         logger.exception("服务器内部错误: %s", e)
-        return jsonify({"error": "服务器内部错误"}), 500
+        return error_response(ErrorCode.INTERNAL_ERROR, "服务器内部错误")
 
     @app.errorhandler(Exception)
     def handle_exception(e):
         logger.exception("未处理异常: %s", e)
-        return jsonify({"error": "服务器内部错误"}), 500
+        return error_response(ErrorCode.INTERNAL_ERROR, "服务器内部错误")
 
     # 初始化数据库 + 种子数据
     with app.app_context():
         db.create_all()
 
-        # RBAC 初始化（所有环境都执行，幂等）
+        # RBAC 初始化（仅在 RBAC_ENABLED=True 时执行，幂等）
         try:
             from services.rbac import init_rbac_data
 
@@ -275,24 +332,31 @@ def create_app(config_class=None):
         else:
             logger.info("非开发环境跳过种子数据")
 
-    # P1-7: 优雅关闭
+    # P1-7 + P1-12 + P2-24: 优雅关闭（闭包捕获 app 引用，不依赖 current_app）
     def graceful_shutdown(signum, frame):
+        global _shutdown_done
+        # P1-12: 防止信号 + atexit 重复执行
+        if _shutdown_done:
+            return
+        _shutdown_done = True
         logger.info("收到关闭信号 %s，开始优雅关闭...", signum)
         try:
-            # 检查是否有可用的 app context（atexit 触发时可能已无 context）
-            from flask import current_app
-
-            if not current_app:
-                return
-            db.session.remove()
-            logger.info("数据库连接已关闭")
+            # P2-24: 直接用闭包捕获的 app 引用推送 context，不依赖 current_app
+            with app.app_context():
+                db.session.remove()
+                logger.info("数据库连接已关闭")
         except Exception:
-            # 进程退出时无 app context 属正常情况，静默处理
+            # 进程退出时异常属正常情况，静默处理
             pass
         logger.info("优雅关闭完成")
 
-    signal.signal(signal.SIGTERM, graceful_shutdown)
+    # P1-13: 信号处理兼容 Windows（SIGTERM 在 Windows 不生效，用 SIGBREAK 替代）
     signal.signal(signal.SIGINT, graceful_shutdown)
+    if os.name == "nt":
+        # Windows 下 SIGTERM 不可靠，注册 SIGBREAK（Ctrl+Break）
+        signal.signal(signal.SIGBREAK, graceful_shutdown)
+    else:
+        signal.signal(signal.SIGTERM, graceful_shutdown)
     atexit.register(graceful_shutdown, None, None)
 
     return app

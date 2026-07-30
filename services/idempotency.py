@@ -27,8 +27,17 @@ _TTL_SECONDS = 24 * 3600  # 24 小时
 
 
 def _cache_key(idem_key):
-    """构造 Redis 键名"""
-    return f"{_KEY_PREFIX}{idem_key}"
+    """构造 Redis 键名（P0-8: 加入 user_id 防止跨用户数据泄漏）"""
+    # P0-8: 从 g.current_user 获取用户身份，避免不同用户用相同 key 时返回他人数据
+    user_id = "anon"
+    try:
+        from flask import g
+
+        if hasattr(g, "current_user") and g.current_user:
+            user_id = g.current_user.get("sub", "anon")
+    except Exception:
+        pass
+    return f"{_KEY_PREFIX}{user_id}:{idem_key}"
 
 
 def _is_redis_available():
@@ -88,23 +97,36 @@ def idempotent(ttl_seconds=_TTL_SECONDS):
             # 2. 首次请求：执行业务
             response = f(*args, **kwargs)
 
-            # 仅缓存成功的响应（2xx），失败响应不缓存
+            # P1-5: 2xx 缓存长 TTL（24h），4xx 缓存短 TTL（60s），5xx 不缓存
             try:
                 status_code = (
                     response[1]
                     if isinstance(response, tuple)
                     else (response.status_code if hasattr(response, "status_code") else 200)
                 )
-                if 200 <= int(status_code) < 300:
+                status_int = int(status_code)
+                if 200 <= status_int < 300:
+                    # 成功响应：缓存完整 TTL
                     body = response[0].get_json() if hasattr(response[0], "get_json") else response[0]
                     cached_payload = json.dumps(
                         {
-                            "status": int(status_code),
+                            "status": status_int,
                             "body": body if isinstance(body, (dict, list)) else {"raw": str(body)},
                         },
                         ensure_ascii=False,
                     )
                     cache.set(cache_key, cached_payload, timeout=ttl_seconds)
+                elif 400 <= status_int < 500:
+                    # 4xx 客户端错误：缓存短 TTL（60s），避免重复校验浪费资源
+                    body = response[0].get_json() if hasattr(response[0], "get_json") else response[0]
+                    cached_payload = json.dumps(
+                        {
+                            "status": status_int,
+                            "body": body if isinstance(body, (dict, list)) else {"raw": str(body)},
+                        },
+                        ensure_ascii=False,
+                    )
+                    cache.set(cache_key, cached_payload, timeout=60)
             except Exception as e:
                 logger.warning("写入幂等缓存失败 key=%s err=%s", idem_key[:8], e)
 

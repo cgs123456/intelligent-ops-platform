@@ -185,6 +185,21 @@ def detect_anomalies_async(self):
         raise
 
 
+@_task(name="tasks.cleanup_token_blacklist_async")
+def cleanup_token_blacklist_async(self):
+    """P1-10: 清理已过期的 Token 黑名单记录，避免表无限增长。"""
+    try:
+        _get_app()
+        from models.system import TokenBlacklist
+
+        count = TokenBlacklist.cleanup_expired()
+        logger.info("[celery] token blacklist cleanup done: removed=%d", count)
+        return {"removed": count}
+    except Exception as exc:
+        logger.exception("[celery] token blacklist cleanup failed")
+        raise
+
+
 # ==================== 定时任务（Celery Beat）====================
 if celery_app is not None:
     celery_app.conf.beat_schedule = {
@@ -207,6 +222,11 @@ if celery_app is not None:
         "hourly-anomaly-detect": {
             "task": "tasks.detect_anomalies_async",
             "schedule": "0 9-22 * * *",
+        },
+        # P1-10: 每天凌晨 03:00 清理过期的 Token 黑名单记录
+        "daily-token-blacklist-cleanup": {
+            "task": "tasks.cleanup_token_blacklist_async",
+            "schedule": "0 3 * * *",
         },
     }
     celery_app.conf.timezone = "Asia/Shanghai"

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: intelligent-ops-platform
+description: 中型企业智能运营平台 Helm Chart
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+maintainers: []

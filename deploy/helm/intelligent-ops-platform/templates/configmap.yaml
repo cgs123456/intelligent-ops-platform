@@ -1,0 +1,26 @@
+{{- /* ConfigMap：存放非敏感配置（Flask 环境、RBAC、缓存、限流、Gunicorn 等） */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}-config
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+data:
+  # Flask 运行环境
+  FLASK_ENV: {{ .Values.env.FLASK_ENV | quote }}
+  FLASK_DEBUG: "0"
+  # RBAC 权限校验（生产强制开启）
+  RBAC_ENABLED: {{ .Values.env.RBAC_ENABLED | quote }}
+  # Prometheus 指标开关
+  METRICS_ENABLED: {{ .Values.env.METRICS_ENABLED | quote }}
+  # 缓存类型（生产使用 redis）
+  CACHE_TYPE: {{ .Values.env.CACHE_TYPE | quote }}
+  CACHE_DEFAULT_TIMEOUT: {{ .Values.env.CACHE_DEFAULT_TIMEOUT | quote }}
+  # 限流配置（Flask-Limiter）
+  RATELIMIT_DEFAULT: {{ .Values.env.RATELIMIT_DEFAULT | quote }}
+  RATELIMIT_AUTH: {{ .Values.env.RATELIMIT_AUTH | quote }}
+  # LLM 适配器（默认 rule 规则引擎，无需 API Key）
+  LLM_PROVIDER: {{ .Values.env.LLM_PROVIDER | quote }}
+  # Gunicorn 运行参数
+  GUNICORN_WORKERS: {{ .Values.env.GUNICORN_WORKERS | quote }}
+  GUNICORN_LOG_LEVEL: {{ .Values.env.GUNICORN_LOG_LEVEL | quote }}

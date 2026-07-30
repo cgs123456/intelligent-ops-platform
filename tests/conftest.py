@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("FLASK_ENV", "development")
 os.environ.setdefault("TESTING", "1")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-pytest-only")
-os.environ.setdefault("RBAC_ENABLED", "0")  # 测试默认关闭 RBAC，单测按需开启
+os.environ.setdefault("RBAC_ENABLED", "0")  # 测试默认关闭 RBAC（P0-7: 生产默认开启，测试显式关闭）
 os.environ.setdefault("LLM_PROVIDER", "rule")  # 测试默认走规则引擎
 os.environ.setdefault("CACHE_TYPE", "simple")
 

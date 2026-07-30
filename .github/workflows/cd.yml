@@ -1,0 +1,159 @@
+name: CD - Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "部署动作"
+        required: true
+        default: "deploy"
+        type: choice
+        options:
+          - deploy
+          - rollback
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==================== 构建 ====================
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image tag for deployment
+        run: |
+          echo "IMAGE_TAG=${{ steps.meta.outputs.version }}" >> $GITHUB_ENV
+          echo "IMAGE_DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+
+  # ==================== 部署（蓝绿） ====================
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record deployment (记录当前版本用于回滚)
+        run: |
+          mkdir -p .deploy
+          # 保存当前部署的 image tag 和时间
+          echo "{\"tag\":\"${{ needs.build.outputs.image_tag }}\",\"digest\":\"${{ needs.build.outputs.image_digest }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"commit\":\"${{ github.sha }}\"}" > .deploy/current.json
+          # 如果存在 current.json，备份为 previous.json（用于回滚）
+          if [ -f .deploy/current.json ]; then
+            cp .deploy/current.json .deploy/previous.json 2>/dev/null || true
+          fi
+
+      - name: Deploy via SSH (蓝绿切换)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/ops-platform
+            # 拉取最新镜像
+            docker-compose -f docker-compose.prod.yml pull
+            # 蓝绿：先启动新实例，健康检查通过后切换 nginx upstream
+            docker-compose -f docker-compose.prod.yml up -d --no-deps --scale ops_backend=2
+            # 等待新实例就绪
+            sleep 10
+            # 健康检查
+            for i in {1..5}; do
+              if curl -sf http://localhost:5000/health/ready; then
+                echo "New instance healthy"
+                break
+              fi
+              sleep 5
+            done
+            # 重载 nginx
+            docker exec ops_nginx nginx -s reload
+            echo "Deployed ${{ needs.build.outputs.image_tag }}"
+
+  # ==================== 回滚 ====================
+  rollback:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'rollback'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read previous deployment
+        id: prev
+        run: |
+          if [ -f .deploy/previous.json ]; then
+            echo "tag=$(jq -r .tag .deploy/previous.json)" >> $GITHUB_OUTPUT
+            echo "Found previous tag: $(jq -r .tag .deploy/previous.json)"
+          else
+            echo "No previous deployment found for rollback"
+            exit 1
+          fi
+
+      - name: Rollback via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/ops-platform
+            # 拉取上一个版本镜像
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.prev.outputs.tag }}
+            # 回滚部署
+            docker-compose -f docker-compose.prod.yml up -d --no-deps
+            sleep 10
+            # 健康检查
+            for i in {1..5}; do
+              if curl -sf http://localhost:5000/health/ready; then
+                echo "Rollback successful"
+                docker exec ops_nginx nginx -s reload
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Rollback health check failed!"
+            exit 1

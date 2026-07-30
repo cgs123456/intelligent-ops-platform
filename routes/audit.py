@@ -119,3 +119,27 @@ def stats():
             "items": [{"action": a, "count": c} for a, c in rows],
         }
     )
+
+
+@bp.route("/verify-chain")
+@require_permission("audit:read")
+def verify_chain():
+    """P0-1: 校验审计日志 hash chain 完整性，检测是否被篡改。
+
+    Query 参数：
+      - start_id: 起始记录 id（可选）
+      - end_id: 结束记录 id（可选）
+    返回：
+      - { "tampered_id": null, "ok": true }  表示完整
+      - { "tampered_id": 123, "ok": false }  表示 id=123 的记录被篡改
+    """
+    start_id = request.args.get("start_id", type=int)
+    end_id = request.args.get("end_id", type=int)
+    tampered_id = AuditLog.verify_chain(start_id=start_id, end_id=end_id)
+    return jsonify(
+        {
+            "ok": tampered_id is None,
+            "tampered_id": tampered_id,
+            "message": "审计日志完整" if tampered_id is None else f"记录 id={tampered_id} 被篡改或断链",
+        }
+    )

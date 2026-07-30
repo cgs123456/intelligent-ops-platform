@@ -12,7 +12,17 @@ psycopg2-binary==2.9.9
 python-dotenv==1.0.1
 prometheus-flask-exporter==0.23.1
 marshmallow>=3.0,<4.0
-sqlglot>=23.0,<31.0
+flask-smorest>=0.44,<0.50  # P0-3: API 文档 + Schema 校验
+sqlglot>=23.0,<26.0  # P2-4: 缩窄到实际测试过的版本范围
 requests>=2.28,<3.0
 langgraph>=0.2,<1.0
 langchain-core>=0.3,<1.0
+# P0-2: 可观测性 - JSON 日志 + OpenTelemetry
+python-json-logger>=2.0,<4.0
+opentelemetry-distro>=0.40,<1.0
+opentelemetry-exporter-otlp-proto-http>=1.20,<2.0
+opentelemetry-instrumentation-flask>=0.40,<1.0
+opentelemetry-instrumentation-sqlalchemy>=0.40,<1.0
+# P0-8: 安全增强 - 字段加密 + MFA TOTP
+cryptography>=42.0,<46.0
+pyotp>=2.9,<3.0

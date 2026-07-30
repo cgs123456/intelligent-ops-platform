@@ -1,0 +1,172 @@
+# ===================================================================
+# 智能运营平台 Helm Chart 默认配置
+# 所有参数均已参数化，可按环境覆盖
+# ===================================================================
+
+# 副本数（HPA 启用后由 HPA 接管副本数，此值仅在 HPA 禁用时生效）
+replicaCount: 2
+
+# 镜像配置
+image:
+  repository: intelligent-ops-platform
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# 私有镜像仓库拉取凭据（无需则留空）
+imagePullSecrets: []
+
+# 覆盖 chart 名称 / 完整名称（留空则自动生成）
+nameOverride: ""
+fullnameOverride: ""
+
+# ServiceAccount 配置
+serviceAccount:
+  # 是否创建 ServiceAccount（应用无需访问 K8s API，默认关闭 automount）
+  create: true
+  automount: false
+  annotations: {}
+  # 名称留空则使用 fullname
+  name: ""
+
+# Pod 级安全上下文（非 root 运行）
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Pod 注解（如 Prometheus 抓取注解等）
+podAnnotations: {}
+
+# 容器级安全上下文（只读根文件系统 + 非 root + 禁止提权）
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Service
+service:
+  type: ClusterIP
+  port: 5000
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: ops.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # tls 启用示例：
+  # tls:
+  #   - secretName: ops-tls
+  #     hosts:
+  #       - ops.example.com
+
+# 容器资源限制（requests/limits）
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# 健康探针（与 Dockerfile HEALTHCHECK 端点保持一致）
+probes:
+  liveness:
+    path: /health/live
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    path: /health/ready
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# ===================================================================
+# 弹性伸缩（HPA / autoscaling）
+# 触发条件：当 Pod 平均 CPU 利用率 > 70% 或平均内存利用率 > 80% 时扩容；
+#           指标回落且稳定窗口（300s）后平滑缩容。
+# 注意：启用 HPA 后 Deployment.spec.replicas 由 HPA 接管，
+#       values.replicaCount 不再生效，仅作为初始/下限参考。
+# ===================================================================
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  # 缩容行为策略：平滑缩容，避免抖动
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        # 每 60s 最多缩容 50% 副本
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+        # 每 60s 最多缩容 1 个副本
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+      # 取上述两策略中影响更大的（即缩容更保守的上限）
+      selectPolicy: Max
+
+# 非敏感环境变量（写入 ConfigMap，敏感值见 secret 段）
+env:
+  FLASK_ENV: production
+  RBAC_ENABLED: "1"
+  METRICS_ENABLED: "1"
+  CACHE_TYPE: redis
+  CACHE_DEFAULT_TIMEOUT: "3600"
+  RATELIMIT_DEFAULT: "200/hour"
+  RATELIMIT_AUTH: "10/minute"
+  LLM_PROVIDER: rule
+  GUNICORN_WORKERS: "5"
+  GUNICORN_LOG_LEVEL: info
+
+# 外部 PostgreSQL（externalDatabase 模式，不在 chart 内部署数据库）
+postgresql:
+  externalDatabase:
+    host: postgresql.external.svc.cluster.local
+    port: 5432
+    user: ops
+    database: ops_platform
+    # 密码不在 values 明文配置，运行时从 Secret 引用（见 secret 段 key=DB_PASSWORD）
+
+# 外部 Redis（不在 chart 内部署）
+redis:
+  host: redis.external.svc.cluster.local
+  port: 6379
+  # 密码从 Secret 引用（见 secret 段 key=REDIS_PASSWORD）
+
+# Secret 占位（仅用于本地测试）
+# ⚠️ 生产环境必须替换以下占位值！
+# 生产建议：使用 External Secrets、Sealed Secrets 或云厂商 KMS 托管，
+#           禁止将真实密钥提交到版本库。可通过设置 secret.create=false 关闭此模板。
+secret:
+  create: true
+  name: intelligent-ops-platform-secret
+  data:
+    # ⚠️ 占位值，生产必须替换为强随机值
+    SECRET_KEY: "REPLACE_ME_WITH_STRONG_SECRET_KEY"
+    DB_PASSWORD: "REPLACE_ME_WITH_DB_PASSWORD"
+    REDIS_PASSWORD: "REPLACE_ME_WITH_REDIS_PASSWORD"
+    # CORS 允许源（生产必须显式指定，不可用 *）
+    CORS_ORIGINS: "https://ops.example.com"
+
+# 节点调度
+nodeSelector: {}
+tolerations: []
+affinity: {}

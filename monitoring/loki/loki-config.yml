@@ -1,0 +1,85 @@
+# ====================================================================
+# Loki 配置文件（P1-13 日志聚合）
+# --------------------------------------------------------------------
+# 部署模式：single binary（单机模式，适合中小规模日志量）
+# 默认端口：3100
+# 数据保留：168h（7 天）
+# 与 promtail / grafana 配合使用，构建日志聚合查询体系
+# ====================================================================
+
+auth_enabled: false  # 关闭多租户认证（单机模式无需多租户隔离）
+
+server:
+  # Loki HTTP 服务监听端口，promtail 与 grafana 均通过该端口写入 / 查询日志
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  # 单机模式下所有角色（ingester / distributor / querier 等）共用同一实例
+  instance_addr: 0.0.0.0
+  path_prefix: /loki  # 数据与索引存储根目录
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks    # 日志 chunk 存储目录
+      rules_directory: /loki/rules      # 规则文件目录
+  replication_factor: 1                 # 单机模式副本数 1（无高可用）
+  ring:
+    kvstore:
+      store: inmemory                   # 单机使用内存 ring，无需 consul/etcd
+
+# --------------------------------------------------------------------
+# ingester：负责接收 promtail 推送的日志，切块后落盘
+# --------------------------------------------------------------------
+ingester:
+  chunk_idle_period: 30m     # chunk 空闲 30 分钟后 flush 到存储（控制小 chunk 数量）
+  chunk_target_size: 1572864 # 单个 chunk 目标大小 1.5MB
+  max_chunk_age: 2h          # chunk 最长生命周期 2h，超时强制 flush
+  chunk_retain_period: 30s   # flush 后保留 30s 以应对近期查询
+
+# --------------------------------------------------------------------
+# schema_config：日志索引 schema（使用 boltdb-shipper，支持高效查询）
+# --------------------------------------------------------------------
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h   # 索引按天滚动
+
+# --------------------------------------------------------------------
+# limits_config：全局日志写入 / 查询限制
+# --------------------------------------------------------------------
+limits_config:
+  retention_period: 168h           # 日志保留 7 天（168 小时）
+  max_query_length: 721h           # 单次查询最大跨度（略大于保留期）
+  reject_old_samples: true         # 拒绝写入过期样本
+  reject_old_samples_max_age: 168h # 超过 7 天的样本拒绝写入
+  ingestion_rate_mb: 10            # 每租户每秒最大写入 10MB
+  ingestion_burst_size_mb: 20      # 突发写入上限 20MB
+  max_streams_per_user: 10000      # 单租户最大流数
+  max_query_series: 5000           # 单次查询最大序列数
+
+# --------------------------------------------------------------------
+# compactor：后台压缩旧索引，降低存储占用
+# --------------------------------------------------------------------
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true          # 启用保留策略删除
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+# --------------------------------------------------------------------
+# ruler：告警规则评估（本方案告警由 Prometheus 负责，此处关闭）
+# --------------------------------------------------------------------
+ruler:
+  alertmanager_url: ""             # 不直接对接 alertmanager
+  enable_api: false
+
+analytics:
+  reporting_enabled: false         # 关闭遥测上报

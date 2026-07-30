@@ -13,6 +13,7 @@
 import json
 import logging
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -39,11 +40,18 @@ def _to_epoch(dt):
 class AuthService:
     """JWT 认证服务"""
 
-    ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
+    ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)  # P2-6: 从 2h 缩短到 30 分钟，配合前端自动刷新
     REFRESH_TOKEN_EXPIRES = timedelta(days=7)
     MAX_LOGIN_ATTEMPTS = 5
     LOCKOUT_DURATION = 300  # 秒
     ALGORITHM = "HS256"
+
+    # P0-5: 缓存改为 Redis 优先（多 worker 共享），进程内 dict 作为 fallback
+    # 原 P1 进程内缓存在多 worker 下改密后 30s 窗口内旧 token 仍有效，迁 Redis 后窗口降到 0
+    _token_cache = {}  # fallback: {jti: (expires_at, is_blacklisted)}
+    _user_cache = {}  # fallback: {user_id: (expires_at, token_version)}
+    _CACHE_TTL = 30.0
+    _CACHE_MAXSIZE = 10000
 
     # ============ Token 签发 ============
 
@@ -59,6 +67,7 @@ class AuthService:
             "exp": _to_epoch(exp),
             "type": token_type,
             "jti": uuid.uuid4().hex,
+            "token_ver": user.token_version or 0,  # P0-1: 写入 token_version，改密后递增使旧 token 失效
         }
         if token_type == "access":
             full_payload["roles"] = [r.name for r in user.roles]
@@ -69,12 +78,8 @@ class AuthService:
     @staticmethod
     def login(username, password, ip=None):
         """用户登录，返回 access_token + refresh_token"""
-        # 1. 锁定检查
-        recent_fails = AuditLog.query.filter(
-            AuditLog.actor == username,
-            AuditLog.action == "login_failed",
-            AuditLog.created_at >= datetime.now() - timedelta(seconds=AuthService.LOCKOUT_DURATION),
-        ).count()
+        # 1. 锁定检查（P1-2: 优先用 Redis 计数器，fallback 查 AuditLog）
+        recent_fails = AuthService._get_login_fail_count(username)
         if recent_fails >= AuthService.MAX_LOGIN_ATTEMPTS:
             return None, f"账号已被锁定，请 {AuthService.LOCKOUT_DURATION // 60} 分钟后重试"
 
@@ -91,6 +96,7 @@ class AuthService:
                 )
             )
             db.session.commit()
+            AuthService._incr_login_fail_count(username)  # P1-2: Redis 计数器递增
             return None, "用户名或密码错误"
 
         # 3. 签发 access + refresh
@@ -109,6 +115,7 @@ class AuthService:
             )
         )
         db.session.commit()
+        AuthService._clear_login_fail_count(username)  # P1-2: 登录成功清除计数器
 
         return {
             "access_token": access_token,
@@ -179,16 +186,108 @@ class AuthService:
             return None, "无效的 refresh_token"
 
     @staticmethod
+    def _prune_cache(cache):
+        """缓存超限时清理：先删过期项，仍超限则删 expires_at 最小（最旧）的项。"""
+        if len(cache) < AuthService._CACHE_MAXSIZE:
+            return
+        now = time.time()
+        for k in [k for k, v in cache.items() if v[0] <= now]:
+            del cache[k]
+        while len(cache) >= AuthService._CACHE_MAXSIZE and cache:
+            del cache[min(cache, key=lambda k: cache[k][0])]
+
+    @staticmethod
+    def _redis_get(key):
+        """P0-5: 从 Redis 读取缓存，返回值或 None。非 Redis 模式返回 None。"""
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                return cache.get(key)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _redis_set(key, value, ttl=None):
+        """P0-5: 写入 Redis 缓存。非 Redis 模式跳过。"""
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                cache.set(key, value, timeout=ttl or int(AuthService._CACHE_TTL))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _redis_delete(key):
+        """P0-5: 删除 Redis 缓存键（改密/登出时调用）。"""
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                cache.delete(key)
+        except Exception:
+            pass
+
+    @staticmethod
     def verify_token(token):
-        """校验 access_token：返回 payload 或 None。检查黑名单。"""
+        """校验 access_token：返回 payload 或 None。检查黑名单 + token_version（Redis 缓存优先）。"""
         try:
             payload = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=[AuthService.ALGORITHM])
             if payload.get("type") != "access":
                 return None
-            # 黑名单检查
+            now = time.time()
+            # 1. 黑名单检查（Redis 缓存优先，fallback 进程内 dict + DB）
             jti = payload.get("jti")
-            if jti and TokenBlacklist.query.filter_by(jti=jti).first():
-                return None
+            if jti:
+                redis_key = f"tok_bl:{jti}"
+                redis_val = AuthService._redis_get(redis_key)
+                if redis_val is not None:
+                    # Redis 命中：1=黑名单，0=有效
+                    if redis_val in ("1", 1, b"1"):
+                        return None
+                else:
+                    # fallback 进程内 dict
+                    cached = AuthService._token_cache.get(jti)
+                    if cached and now < cached[0]:
+                        if cached[1]:  # is_blacklisted
+                            return None
+                    else:
+                        is_blacklisted = bool(TokenBlacklist.query.filter_by(jti=jti).first())
+                        # 写 Redis + 进程内
+                        AuthService._redis_set(redis_key, "1" if is_blacklisted else "0")
+                        AuthService._prune_cache(AuthService._token_cache)
+                        AuthService._token_cache[jti] = (now + AuthService._CACHE_TTL, is_blacklisted)
+                        if is_blacklisted:
+                            return None
+            # 2. token_version 校验（Redis 缓存优先，改密后立即失效）
+            user_id = payload.get("sub")
+            if user_id:
+                uid = int(user_id)
+                redis_ukey = f"tok_ver:{uid}"
+                redis_uval = AuthService._redis_get(redis_ukey)
+                if redis_uval is not None:
+                    try:
+                        user_ver = int(redis_uval)
+                    except (ValueError, TypeError):
+                        user_ver = None
+                else:
+                    # fallback 进程内 dict
+                    cached_user = AuthService._user_cache.get(uid)
+                    if cached_user and now < cached_user[0]:
+                        user_ver = cached_user[1]
+                    else:
+                        user = db.session.get(User, uid)
+                        if not user or not user.is_active:
+                            return None
+                        user_ver = user.token_version
+                        # 写 Redis + 进程内
+                        AuthService._redis_set(redis_ukey, str(user_ver))
+                        AuthService._prune_cache(AuthService._user_cache)
+                        AuthService._user_cache[uid] = (now + AuthService._CACHE_TTL, user_ver)
+                if payload.get("token_ver", 0) != user_ver:
+                    return None  # 旧 token 已因改密失效
             return payload
         except jwt.ExpiredSignatureError:
             return None
@@ -199,6 +298,7 @@ class AuthService:
     def logout(access_tok, refresh_tok=None, ip=None):
         """登出：把 access + refresh 加入黑名单"""
         revoked = []
+        logout_username = "unknown"  # P0-2: 预定义变量，避免 dir() 检查失效
         for tok in [access_tok, refresh_tok]:
             if not tok:
                 continue
@@ -209,6 +309,7 @@ class AuthService:
                     algorithms=[AuthService.ALGORITHM],
                     options={"verify_exp": False},
                 )
+                logout_username = payload.get("username", "unknown")  # P0-2: 从成功解析的 payload 取 username
                 jti = payload.get("jti")
                 if jti and not TokenBlacklist.query.filter_by(jti=jti).first():
                     db.session.add(
@@ -225,7 +326,7 @@ class AuthService:
         if revoked:
             db.session.add(
                 AuditLog(
-                    actor=str(payload.get("username", "unknown")) if "payload" in dir() else "unknown",
+                    actor=logout_username,  # P0-2: 直接使用变量，不再用 dir() 检查
                     action="logout",
                     target_type="auth",
                     ip=ip,
@@ -250,10 +351,9 @@ class AuthService:
             raise ValueError(msg)
         user.password_hash = hash_password(new_password)
         user.must_change_password = False
-        # 吊销该用户所有现存 token（强制重新登录）
-        db.session.query(TokenBlacklist).filter_by(user_id=user_id).delete()
-        # 写入一个标记：所有未在黑名单中的旧 token 立即失效需要轮换 jti secret，
-        # 简化实现：仅记录审计，旧 token 在下次 refresh 时因 refresh 旋转会被替换
+        # P0-1: 吊销该用户所有现存 token（强制重新登录）
+        # 修复：原代码错误地删除了黑名单记录（含义完全相反），改为将该用户所有有效 token 加入黑名单
+        AuthService._revoke_all_user_tokens(user_id)
         db.session.add(
             AuditLog(
                 actor=user.username,
@@ -282,16 +382,90 @@ class AuthService:
                     )
         return list(perms)
 
+    # ============ P0-1: 改密后吊销所有旧 token ============
+
+    @staticmethod
+    def _revoke_all_user_tokens(user_id):
+        """改密后递增 token_version，使该用户所有旧 token 失效（P0-1 真正修复）。
+
+        原理：JWT 签发时写入 token_ver=user.token_version，
+        verify_token 校验时比对 payload.token_ver 与 user.token_version，
+        改密时递增 token_version，旧 token 的 token_ver 不匹配即失效。
+        失败时抛异常让外层事务回滚，避免密码已改但 token_version 未递增。
+        """
+        user = db.session.get(User, user_id)
+        if user:
+            user.token_version = (user.token_version or 0) + 1
+            db.session.flush()
+            # P0-5: 改密后清除 Redis 缓存，确保所有 worker 立即生效
+            AuthService._redis_delete(f"tok_ver:{user_id}")
+            logger.info("用户 %s 改密后 token_version 递增，所有旧 token 已失效", user_id)
+        else:
+            raise ValueError(f"用户不存在 user_id={user_id}，无法递增 token_version")
+
+    # ============ P1-2: 登录失败计数器（Redis 优先，AuditLog fallback） ============
+
+    @staticmethod
+    def _get_login_fail_count(username):
+        """获取最近锁定窗口内的登录失败次数。优先用 Redis，fallback 查 AuditLog。"""
+        # 优先用 Redis 计数器
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                key = f"login_fail:{username}"
+                count = cache.get(key)
+                return int(count) if count else 0
+        except Exception:
+            pass
+
+        # fallback: 查 AuditLog（原逻辑）
+        recent_fails = AuditLog.query.filter(
+            AuditLog.actor == username,
+            AuditLog.action == "login_failed",
+            AuditLog.created_at >= datetime.now() - timedelta(seconds=AuthService.LOCKOUT_DURATION),
+        ).count()
+        return recent_fails
+
+    @staticmethod
+    def _incr_login_fail_count(username):
+        """递增登录失败计数器。Redis 可用时写入 Redis，否则仅靠 AuditLog 记录。"""
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                key = f"login_fail:{username}"
+                count = cache.get(key)
+                count = int(count) + 1 if count else 1
+                cache.set(key, count, timeout=AuthService.LOCKOUT_DURATION)
+        except Exception:
+            pass  # AuditLog 已记录，fallback 路径可用
+
+    @staticmethod
+    def _clear_login_fail_count(username):
+        """登录成功后清除失败计数器。"""
+        try:
+            from extensions import cache
+
+            if current_app.config.get("CACHE_TYPE") == "redis":
+                cache.delete(f"login_fail:{username}")
+        except Exception:
+            pass
+
 
 def jwt_required(f):
-    """JWT 认证装饰器：校验 Authorization: Bearer <token>"""
+    """JWT 认证装饰器：校验 Authorization: Bearer <token>，无 Header 时回退 HttpOnly cookie（P1-12）"""
 
     @wraps(f)
     def wrapped(*args, **kwargs):
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        else:
+            # P1-12: 回退 HttpOnly cookie
+            token = request.cookies.get("access_token", "")
+        if not token:
             return jsonify({"error": "缺少认证Token，请先登录"}), 401
-        token = auth_header[7:]
         payload = AuthService.verify_token(token)
         if not payload:
             return jsonify({"error": "Token无效或已过期"}), 401

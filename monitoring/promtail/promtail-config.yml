@@ -1,0 +1,82 @@
+# ====================================================================
+# Promtail 配置文件（P1-13 日志聚合）
+# --------------------------------------------------------------------
+# 采集 docker 容器日志 -> 解析 JSON 日志 -> 推送至 Loki:3100
+# 通过 docker_sd_configs 自动发现容器，无需手工列举每个服务
+# ====================================================================
+
+server:
+  http_listen_port: 9080   # promtail 自身 metrics / API 端口
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  # 记录每个日志流的读取偏移，重启后从断点续读，避免重复或丢失
+  filename: /tmp/positions.yaml
+
+clients:
+  # Loki 接收端地址（compose 服务名 loki）
+  - url: http://loki:3100/loki/api/v1/push
+    backoff_min_period: 500ms
+    backoff_max_period: 5m
+    backoff_max_retries: 10
+
+# --------------------------------------------------------------------
+# 抓取配置：通过 docker 服务发现自动采集所有运行中容器日志
+# --------------------------------------------------------------------
+scrape_configs:
+
+  # ============== 1. 采集 Docker 容器 stdout/stderr ==============
+  - job_name: docker-container-logs
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock     # 通过宿主机 docker socket 发现容器
+        refresh_interval: 15s                  # 每 15s 重新枚举容器
+        # 只采集有 ops 标签的容器（通过 docker-compose 标签过滤本项目容器）
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=intelligent-ops-platform"]
+
+    # relabel_configs：在采集前对标签进行加工，提取可用维度
+    relabel_configs:
+      # 从容器元数据中提取 container_name 作为流标签
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container_name'
+      # 提取 docker 镜像名作为标签
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'service'
+      # 提取 compose 项目名作为标签（多项目隔离）
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        target_label: 'project'
+      # 区分 stdout 与 stderr
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: 'stream'
+
+    # pipeline_stages：解析日志行内容
+    # app.py 使用 python-json-logger 输出 JSON 格式：
+    #   {"timestamp":"...","level":"...","message":"...","request_id":"..."}
+    pipeline_stages:
+      # 1) 将整行 JSON 解析为字段
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            request_id: request_id
+            logger: logger
+            module: module
+
+      # 2) 用日志自带的时间戳作为 Loki 时间（保证查询时序正确）
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          on_failure: skip
+
+      # 3) 将 level 作为 Loki 标签（便于按 ERROR/WARN 过滤）
+      - labels:
+          level:
+          request_id:
+
+      # 4) 提取 message 作为输出内容（默认输出整行原内容）
+      - output:
+          source: message

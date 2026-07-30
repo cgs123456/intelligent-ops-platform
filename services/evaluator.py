@@ -26,20 +26,24 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # gold 用例与评测报告的文件路径（基于项目根目录）
-_FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_FIXTURES_DIR = _PROJECT_ROOT / "tests" / "fixtures"
 _GOLD_CASES_FILE = _FIXTURES_DIR / "gold_sql.json"
-_REPORTS_DIR = _FIXTURES_DIR / "eval_reports"
+# P2-21: 报告默认写入 Flask instance 目录，避免 tests/fixtures/eval_reports/ 权限问题
+# instance 目录是 Flask 约定的运行时数据存放位置，不纳入版本控制
+_REPORTS_DIR = _PROJECT_ROOT / "instance" / "eval_reports"
 
 
 class AgentEvaluator:
     """Agent 评测框架：Text2SQL gold SQL 回归测试。"""
 
-    def __init__(self, data_agent=None, db_session=None, reports_dir=None):
+    def __init__(self, data_agent=None, db_session=None, gold_cases_file=None, reports_dir=None):
         """初始化评测器。
 
         :param data_agent: 注入 DataAgent 实例；不传则默认创建（测试中可 monkeypatch _generate_sql）
         :param db_session: 可选，注入数据库 session
-        :param reports_dir: 可选，自定义评测报告保存目录（测试用 tmp_path 隔离）
+        :param gold_cases_file: 可选，自定义 gold SQL 用例文件路径（默认 tests/fixtures/gold_sql.json）
+        :param reports_dir: 可选，自定义评测报告保存目录（默认 instance/eval_reports/，测试用 tmp_path 隔离）
         """
         if data_agent is None:
             from services.data_agent import DataAgent
@@ -47,7 +51,9 @@ class AgentEvaluator:
             data_agent = DataAgent(db_session=db_session)
         self._agent = data_agent
         self.session = self._agent.session
-        # 报告目录可覆盖，便于测试隔离
+        # P2-13: gold 用例文件路径可配置，默认用 _GOLD_CASES_FILE
+        self.gold_cases_file = Path(gold_cases_file) if gold_cases_file else _GOLD_CASES_FILE
+        # P2-21: 报告目录可覆盖，默认用 instance/eval_reports/（Flask instance 目录）
         self.reports_dir = Path(reports_dir) if reports_dir else _REPORTS_DIR
 
     # ==================== 主入口 ====================
@@ -120,11 +126,11 @@ class AgentEvaluator:
         return report
 
     def load_gold_cases(self):
-        """从 tests/fixtures/gold_sql.json 加载 gold SQL 测试用例。
+        """从 gold SQL 用例文件加载测试用例（默认 tests/fixtures/gold_sql.json）。
 
         :return: list[dict] 每条 {id, question, expected_sql, expected_tables, category}
         """
-        with open(_GOLD_CASES_FILE, encoding="utf-8") as f:
+        with open(self.gold_cases_file, encoding="utf-8") as f:
             return json.load(f)
 
     # ==================== SQL 对比 ====================
@@ -186,17 +192,39 @@ class AgentEvaluator:
     def _result_set_match(self, actual, expected):
         """尝试执行两条 SQL 对比结果集（仅 SELECT，失败或空结果返回 False）。
 
-        - 两条 SQL 在同一 session 上执行，只读不 commit
+        - P0-11: 执行前用 DataAgent._validate_sql_ast 校验 actual 与 expected SQL
+                 校验失败（含 DDL/DML/非白名单表）则跳过 result_set 匹配，
+                 只做 exact 和 table_set 对比
+        - 两条 SQL 在同一 session 上执行，执行后立即 rollback（SQLite 不支持 begin_read_only）
         - 空结果集不判定为匹配（DB 可能无数据，无法区分）
         - 行数不同或任意行不一致均返回 False
         """
         try:
+            # P0-11: 执行前 AST 校验，防止 DDL/DML 与非白名单表
+            # gold SQL（expected）虽可信任，也应用同样校验避免环境差异
+            if not self._agent or not self._agent._validate_sql_ast(actual):
+                logger.debug("actual SQL AST 校验失败，跳过 result_set 匹配: %s", actual)
+                return False
+            if not self._agent._validate_sql_ast(expected):
+                logger.debug("expected SQL AST 校验失败，跳过 result_set 匹配: %s", expected)
+                return False
+
             from sqlalchemy import text
 
-            r1 = self.session.execute(text(actual))
-            rows1 = r1.fetchall()
-            r2 = self.session.execute(text(expected))
-            rows2 = r2.fetchall()
+            # 执行后立即 rollback，避免污染外层事务
+            # SQLite 不支持 begin_read_only()，也不能用 begin_nested()（SAVEPOINT 的 outer
+            # transaction 不会随 rollback 释放读锁，会导致后续测试 database is locked）
+            try:
+                r1 = self.session.execute(text(actual))
+                rows1 = r1.fetchall()
+                r2 = self.session.execute(text(expected))
+                rows2 = r2.fetchall()
+            finally:
+                try:
+                    self.session.rollback()
+                except Exception:
+                    # 回滚失败不阻断主流程，外层事务会自行处理
+                    pass
 
             # 空结果集不判定匹配（DB 无数据时无法区分）
             if len(rows1) == 0 and len(rows2) == 0:

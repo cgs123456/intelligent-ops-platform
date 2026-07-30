@@ -1,0 +1,113 @@
+# ====================================================================
+# Prometheus 告警规则（P1-13 告警配置）
+# --------------------------------------------------------------------
+# 告警分组：ops-platform-alerts
+# 涵盖：5xx 错误率 / P95 延迟 / 磁盘空间 / DB 连接池 / 服务存活 / Redis 存活
+# 与 monitoring/alertmanager/alertmanager.yml 配合使用
+# ====================================================================
+
+groups:
+  - name: ops-platform-alerts
+    interval: 30s  # 每 30s 评估一次告警规则
+    rules:
+
+      # ============== 1. 5xx 错误率过高 ==============
+      # 基于 prometheus_flask_exporter 的 http_requests_total 指标
+      # 5 分钟内 5xx 占总请求 > 1% 持续 2 分钟触发
+      - alert: High5xxErrorRate
+        expr: |
+          (
+            sum(rate(flask_http_request_total{status=~"5.."}[5m])) by (service)
+            /
+            clamp_min(sum(rate(flask_http_request_total[5m])) by (service), 1e-9)
+          ) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: ops-platform
+        annotations:
+          summary: "5xx 错误率过高 ({{ $labels.service }})"
+          description: "服务 {{ $labels.service }} 的 5xx 错误率已达 {{ $value | humanizePercentage }}，超过 1% 阈值持续 2 分钟。请立即检查应用日志与依赖服务。"
+          runbook: "参考 docs/ops-runbook.md 1.4 节 502/503 排查"
+
+      # ============== 2. P95 延迟过高 ==============
+      # 基于 histogram_quantile 计算 P95 响应时间
+      # P95 > 500ms 持续 5 分钟触发
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le, service)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: ops-platform
+        annotations:
+          summary: "P95 响应延迟过高 ({{ $labels.service }})"
+          description: "服务 {{ $labels.service }} 的 P95 响应时间已达 {{ $value | humanizeDuration }}，超过 500ms 阈值持续 5 分钟。请检查慢查询、连接池与下游依赖。"
+          runbook: "参考 docs/ops-runbook.md 1.2 节数据库连接耗尽排查"
+
+      # ============== 3. 磁盘剩余空间不足 ==============
+      # 基于 node_exporter 的 node_filesystem 指标
+      # 剩余空间 < 10% 持续 1 分钟触发（critical）
+      - alert: DiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            /
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}
+          ) < 0.10
+        for: 1m
+        labels:
+          severity: critical
+          service: infra
+        annotations:
+          summary: "磁盘剩余空间不足 ({{ $labels.instance }} {{ $labels.mountpoint }})"
+          description: "节点 {{ $labels.instance }} 挂载点 {{ $labels.mountpoint }} 剩余空间仅 {{ $value | humanizePercentage }}，低于 10% 阈值。请立即清理日志/镜像或扩容。"
+          runbook: "参考 docs/ops-runbook.md 2.1 节日志清理"
+
+      # ============== 4. 数据库连接池使用率过高 ==============
+      # 基于 prometheus_client 暴露的连接池指标（pool_checkedout / pool_size）
+      # 使用率 > 80% 持续 3 分钟触发（warning）
+      - alert: DBConnectionPoolExhaustion
+        expr: |
+          (
+            sqlalchemy_pool_checkedout
+            /
+            clamp_min(sqlalchemy_pool_size, 1)
+          ) > 0.80
+        for: 3m
+        labels:
+          severity: warning
+          service: ops-platform
+        annotations:
+          summary: "数据库连接池使用率过高"
+          description: "数据库连接池使用率已达 {{ $value | humanizePercentage }}，超过 80% 阈值持续 3 分钟。可能存在慢查询或连接泄漏，请检查应用日志与 pg_stat_activity。"
+          runbook: "参考 docs/ops-runbook.md 1.2 节数据库连接耗尽排查"
+
+      # ============== 5. 服务实例宕机 ==============
+      # 任意服务 up == 0 持续 1 分钟触发（critical）
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: ops-platform
+        annotations:
+          summary: "服务实例宕机 ({{ $labels.instance }})"
+          description: "Prometheus target {{ $labels.job }} @ {{ $labels.instance }} 已 down 持续 1 分钟。请检查容器状态与进程是否存活。"
+          runbook: "参考 docs/ops-runbook.md 1.1 节服务无法启动排查"
+
+      # ============== 6. Redis 实例宕机 ==============
+      # redis job 的 up == 0 立即触发（critical）
+      # Redis 是缓存/限流/Celery broker 的关键依赖，宕机影响大
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 0m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis 实例宕机"
+          description: "Redis 实例 {{ $labels.instance }} 已 down。缓存、限流、Celery 任务将立即受影响，请优先恢复。"
+          runbook: "参考 docs/ops-runbook.md 1.3 节 Redis 连接失败排查"

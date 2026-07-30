@@ -28,8 +28,13 @@ class AnomalyDetector:
 
     # 移动平均窗口
     WINDOW = 7
-    # 标准差倍数（2σ 为 warning，3σ 为 critical）
-    SIGMA_WARNING = 2.0
+    # P2-12: 标准差倍数调整说明
+    # - 2.5σ 为 warning（从 2.0 调升至 2.5，降低周末高峰误报率）
+    # - 3σ 为 critical
+    # 注意：当前算法基于 7 日移动平均 + σ，未考虑周季节性（周末高峰/工作日低谷），
+    #       可能将正常的周末销量高峰误判为异常。如需精确处理，应引入 STL 分解
+    #       或周季节性调整，但改动较大，暂以调整 σ 阈值的方式降低误报率。
+    SIGMA_WARNING = 2.5
     SIGMA_CRITICAL = 3.0
     # 最少历史天数（不足则跳过）
     MIN_HISTORY_DAYS = 7
@@ -87,21 +92,30 @@ class AnomalyDetector:
     def _load_recent_sales(self, target_date):
         """加载近 30 天所有产品的日销量。
 
-        :return: {product_id: [(dt, sale_qty), ...]} 按 dt 升序
+        P1-17: LEFT JOIN 产品表按 stock_qty 升序排序，低库存产品优先检测。
+        原 MAX_PRODUCTS=200 简单截断会按 product_id 顺序漏检低库存产品，
+        改为按库存量升序后，即便达到上限被截断，也是高库存产品被跳过，
+        低库存（高风险）产品优先进入检测。
+
+        :return: {product_id: [(dt, sale_qty), ...]} 按 dt 升序；dict 按库存量升序遍历
         """
+        from models.erp import Product
         from models.warehouse import DwsSalesSkuDaily
 
         start = target_date - timedelta(days=self.LOOKBACK_DAYS - 1)
+        # LEFT JOIN Product 获取 stock_qty：按库存升序，低库存产品排在前面
         rows = (
             self.session.query(
                 DwsSalesSkuDaily.product_id,
                 DwsSalesSkuDaily.product_name,
                 DwsSalesSkuDaily.dt,
                 DwsSalesSkuDaily.sale_qty,
+                Product.stock_qty,
             )
+            .outerjoin(Product, Product.id == DwsSalesSkuDaily.product_id)
             .filter(DwsSalesSkuDaily.dt >= start)
             .filter(DwsSalesSkuDaily.dt <= target_date)
-            .order_by(DwsSalesSkuDaily.product_id, DwsSalesSkuDaily.dt)
+            .order_by(Product.stock_qty.asc(), DwsSalesSkuDaily.product_id, DwsSalesSkuDaily.dt)
             .all()
         )
         data = defaultdict(list)

@@ -56,15 +56,14 @@ ignore = [
     "N805",   # 方法第一个参数名（Flask 路由函数不强制 self）
     "N806",   # 变量名大小写（业务代码有大量大写常量）
     "E402",   # import 不是文件顶部（Flask app context 内 import 常见）
-    "F401",   # 未使用 import（models 的 __init__.py 有意 re-export）
-    "F403",   # from X import *（models 模式）
-    "F405",   # 可能未定义的名称（from X import * 的副作用）
+    # P1-11: F401/F403/F405 移到 per-file-ignores，仅 models/__init__.py 放行
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401", "F811"]  # 测试中允许未使用 import 和重定义
 "migrations/*" = ["E", "W", "F"]  # 迁移文件不检查
 "seed.py" = ["E501"]  # 种子数据允许长行
+"models/__init__.py" = ["F401", "F403", "F405"]  # models 有意 re-export
 
 # ==================== Black 配置 ====================
 [tool.black]
@@ -87,7 +86,7 @@ extend-exclude = '''
 python_version = "3.10"
 ignore_missing_imports = true
 no_strict_optional = true
-check_untyped_defs = false
+check_untyped_defs = true  # P2-2: 逐步启用未注解函数的类型检查
 warn_unused_ignores = false
 warn_redundant_casts = false
 exclude = [
@@ -97,12 +96,28 @@ exclude = [
     "build/",
     "dist/",
 ]
-# 项目未强制全量类型注解，按需逐步启用
-# 若要全量 strict，可改为：disallow_untyped_defs = true
+# P1-11: 对核心模块逐步启用严格类型检查
+# 新增代码应带类型注解，旧代码逐步补齐
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "services.response"
+disallow_untyped_defs = true  # 新模块强制类型注解
+
+[[tool.mypy.overrides]]
+module = "services.crypto"
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "services.mfa"
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "services.metrics"
+disallow_untyped_defs = false  # 允许，逐步补齐
 
 # ==================== Pytest 配置 ====================
 [tool.pytest.ini_options]
@@ -150,9 +165,19 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "@(abc\\.)?abstractmethod",
 ]
-fail_under = 5  # 初始门槛 5%，测试覆盖核心算法层，后续逐步提升
+fail_under = 60  # P0-4: 从 40% 提到 60%，逐步提升覆盖率门槛
 show_missing = true
 precision = 2
 
 [tool.coverage.html]
 directory = "htmlcov"
+
+# ==================== Mutmut 突变测试配置 ====================
+# 突变测试用于验证测试有效性，CI 中可选运行（成本较高）。
+# 仅作配置预置，默认不参与本地开发流程；如需运行：mutmut run
+[tool.mutmut]
+paths_to_mutate = ["services/"]
+tests_dir = "tests/"
+also_copy = ["models/", "routes/", "extensions.py", "config.py", "app.py"]
+pre_mutation = "python -m pytest tests/ -x -q --timeout=30"
+min_code_coverage = 60

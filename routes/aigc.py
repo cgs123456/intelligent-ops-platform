@@ -11,7 +11,8 @@ import uuid
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.aigc_service import AIGCService
-from services.rbac import require_permission
+from services.idempotency import idempotent
+from services.rbac import require_permission, verify_sse_auth
 
 bp = Blueprint("aigc", __name__, url_prefix="/api/v1/aigc")
 
@@ -24,6 +25,7 @@ def suggestions():
 
 @bp.route("/generate-suggestions", methods=["POST"])
 @require_permission("aigc:review")
+@idempotent()  # P1-21: 幂等保护，防止重复生成建议
 def gen_suggestions():
     results = AIGCService().generate_suggestions()
     count = len(results) if isinstance(results, list) else 0
@@ -130,12 +132,18 @@ def query():
 
 
 @bp.route("/query-stream", methods=["POST"])
-@require_permission("aigc:read")
 def query_stream():
     """P0-3: SSE 流式输出智能问答
     复用后端 SSE 基础设施，前端边接收边渲染，避免长等待。
     Body: {"question": "...", "session_id": "..."}
+    P0-3: EventSource 不支持自定义 Header，支持从 query 参数 ?token=xxx 传 token。
+    P2-16: 当前为分块发送模式（按句号切分后逐块 yield），非真正 LLM streaming。
+           真正 streaming 需 LLM 支持 token 级流式输出，改动较大，暂不实现。
     """
+    # P0-3: SSE 认证 — 兼容 Authorization Header 和 query 参数 token
+    err = verify_sse_auth("aigc:read")
+    if err is not None:
+        return err
     data = request.get_json(force=True, silent=True) or {}
     q = data.get("question", "").strip()
     if not q:
@@ -145,6 +153,8 @@ def query_stream():
     session_id = data.get("session_id")
 
     def generate():
+        # P1-4: 总超时检查，防止生成器长时间占用连接
+        start_time = time.time()
         svc = AIGCService()
         try:
             result = svc.natural_language_query(q, session_id)
@@ -154,9 +164,12 @@ def query_stream():
             # 先发 session_id，让前端建立会话
             yield f'data: {json.dumps({"type": "session", "session_id": new_sid}, ensure_ascii=False)}\n\n'
 
-            # 分段流式输出（按句号/换行切分，模拟流式效果）
+            # P2-16: 分块发送模式（按句号/换行切分后逐块 yield），非真正 LLM streaming
             chunks = _split_text_chunks(answer, chunk_size=40)
             for chunk in chunks:
+                # P1-4: 总超时检查（60 秒）
+                if time.time() - start_time > 60:
+                    break
                 yield f'data: {json.dumps({"type": "chunk", "text": chunk}, ensure_ascii=False)}\n\n'
                 time.sleep(0.05)  # 50ms 间隔，前端能看到流式效果
 
@@ -235,8 +248,17 @@ def negotiate():
 
     data = request.get_json(force=True, silent=True) or {}
     product_id = data.get("product_id")
-    if not product_id:
-        return jsonify({"error": "product_id 必填"}), 400
+    # P0-14: 输入校验
+    if not product_id or not isinstance(product_id, int):
+        return jsonify({"error": "product_id 必填且为整数"}), 400
+    suggested_qty = data.get("suggested_qty")
+    if suggested_qty is not None and (not isinstance(suggested_qty, int) or suggested_qty <= 0):
+        return jsonify({"error": "suggested_qty 需为正整数"}), 400
+    supplier_ids = data.get("supplier_ids")
+    if supplier_ids is not None and (
+        not isinstance(supplier_ids, list) or not all(isinstance(i, int) for i in supplier_ids)
+    ):
+        return jsonify({"error": "supplier_ids 需为整数列表"}), 400
 
     product = db.session.get(Product, product_id)
     if not product:

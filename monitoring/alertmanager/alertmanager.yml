@@ -1,0 +1,94 @@
+# ====================================================================
+# Alertmanager 配置文件（P1-13 告警通知）
+# --------------------------------------------------------------------
+# 路由策略：
+#   - critical：立即发送（group_wait 0s）
+#   - warning ：5 分钟聚合后发送（避免告警风暴）
+# 抑制策略：critical 触发时抑制同类 warning，避免重复打扰
+# 通知渠道：使用 webhook 占位，生产应替换为邮件 / 钉钉 / 企业微信
+# ====================================================================
+
+global:
+  # 告警解决后的等待时间，超过此时间无新告警则发送 resolved 通知
+  resolve_timeout: 5m
+  # SMTP 配置占位（如需邮件通知，取消注释并配置真实 SMTP）
+  # smtp_smarthost: 'smtp.example.com:587'
+  # smtp_from: 'alert@example.com'
+  # smtp_auth_username: 'alert@example.com'
+  # smtp_auth_password: 'SMTP_PASSWORD'
+
+# --------------------------------------------------------------------
+# 路由：按 severity 分组，critical 立即发送，warning 聚合 5 分钟
+# --------------------------------------------------------------------
+route:
+  receiver: 'default-webhook'      # 默认兜底接收器
+  group_by: ['alertname', 'service', 'severity']  # 按告警名+服务+级别分组
+  group_wait: 30s                  # 首次告警等待 30s 再发送（聚合同组）
+  group_interval: 5m               # 同组下次发送间隔
+  repeat_interval: 4h              # 未解决告警每 4h 重复通知一次
+  routes:
+    # critical 级别：立即发送，1h 内不重复
+    - matchers:
+        - severity = critical
+      receiver: 'critical-webhook'
+      group_wait: 0s               # 立即发送，不等待聚合
+      group_interval: 30s
+      repeat_interval: 1h
+      continue: false              # 不再继续匹配后续路由
+    # warning 级别：5 分钟聚合后发送
+    - matchers:
+        - severity = warning
+      receiver: 'warning-webhook'
+      group_wait: 5m               # 聚合 5 分钟内的同组告警
+      group_interval: 10m
+      repeat_interval: 6h
+      continue: false
+
+# --------------------------------------------------------------------
+# 接收器：使用 webhook 占位
+# 生产环境应替换为：
+#   - 邮件：email_configs
+#   - 钉钉：webhook_configs 指向钉钉机器人
+#   - 企业微信：webhook_configs 指向企业微信机器人
+# --------------------------------------------------------------------
+receivers:
+  - name: 'default-webhook'
+    webhook_configs:
+      - url: 'http://127.0.0.1:5001/alertmanager/default'  # 占位，生产替换
+        send_resolved: true
+
+  - name: 'critical-webhook'
+    webhook_configs:
+      # 生产建议同时配置邮件 / 钉钉 / 电话通知
+      - url: 'http://127.0.0.1:5001/alertmanager/critical'
+        send_resolved: true
+
+  - name: 'warning-webhook'
+    webhook_configs:
+      - url: 'http://127.0.0.1:5001/alertmanager/warning'
+        send_resolved: true
+
+  # 生产环境邮件接收器示例（取消注释并配置后启用）
+  # - name: 'email-ops'
+  #   email_configs:
+  #     - to: 'ops-team@example.com'
+  #       headers:
+  #         Subject: '【告警】{{ .CommonLabels.alertname }}'
+
+# --------------------------------------------------------------------
+# 抑制规则：critical 触发时抑制同服务的 warning，避免重复告警
+# --------------------------------------------------------------------
+inhibit_rules:
+  # 规则 1：当某服务有 critical 告警时，抑制同服务的 warning
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: ['service', 'alertname']
+
+  # 规则 2：服务 down 时抑制该服务的其他告警（服务都挂了，其他告警无意义）
+  - source_matchers:
+      - alertname = ServiceDown
+    target_matchers:
+      - severity = warning
+    equal: ['service']

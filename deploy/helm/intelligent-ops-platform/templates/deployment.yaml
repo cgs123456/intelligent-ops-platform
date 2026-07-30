@@ -1,0 +1,150 @@
+# web Deployment：运行 Flask + Gunicorn 主进程
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+spec:
+  # HPA 启用时副本数由 HPA 接管，此处不再写 replicas，避免与 HPA 冲突
+  {{- if not .Values.hpa.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "intelligent-ops-platform.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "intelligent-ops-platform.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "intelligent-ops-platform.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Pod 级安全上下文：非 root 运行
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # 容器级安全上下文：只读根文件系统 + 非 root + 禁止提权 + 丢弃所有 capabilities
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          # 环境变量注入策略：
+          # 1. envFrom 引用 ConfigMap 中的非敏感配置（FLASK_ENV / RBAC_ENABLED 等）
+          # 2. 显式 env 注入数据库与 Redis 连接参数（非敏感，来自 values）
+          # 3. 敏感值通过 secretKeyRef 引用（DB_PASSWORD / REDIS_PASSWORD / SECRET_KEY / CORS_ORIGINS）
+          # 4. 基于上方已定义变量动态拼接连接串（K8s $(VAR) 替换）
+          envFrom:
+            - configMapRef:
+                name: {{ include "intelligent-ops-platform.fullname" . }}-config
+          env:
+            # PostgreSQL 连接参数（非敏感，密码在 Secret）
+            - name: DB_HOST
+              value: {{ .Values.postgresql.externalDatabase.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.postgresql.externalDatabase.port | quote }}
+            - name: DB_USER
+              value: {{ .Values.postgresql.externalDatabase.user | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgresql.externalDatabase.database | quote }}
+            # Redis 连接参数（非敏感，密码在 Secret）
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            # 敏感配置：secretKeyRef 引用
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: DB_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: REDIS_PASSWORD
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: SECRET_KEY
+            - name: CORS_ORIGINS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: CORS_ORIGINS
+            # 连接串：基于已定义的 env 变量动态拼接
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+            - name: CACHE_REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+            - name: RATELIMIT_STORAGE_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/1"
+            - name: CELERY_BROKER_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/2"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/3"
+          # 存活探针：轻量，不检查依赖，失败触发重启
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          # 就绪探针：检查数据库 + Redis 连通性，失败从 Service 端点摘除
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          # 资源 requests/limits
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # volumeMounts：readOnlyRootFilesystem=true 时需挂载可写卷
+          # - /tmp：通用临时目录（gunicorn / 系统库写入）
+          # - /app/instance/logs：应用日志目录（Dockerfile 已创建，只读根 FS 下需可写）
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: instance-logs
+              mountPath: /app/instance/logs
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: instance-logs
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -4,18 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>中型企业智能运营平台</title>
+    <!-- P2-22: CSP 及安全 Header（meta 标签作为 HTTP 头的补充，生产环境建议由 Nginx/后端统一下发） -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
+<!-- P1-12: 无障碍跳转链接，键盘用户可跳过导航直达主内容 -->
+<a href="#mainContent" class="skip-link">跳转到主内容</a>
 <!-- 登录页 -->
-<div id="loginPage" class="login-page" style="display:none">
+<div id="loginPage" class="login-page" style="display:none" role="region" aria-label="登录区域">
     <div class="login-card">
         <h2>智能运营平台登录</h2>
-        <input type="text" id="loginUser" placeholder="用户名" autocomplete="username">
-        <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
-        <label class="login-hint"><input type="checkbox" id="rememberMe"> 记住用户名</label>
-        <button class="btn" onclick="doLogin()">登录</button>
-        <div id="loginError" class="login-error"></div>
+        <input type="text" id="loginUser" placeholder="用户名" aria-label="用户名" autocomplete="username">
+        <input type="password" id="loginPass" placeholder="密码" aria-label="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+        <label class="login-hint"><input type="checkbox" id="rememberMe" aria-label="记住用户名"> 记住用户名</label>
+        <button class="btn" onclick="doLogin()" aria-label="登录">登录</button>
+        <div id="loginError" class="login-error" role="alert" aria-live="polite"></div>
     </div>
 </div>
 
@@ -29,8 +35,8 @@
             <span id="runId">轮次 #1</span>
             <span class="dot"></span>
             <span>RPA · ERP · FDE · AIGC 四层闭环</span>
-            <button class="btn btn-sm btn-ghost" onclick="reopenGuide()" title="重开引导">?</button>
-            <button class="btn btn-sm btn-ghost" onclick="logout()">退出</button>
+            <button class="btn btn-sm btn-ghost" onclick="reopenGuide()" title="重开引导" aria-label="重开操作引导">?</button>
+            <button class="btn btn-sm btn-ghost" onclick="logout()" aria-label="退出登录">退出</button>
         </div>
     </header>
 
@@ -42,16 +48,16 @@
         <div class="metric-card" onclick="switchTab('aigc')" style="cursor:pointer"><div class="metric-label">待审建议</div><div class="metric-value" id="m-pending">-</div></div>
     </section>
 
-    <nav class="tabs">
-        <button class="tab active" data-tab="dashboard" title="Ctrl+1">概览</button>
-        <button class="tab" data-tab="loop" title="Ctrl+2">闭环控制</button>
-        <button class="tab" data-tab="erp" title="Ctrl+3">ERP 进销存</button>
-        <button class="tab" data-tab="rpa" title="Ctrl+4">RPA 采集</button>
-        <button class="tab" data-tab="fde" title="Ctrl+5">FDE 数仓</button>
-        <button class="tab" data-tab="aigc" title="Ctrl+6">AIGC 助手</button>
+    <nav class="tabs" role="tablist" aria-label="功能模块导航">
+        <button class="tab active" data-tab="dashboard" title="Ctrl+1" role="tab" aria-selected="true" aria-controls="tab-dashboard" id="tab-btn-dashboard">概览</button>
+        <button class="tab" data-tab="loop" title="Ctrl+2" role="tab" aria-selected="false" aria-controls="tab-loop" id="tab-btn-loop">闭环控制</button>
+        <button class="tab" data-tab="erp" title="Ctrl+3" role="tab" aria-selected="false" aria-controls="tab-erp" id="tab-btn-erp">ERP 进销存</button>
+        <button class="tab" data-tab="rpa" title="Ctrl+4" role="tab" aria-selected="false" aria-controls="tab-rpa" id="tab-btn-rpa">RPA 采集</button>
+        <button class="tab" data-tab="fde" title="Ctrl+5" role="tab" aria-selected="false" aria-controls="tab-fde" id="tab-btn-fde">FDE 数仓</button>
+        <button class="tab" data-tab="aigc" title="Ctrl+6" role="tab" aria-selected="false" aria-controls="tab-aigc" id="tab-btn-aigc">AIGC 助手</button>
     </nav>
 
-    <main class="content">
+    <main class="content" id="mainContent" role="main">
         <!-- 概览 -->
         <div class="panel active" id="tab-dashboard">
             <div class="panel-grid">

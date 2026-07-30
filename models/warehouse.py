@@ -5,6 +5,8 @@ ODS 贴源 / DWD 明细 / DWS 汇总 / ADS 应用
 
 from datetime import date, datetime
 
+from sqlalchemy import Index, UniqueConstraint
+
 from extensions import db
 
 # ==================== ODS 贴源层 ====================
@@ -88,6 +90,8 @@ class DwsSalesSkuDaily(db.Model):
     """SKU 日销售汇总"""
 
     __tablename__ = "dws_sales_sku_daily"
+    # P1-13: (product_id, dt) 唯一约束防止重复 ETL 写入，同时优化按 product + 日期范围查询
+    __table_args__ = (UniqueConstraint("product_id", "dt", name="uq_dws_sales_sku_product_dt"),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -114,6 +118,8 @@ class AdsReplenishmentSuggest(db.Model):
     """补货建议源数据"""
 
     __tablename__ = "ads_replenishment_suggest"
+    # P1-13: (product_id, dt) 复合索引优化补货建议查询
+    __table_args__ = (Index("idx_ads_replenishment_product_dt", "product_id", "dt"),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))

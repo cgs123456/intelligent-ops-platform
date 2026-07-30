@@ -1,0 +1,48 @@
+================================================================
+  智能运营平台 Helm Chart 部署完成
+================================================================
+
+1. 获取访问地址
+{{- if .Values.ingress.enabled }}
+  Ingress 已启用，请将以下主机名解析到集群入口后访问：
+{{- range .Values.ingress.hosts }}
+    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+
+  若 DNS / TLS 尚未就绪，可通过 port-forward 临时访问：
+    kubectl port-forward service/{{ include "intelligent-ops-platform.fullname" . }} -n {{ .Release.Namespace }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  然后浏览器打开 http://localhost:{{ .Values.service.port }}
+{{- else }}
+  Ingress 未启用，通过 port-forward 访问：
+    kubectl port-forward service/{{ include "intelligent-ops-platform.fullname" . }} -n {{ .Release.Namespace }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  然后浏览器打开 http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+2. 查看 Pod 状态
+  kubectl get pods -n {{ .Release.Namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}"
+  kubectl get deployments -n {{ .Release.Namespace }}
+{{- if .Values.hpa.enabled }}
+
+  HPA 弹性伸缩状态（minReplicas={{ .Values.hpa.minReplicas }}, maxReplicas={{ .Values.hpa.maxReplicas }}）：
+    kubectl get hpa -n {{ .Release.Namespace }}
+{{- end }}
+
+3. 首次登录 admin 密码获取
+  admin 初始账号由应用种子脚本（seed.py）生成，可通过以下方式查看：
+
+    # 进入容器执行种子脚本查看初始账号（或参考 docs/deployment.md）
+    kubectl exec -it deployment/{{ include "intelligent-ops-platform.fullname" . }} -n {{ .Release.Namespace }} -- flask users list 2>/dev/null || true
+
+  或查看应用启动日志获取初始密码提示：
+
+    kubectl logs deployment/{{ include "intelligent-ops-platform.fullname" . }} -n {{ .Release.Namespace }} | head -50
+
+  注意：首次登录后请立即在「系统管理」中修改 admin 密码。
+
+================================================================
+  ⚠️ 安全提醒
+================================================================
+  - Secret 中的 SECRET_KEY / DB_PASSWORD / REDIS_PASSWORD / CORS_ORIGINS 为占位值
+  - 生产环境必须替换为强随机值，建议使用 External Secrets 或 Sealed Secrets 托管
+  - 详细部署说明见 docs/deployment.md「Kubernetes 部署（P2-15）」章节
+================================================================

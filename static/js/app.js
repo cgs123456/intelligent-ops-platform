@@ -11,12 +11,15 @@
  */
 
 // ---- Token 管理 ----
-let accessToken = localStorage.getItem('access_token') || '';
-let refreshToken = localStorage.getItem('refresh_token') || '';
+// P1-12: 优先使用 HttpOnly cookie（JS 不可读，防御 XSS），sessionStorage 作为开发/旧客户端 fallback。
+// fetch 携带 credentials: 'include'，浏览器自动发送 cookie；后端 Authorization Header 仍兼容。
+let accessToken = sessionStorage.getItem('access_token') || '';
+let refreshToken = sessionStorage.getItem('refresh_token') || '';
 
 function getAuthHeaders() {
     return {
         'Content-Type': 'application/json',
+        // P1-12: 仍发送 Authorization（兼容旧客户端 + 非 cookie 场景）；cookie 由浏览器自动携带
         'Authorization': accessToken ? `Bearer ${accessToken}` : '',
     };
 }
@@ -34,13 +37,15 @@ function sanitizeError(msg) {
     return s;
 }
 
+// P1-12: credentials: 'include' 让浏览器自动携带 HttpOnly cookie
 const API = (path, opts) => fetch(path, {
     headers: getAuthHeaders(),
+    credentials: 'include',
     ...opts
 }).then(r => {
     if (r.status === 401) {
         return tryRefresh().then(ok => {
-            if (ok) return fetch(path, { headers: getAuthHeaders(), ...opts }).then(r => r.json());
+            if (ok) return fetch(path, { headers: getAuthHeaders(), credentials: 'include', ...opts }).then(r => r.json());
             showLogin();
             throw new Error('请重新登录');
         });
@@ -52,7 +57,9 @@ const API = (path, opts) => fetch(path, {
 });
 
 // ---- Toast 通知（P0-2 引导跳转 + P1-4 错误提示）----
-function showToast(msg, type = 'info', duration = 3500) {
+// P1-20: 使用 textContent 设置文本，避免 innerHTML 导致的 XSS 风险。
+//        需要链接时通过 link 参数传 {text, onClick}，用 DOM API 创建元素。
+function showToast(msg, type = 'info', duration = 3500, link = null) {
     let host = document.getElementById('toastHost');
     if (!host) {
         host = document.createElement('div');
@@ -66,8 +73,18 @@ function showToast(msg, type = 'info', duration = 3500) {
     div.style.cssText = `background:var(--card);border-left:4px solid ${colors[type]||colors.info};` +
         `box-shadow:0 4px 12px rgba(0,0,0,.1);padding:12px 16px;margin-top:8px;border-radius:6px;` +
         `font-size:13px;color:var(--text);cursor:pointer;animation:toastIn .3s ease;`;
-    div.innerHTML = msg;
-    div.onclick = () => div.remove();
+    // P1-20: 使用 textContent 避免 XSS
+    div.textContent = msg;
+    // P1-20: 链接部分用 DOM API 创建，不使用 innerHTML
+    if (link) {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.textContent = link.text;
+        a.style.cssText = 'margin-left:8px;color:var(--primary);text-decoration:underline;';
+        a.addEventListener('click', (e) => { e.preventDefault(); link.onClick(); div.remove(); });
+        div.appendChild(a);
+    }
+    div.onclick = (e) => { if (e.target === div) div.remove(); };
     host.appendChild(div);
     setTimeout(() => { div.style.opacity = '0'; setTimeout(() => div.remove(), 300); }, duration);
 }
@@ -76,9 +93,11 @@ async function doLogin() {
     const username = document.getElementById('loginUser').value;
     const password = document.getElementById('loginPass').value;
     try {
+        // P1-12: credentials: 'include' 让浏览器保存 Set-Cookie（HttpOnly token）
         const r = await fetch('/api/v1/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({ username, password })
         }).then(r => r.json());
         if (r.error) {
@@ -87,8 +106,8 @@ async function doLogin() {
         }
         accessToken = r.access_token;
         refreshToken = r.refresh_token;
-        localStorage.setItem('access_token', accessToken);
-        localStorage.setItem('refresh_token', refreshToken);
+        sessionStorage.setItem('access_token', accessToken);
+        sessionStorage.setItem('refresh_token', refreshToken);
         document.getElementById('loginPage').style.display = 'none';
         document.getElementById('app').style.display = '';
         loadDashboard(); loadOrders(); loadReport();
@@ -103,14 +122,20 @@ async function doLogin() {
 
 async function tryRefresh() {
     try {
+        // P1-12: credentials: 'include' 让后端从 cookie 读取 refresh_token；body 仍传以兼容
         const r = await fetch('/api/v1/auth/refresh', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({ refresh_token: refreshToken })
         }).then(r => r.json());
         if (r.access_token) {
             accessToken = r.access_token;
-            localStorage.setItem('access_token', accessToken);
+            if (r.refresh_token) {
+                refreshToken = r.refresh_token;
+                sessionStorage.setItem('refresh_token', refreshToken);
+            }
+            sessionStorage.setItem('access_token', accessToken);
             return true;
         }
     } catch (e) {}
@@ -124,16 +149,18 @@ function showLogin() {
 
 async function logout() {
     try {
+        // P1-12: credentials: 'include' 让后端从 cookie 读取并清除 token
         await fetch('/api/v1/auth/logout', {
             method: 'POST',
             headers: getAuthHeaders(),
+            credentials: 'include',
             body: JSON.stringify({ refresh_token: refreshToken })
         });
     } catch (e) {}
     accessToken = '';
     refreshToken = '';
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
+    sessionStorage.removeItem('access_token');
+    sessionStorage.removeItem('refresh_token');
     showLogin();
 }
 
@@ -568,6 +595,7 @@ async function streamQuery(q) {
         const resp = await fetch('/api/v1/aigc/query-stream', {
             method: 'POST',
             headers: getAuthHeaders(),
+            credentials: 'include',  // P1-12: 携带 HttpOnly cookie
             body: JSON.stringify({question: q, session_id: currentSessionId || undefined}),
         });
         if (resp.status === 401) {
@@ -676,7 +704,7 @@ async function runCurrentStep() {
     if (r.need_manual) {
         msg.textContent = r.message;
         // P0-2: 引导 toast 跳转
-        showToast(`步骤${r.step}完成，需人工审核 → <a href="javascript:switchTab('aigc')">前往 AIGC 审核</a>`, 'warn', 6000);
+        showToast(`步骤${r.step}完成，需人工审核 →`, 'warn', 6000, {text: '前往 AIGC 审核', onClick: () => switchTab('aigc')});
     } else if (r.error) {
         msg.textContent = '错误：' + sanitizeError(r.error);
         showToast('步骤执行失败：' + sanitizeError(r.error), 'error');
@@ -684,7 +712,7 @@ async function runCurrentStep() {
         msg.textContent = `步骤${r.step}完成：${r.detail || ''}`;
         // P0-2: 步骤完成后 toast 提示
         if (r.step === 2) {
-            showToast(`建议已生成，请前往 AIGC 审核 → <a href="javascript:switchTab('aigc')">前往审核</a>`, 'success', 6000);
+            showToast(`建议已生成，请前往 AIGC 审核 →`, 'success', 6000, {text: '前往审核', onClick: () => switchTab('aigc')});
         } else if (r.step === 5) {
             showToast('闭环全流程已完成 ✅ 数据已刷新', 'success', 6000);
             loadDashboard();
@@ -704,11 +732,15 @@ async function runCurrentStep() {
 }
 
 // P1-1: SSE 实时进度（监听闭环状态变化）
+// P0-3: EventSource 不支持自定义 Header，通过 query 参数传 token；P1-12: 同时启用 withCredentials 携带 cookie
 let _loopEventSource = null;
 function startLoopStream() {
     if (_loopEventSource) _loopEventSource.close();
     try {
-        _loopEventSource = new EventSource('/api/v1/loop/stream');
+        // P0-3: 通过 query 参数传递 token（EventSource 无法设置 Authorization Header）
+        // P1-12: withCredentials=true 让浏览器自动携带 HttpOnly cookie（后端 cookie 优先，query fallback）
+        const streamUrl = accessToken ? `/api/v1/loop/stream?token=${encodeURIComponent(accessToken)}` : '/api/v1/loop/stream';
+        _loopEventSource = new EventSource(streamUrl, { withCredentials: true });
         _loopEventSource.onmessage = (e) => {
             try {
                 const data = JSON.parse(e.data);

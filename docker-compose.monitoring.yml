@@ -1,0 +1,134 @@
+# ====================================================================
+# 监控栈独立 Compose 文件（P1-13 日志聚合 + 告警）
+# --------------------------------------------------------------------
+# 本文件作为 docker-compose.prod.yml 的 override 补充，不修改原文件
+# 包含三个服务：loki / promtail / alertmanager
+# （prometheus 与 grafana 已由 P0 监控栈提供，本文件不重复定义）
+#
+# 启动方式（与生产 compose 联合启动）：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
+#
+# 单独启动监控栈（仅本文件，用于测试）：
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# 停止：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml stop loki promtail alertmanager
+# ====================================================================
+
+version: '3.8'
+
+services:
+
+  # ============== Loki：日志聚合存储 ==============
+  # 接收 promtail 推送的日志，提供 LogQL 查询接口
+  # Grafana 数据源添加 http://loki:3100 即可查询
+  loki:
+    image: grafana/loki:2.9.7
+    container_name: ops-loki
+    ports:
+      - "3100:3100"   # Loki HTTP API 端口
+    volumes:
+      # 挂载配置目录（loki-config.yml）
+      - ./monitoring/loki:/etc/loki:ro
+      # 持久化存储卷（chunks / index / compactor）
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M   # Loki 单机资源上限
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ============== Promtail：日志采集 agent ==============
+  # 通过 docker socket 自动发现容器，采集 stdout/stderr，解析 JSON 后推送至 loki
+  promtail:
+    image: grafana/promtail:2.9.7
+    container_name: ops-promtail
+    volumes:
+      # 必须挂载 docker.sock 才能使用 docker_sd_configs 自动发现容器
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 挂载容器日志目录，promtail 直接读取 *-json.log 文件
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # 挂载 promtail 配置
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # positions 文件持久化（记录读取偏移）
+      - promtail_data:/tmp
+    command: -config.file=/etc/promtail/promtail-config.yml
+    restart: unless-stopped
+    depends_on:
+      - loki
+    deploy:
+      resources:
+        limits:
+          memory: 128M   # Promtail 仅做采集解析，资源占用低
+          cpus: '0.2'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ============== Alertmanager：告警路由与通知 ==============
+  # 接收 Prometheus 推送的告警，按 severity 分组后通过 webhook 发送
+  # 生产环境应将 webhook 替换为邮件 / 钉钉 / 企业微信
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ops-alertmanager
+    ports:
+      - "9093:9093"   # Alertmanager HTTP API / UI 端口
+    volumes:
+      # 挂载 alertmanager 配置
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 持久化静默规则与通知状态
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9093/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 128M   # Alertmanager 资源占用低
+          cpus: '0.2'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+# ====================================================================
+# 数据卷：用于持久化 Loki / Promtail / Alertmanager 运行数据
+# ====================================================================
+volumes:
+  loki_data:          # Loki chunks + index
+  promtail_data:      # Promtail positions 文件
+  alertmanager_data:  # Alertmanager 静默规则与通知状态
+
+# 使用默认网络，与 docker-compose.prod.yml 中的服务互通
+# 这样 promtail 可通过服务名 loki 推送日志，alertmanager 可被 prometheus 访问
+networks:
+  default:
+    name: intelligent-ops-platform_default

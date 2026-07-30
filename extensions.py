@@ -12,7 +12,8 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy()
 migrate = Migrate()
 cache = Cache()
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
+# P2-14: 全局默认限流 200/hour（测试环境可通过 config 覆盖）
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour"])
 
 # Celery 实例（可选，未配置 broker 时保持 None，不影响主应用启动）
 try:

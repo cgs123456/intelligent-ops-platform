@@ -17,6 +17,7 @@ import re
 import uuid
 from collections import Counter
 from datetime import date, datetime
+from types import MappingProxyType
 
 import requests
 from flask import current_app
@@ -31,26 +32,30 @@ logger = logging.getLogger(__name__)
 class AIGCService:
     """AIGC 服务：LLM 抽象 + 补货建议 + 日报 + Text2SQL + 语义检索 + 对话 + 反馈学习"""
 
-    # Text2SQL 白名单表（含中文注释，作为 LLM schema context）
-    WHITELIST_TABLES = {
-        "ads_daily_ops_report": (
-            "ads_daily_ops_report 经营日报表 | 字段："
-            "dt(日期), total_sales_amount(销售总额), total_purchase_amount(采购总额), "
-            "total_sale_qty(销售件数), inventory_value(库存货值), top_sku(畅销SKU), "
-            "low_stock_count(低库存SKU数)"
-        ),
-        "ads_replenishment_suggest": (
-            "ads_replenishment_suggest 补货建议表 | 字段："
-            "product_id(产品ID), product_name(产品名), recent_7d_sales(近7天销量), "
-            "current_stock(当前库存), in_transit(在途量), suggested_qty(建议补货量), "
-            "suggested_supplier_name(建议供应商), dt(日期)"
-        ),
-        "dws_sales_sku_daily": (
-            "dws_sales_sku_daily SKU日销售汇总 | 字段："
-            "product_id(产品ID), product_name(产品名), dt(日期), "
-            "sale_qty(销量), sale_amount(销售额)"
-        ),
-    }
+    # P2-11: Text2SQL 白名单表（含中文注释，作为 LLM schema context）
+    # 用 MappingProxyType 包成只读视图，防止运行时被业务代码意外修改（如新增表/删除表）
+    # 读取访问（.keys()/.values()/in/[]）与普通 dict 一致，仅禁止写操作
+    WHITELIST_TABLES = MappingProxyType(
+        {
+            "ads_daily_ops_report": (
+                "ads_daily_ops_report 经营日报表 | 字段："
+                "dt(日期), total_sales_amount(销售总额), total_purchase_amount(采购总额), "
+                "total_sale_qty(销售件数), inventory_value(库存货值), top_sku(畅销SKU), "
+                "low_stock_count(低库存SKU数)"
+            ),
+            "ads_replenishment_suggest": (
+                "ads_replenishment_suggest 补货建议表 | 字段："
+                "product_id(产品ID), product_name(产品名), recent_7d_sales(近7天销量), "
+                "current_stock(当前库存), in_transit(在途量), suggested_qty(建议补货量), "
+                "suggested_supplier_name(建议供应商), dt(日期)"
+            ),
+            "dws_sales_sku_daily": (
+                "dws_sales_sku_daily SKU日销售汇总 | 字段："
+                "product_id(产品ID), product_name(产品名), dt(日期), "
+                "sale_qty(销量), sale_amount(销售额)"
+            ),
+        }
+    )
 
     # 模拟向量库的文档片段（ERP字段说明 / SOP / 财务科目）
     DOC_LIBRARY = [
@@ -252,6 +257,13 @@ class AIGCService:
         shortage = max(0, 近7天销量 - (当前库存 + 在途))
         ratio = shortage / max(近7天销量, 1)
         confidence = clamp(0.5 + ratio*0.49, 0.5, 0.99)
+
+        P2-17: 公式局限性说明（当前未考虑，后续可扩展）：
+        - 销售波动：仅用近7天销量均值，未考虑标准差/变异系数，波动大的产品置信度可能偏高
+        - 季节性：未识别周末/节假日高峰，可能高估或低估真实需求
+        - 供应商交期：未结合 lead_days 评估在途到货时效风险，交期长的应降低置信度
+        - 产品品类：未区分快消/长尾商品，长尾商品需求预测不确定性更高
+        - 历史反馈：未结合 SuggestionFeedback 的批准率/修改量做贝叶斯修正
         """
         demand = max(recent_7d_sales or 0, 0)
         available = (current_stock or 0) + (in_transit or 0)
@@ -522,7 +534,7 @@ class AIGCService:
         """
         SQL 安全校验：
         - 必须以 SELECT/WITH 开头
-        - 禁止写操作关键字
+        - 禁止写操作关键字（P1-18: 用 word boundary 正则匹配，避免子串误判）
         - 必须有 LIMIT，没有则补 LIMIT 100
         """
         if not sql:
@@ -545,14 +557,17 @@ class AIGCService:
             "revoke",
             "merge",
         )
+        # P1-18: 用 \b word boundary 正则匹配，避免 substring 误判
+        # 例如 "inserted_at" 列名不应被误判为包含 INSERT 关键字
         for kw in forbid:
-            if kw in low:
+            if re.search(rf"\b{kw}\b", low):
                 logger.warning("SQL 校验失败：包含禁止关键字 %s", kw)
                 return None
-        # 简单子查询写操作检测
-        if re.search(r"\(\s*(insert|update|delete|drop|alter|create)\s", low):
+        # 子查询写操作检测（已有 \b 边界，但保留子查询上下文独立检查）
+        if re.search(r"\(\s*(insert|update|delete|drop|alter|create)\b", low):
             return None
-        if "limit" not in low:
+        # LIMIT 检查也用 word boundary，避免 "limitation" 等列名误判
+        if not re.search(r"\blimit\b", low):
             s = s + " LIMIT 100"
         return s
 

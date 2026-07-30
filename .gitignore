@@ -38,3 +38,7 @@ ops_platform.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 前端构建（P2-16）
+node_modules/
+static/dist/

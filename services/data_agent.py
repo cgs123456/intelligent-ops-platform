@@ -18,7 +18,10 @@ Data Agent — Text2SQL 全链路（改进8）
 
 import logging
 import re
+import threading
+import time
 from datetime import date, datetime
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,14 @@ class DataAgent:
         "vacuum",
         "reindex",
     )
+
+    # P2-15: 对话历史上下文进程内缓存（key=session_id, TTL=60s）
+    # 避免每次多轮对话都查 DB 的 N+1 问题；同一 session 短时间内复用缓存结果
+    # 多线程安全：用 threading.Lock 保护 dict 读写；超 1000 条时清空过期项，仍超则清空最旧项
+    _HISTORY_CACHE_TTL = 60.0
+    _HISTORY_CACHE_MAXSIZE = 1000
+    _history_cache = {}  # {session_id: (timestamp, history_str)}
+    _history_cache_lock = threading.Lock()
 
     def __init__(self, aigc_service=None, db_session=None):
         """注入 AIGCService 以复用 LLM 调用、白名单表、规则兜底。"""
@@ -296,6 +307,10 @@ class DataAgent:
                     # 序列化日期/时间
                     if isinstance(val, (date, datetime)):
                         val = val.isoformat()
+                    elif isinstance(val, Decimal):
+                        # P1-15: Decimal 用 str 保留精度，避免转 float 损失精度
+                        # （Decimal 也实现了 __float__，必须在此分支前拦截）
+                        val = str(val)
                     elif hasattr(val, "__float__"):
                         val = float(val)
                     row_dict[col] = val
@@ -368,9 +383,37 @@ class DataAgent:
         return "\n".join(lines)
 
     def _get_history_context(self, session_id, limit=5):
-        """取最近对话历史作为上下文（用于多轮）。"""
+        """取最近对话历史作为上下文（用于多轮）。
+
+        P2-15: 加进程内 dict 缓存（key=session_id, TTL=60s），避免每次对话都查 DB。
+        - 同一 session_id 在 TTL 内复用缓存结果
+        - TTL 过期或首次查询时回源 DB
+        - 多线程安全：用 Lock 保护 dict 读写
+        - 失败时返回空串，不影响主流程
+        """
         if not session_id:
             return ""
+        now = time.time()
+        # 先查缓存：读操作加锁，避免与并发写迭代/修改冲突
+        with self._history_cache_lock:
+            cached = self._history_cache.get(session_id)
+            if cached and (now - cached[0]) < self._HISTORY_CACHE_TTL:
+                return cached[1]
+        # 缓存未命中或已过期：回源 DB（不加锁，避免持锁查库阻塞其他线程）
+        result = self._load_history_from_db(session_id, limit)
+        # 写入缓存（即便为空串也缓存，避免短时间内重复查空）
+        with self._history_cache_lock:
+            # 超 1000 条时清理：先删过期项，仍超限则删最旧项
+            if len(self._history_cache) >= self._HISTORY_CACHE_MAXSIZE:
+                for k in [k for k, v in self._history_cache.items() if (now - v[0]) >= self._HISTORY_CACHE_TTL]:
+                    del self._history_cache[k]
+                while len(self._history_cache) >= self._HISTORY_CACHE_MAXSIZE and self._history_cache:
+                    del self._history_cache[min(self._history_cache, key=lambda k: self._history_cache[k][0])]
+            self._history_cache[session_id] = (now, result)
+        return result
+
+    def _load_history_from_db(self, session_id, limit=5):
+        """从 DB 加载最近对话历史并做截断（实际回源方法）。"""
         try:
             from models.aigc import ChatHistory
 

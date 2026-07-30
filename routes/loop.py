@@ -6,7 +6,7 @@ import time
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.closed_loop import ClosedLoop
-from services.rbac import require_permission
+from services.rbac import require_permission, verify_sse_auth
 
 bp = Blueprint("loop", __name__, url_prefix="/api/v1/loop")
 
@@ -23,6 +23,9 @@ def run_step():
     step = request.get_json(force=True, silent=True) or {}
     step_no = step.get("step")
     actor = step.get("actor", "system")
+    # P0-10: 校验 step_no 为 1-5 整数
+    if not isinstance(step_no, int) or step_no < 1 or step_no > 5:
+        return jsonify({"error": "step 参数无效，需 1-5"}), 400
     return jsonify(ClosedLoop.run_step(step_no, actor))
 
 
@@ -103,9 +106,14 @@ def auto_trigger():
 
 
 @bp.route("/stream")
-@require_permission("loop:read")
 def stream():
-    """SSE 进度流：推送闭环状态变化，每 15 秒发心跳防断连。"""
+    """SSE 进度流：推送闭环状态变化，每 15 秒发心跳防断连。
+    P0-3: EventSource 不支持自定义 Header，改为从 query 参数 ?token=xxx 传 token。
+    """
+    # P0-3: SSE 认证 — 从 query 参数读取 token（EventSource 无法携带 Authorization Header）
+    err = verify_sse_auth("loop:read")
+    if err is not None:
+        return err
 
     def generate():
         last_status = None

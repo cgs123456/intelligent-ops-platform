@@ -54,8 +54,8 @@ class Config:
     CACHE_REDIS_URL = os.getenv("CACHE_REDIS_URL", "")
     CACHE_DEFAULT_TIMEOUT = int(os.getenv("CACHE_DEFAULT_TIMEOUT", "3600"))
 
-    # RBAC
-    RBAC_ENABLED = os.getenv("RBAC_ENABLED", "0") == "1"  # Demo 默认关闭
+    # RBAC（P0-7: 默认开启，dev 环境可通过 RBAC_ENABLED=0 关闭）
+    RBAC_ENABLED = os.getenv("RBAC_ENABLED", "1") == "1"
 
     # CORS 跨域配置（生产环境: https://ops.example.com,https://admin.example.com）
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
@@ -70,13 +70,16 @@ class Config:
     # 监控指标（Prometheus）
     METRICS_ENABLED = os.getenv("METRICS_ENABLED", "0") == "1"
 
-    # API 文档（flask-smorest，P2-9）
-    API_DOCS_ENABLED = os.getenv("API_DOCS_ENABLED", "0") == "1"
+    # API 文档（flask-smorest，P0-3: 默认开启）
+    API_DOCS_ENABLED = os.getenv("API_DOCS_ENABLED", "1") == "1"
 
 
 class DevConfig(Config):
     DEBUG = True
     ENV = "development"
+    # P2-14: 读写分离从库 URL（dev 默认空，降级主库）+ L1 缓存容量
+    DATABASE_REPLICA_URL = os.getenv("DATABASE_REPLICA_URL", "")
+    CACHE_L1_MAXSIZE = int(os.getenv("CACHE_L1_MAXSIZE", "1024"))
 
 
 class ProdConfig(Config):
@@ -89,6 +92,10 @@ class ProdConfig(Config):
     SESSION_COOKIE_HTTPONLY = True  # JS 不可读
     SESSION_COOKIE_SAMESITE = "Lax"  # 防 CSRF
     PERMANENT_SESSION_LIFETIME = 3600  # Session 有效期 1 小时
+
+    # P2-14: 读写分离从库 URL（未配置则降级到主库）+ L1 缓存容量
+    DATABASE_REPLICA_URL = os.getenv("DATABASE_REPLICA_URL", "")
+    CACHE_L1_MAXSIZE = int(os.getenv("CACHE_L1_MAXSIZE", "1024"))
 
     def __init__(self):
         super().__init__()
@@ -108,6 +115,20 @@ class ProdConfig(Config):
                 "示例: postgresql://user:pass@host:5432/dbname"
             )
         self.SQLALCHEMY_DATABASE_URI = db_url
+
+        # P1-8: 生产环境 Celery broker 不可用 memory://（用 raise 而非 assert，避免 python -O 失效）
+        celery_broker = os.getenv("CELERY_BROKER_URL", "memory://")
+        if celery_broker == "memory://":
+            raise RuntimeError("生产环境必须配置 CELERY_BROKER_URL（不可用 memory://）")
+        self.CELERY_BROKER_URL = celery_broker
+
+        # P1-9: 生产环境限流存储不可用 memory://
+        if self.RATELIMIT_STORAGE_URI == "memory://":
+            raise RuntimeError("生产环境必须配置 RATELIMIT_STORAGE_URL（不可用 memory://）")
+
+        # P2-8: 生产环境 CORS 不可为 *
+        if self.CORS_ORIGINS == "*":
+            raise RuntimeError("生产环境必须指定 CORS_ORIGINS（不可为 *）")
 
 
 # 按环境变量选择

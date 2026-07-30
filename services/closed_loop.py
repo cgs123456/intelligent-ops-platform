@@ -4,6 +4,7 @@
 基于 LangGraph StateGraph 编排（不可用时降级为 if-elif 硬编码）
 """
 
+import json
 import logging
 import os
 import threading
@@ -24,6 +25,14 @@ try:
 except ImportError:
     _HAS_FCNTL = False  # Windows 无 fcntl
 
+# Windows 跨进程锁兜底：msvcrt.locking
+try:
+    import msvcrt
+
+    _HAS_MSVCRT = True
+except ImportError:
+    _HAS_MSVCRT = False
+
 # LangGraph 可选依赖（不可用时降级为 if-elif 硬编码状态机）
 try:
     from langgraph.graph import END, StateGraph
@@ -40,29 +49,56 @@ except ImportError:
 
 def _file_lock(run_id, step):
     """跨进程文件锁（兼容 gunicorn 多 worker）。
-    Linux/Mac 用 fcntl.flock；Windows 无 fcntl 返回 None 退回 threading。
+    Linux/Mac 用 fcntl.flock；Windows 用 msvcrt.locking 实现跨进程锁。
+    两者都不可用时返回 None，由 _acquire_lock 退回 threading（仅进程内有效）。
     """
-    if not _HAS_FCNTL:
+    if not _HAS_FCNTL and not _HAS_MSVCRT:
         return None, None
-    lock_dir = os.getenv("LOOP_LOCK_DIR", "/tmp")
+    # 锁文件目录：Windows 默认 instance/，Linux 默认 /tmp
+    if os.name == "nt":
+        default_dir = os.path.join(os.getcwd(), "instance")
+    else:
+        default_dir = "/tmp"
+    lock_dir = os.getenv("LOOP_LOCK_DIR", default_dir)
     try:
         os.makedirs(lock_dir, exist_ok=True)
         lock_path = os.path.join(lock_dir, f"loop_{run_id}_{step}.lock")
-        f = open(lock_path, "w")
+        # P0-3: 用 os.open + O_NOFOLLOW 防 symlink 劫持，权限 0o600 防其他用户读写
+        # O_EXCL 确保是我们创建的文件而非符号链接
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            # 文件已存在（上次未清理），重新以 O_WRONLY 打开（不跟随符号链接）
+            fd = os.open(lock_path, os.O_WRONLY | os.O_NOFOLLOW)
+        f = os.fdopen(fd, "w")
+        # msvcrt.locking 要求文件至少有 1 字节内容
+        if _HAS_MSVCRT and not _HAS_FCNTL:
+            f.write("L")
+            f.flush()
         return f, lock_path
     except Exception:
         return None, None
 
 
 def _try_acquire_file_lock(f):
-    """尝试获取文件排他锁，非阻塞。成功返回 True。"""
-    if f is None or not _HAS_FCNTL:
+    """尝试获取文件排他锁，非阻塞。成功返回 True。
+    Linux/Mac 用 fcntl.flock；Windows 用 msvcrt.locking。
+    """
+    if f is None:
         return False
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
+    if _HAS_FCNTL:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    if _HAS_MSVCRT:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    return False
 
 
 # Windows 兜底：进程内 threading 锁
@@ -86,7 +122,13 @@ def _acquire_lock(run_id, step):
 
         def release():
             try:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                if _HAS_FCNTL:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                elif _HAS_MSVCRT:
+                    try:
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
             except Exception:
                 pass
             f.close()
@@ -96,7 +138,9 @@ def _acquire_lock(run_id, step):
                 pass
 
         return True, release
-    # 文件锁不可用，尝试 threading
+    # 文件锁不可用（fcntl/msvcrt 都缺失），退回 threading 并记录 warning
+    if not _HAS_FCNTL and not _HAS_MSVCRT:
+        logger.warning("跨进程文件锁不可用（fcntl 与 msvcrt 均缺失），仅使用进程内 threading 锁")
     lock = _get_thread_lock(run_id, step)
     if lock.acquire(blocking=False):
         return True, lambda: lock.release()
@@ -104,9 +148,10 @@ def _acquire_lock(run_id, step):
 
 
 def with_timeout(seconds):
-    """P2-5: 步骤超时装饰器。
-    优先使用 multiprocessing（超时后可终止子进程），不可用时回退到 threading。
-    会自动把 Flask app context 传递到子进程/子线程。
+    """P2-5/P1-1: 步骤超时装饰器。
+    使用 threading 模式（daemon 线程 + Event.wait），避免 multiprocessing 破坏 DB 事务。
+    线程无法被强制 kill，超时后主线程抛 TimeoutError，daemon 线程会在进程退出时自动结束。
+    会自动把 Flask app context 传递到子线程。
     """
 
     def decorator(func):
@@ -116,58 +161,27 @@ def with_timeout(seconds):
 
             app = current_app._get_current_object()
 
-            # 尝试 multiprocessing（Linux 生产环境）
-            try:
-                import multiprocessing
+            result_box = [None]
+            error_box = [None]
+            done_event = threading.Event()
 
-                ctx = multiprocessing.get_context("spawn") if os.name == "nt" else multiprocessing
+            def target_thread():
+                try:
+                    with app.app_context():
+                        result_box[0] = func(*args, **kwargs)
+                except Exception as e:
+                    error_box[0] = e
+                finally:
+                    done_event.set()
 
-                def target(app_obj, args_t, kwargs_t, result_box, error_box):
-                    try:
-                        with app_obj.app_context():
-                            result_box[0] = func(*args_t, **kwargs_t)
-                    except Exception as e:
-                        error_box[0] = e
-
-                manager = ctx.Manager()
-                result_box = manager.list([None])
-                error_box = manager.list([None])
-                p = ctx.Process(
-                    target=target,
-                    args=(app, args, kwargs, result_box, error_box),
-                    daemon=True,
-                )
-                p.start()
-                p.join(timeout=seconds)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=5)
-                    if p.is_alive():
-                        p.kill()
-                    raise TimeoutError(f"步骤执行超时（{seconds}秒），子进程已终止")
-                if error_box[0]:
-                    raise error_box[0]
-                return result_box[0]
-            except (ValueError, TypeError, AttributeError):
-                # 回退到 threading（Windows 或 pickling 失败时）
-                result_box = [None]
-                error_box = [None]
-
-                def target_thread():
-                    try:
-                        with app.app_context():
-                            result_box[0] = func(*args, **kwargs)
-                    except Exception as e:
-                        error_box[0] = e
-
-                t = threading.Thread(target=target_thread, daemon=True)
-                t.start()
-                t.join(timeout=seconds)
-                if t.is_alive():
-                    raise TimeoutError(f"步骤执行超时（{seconds}秒）")
-                if error_box[0]:
-                    raise error_box[0]
-                return result_box[0]
+            t = threading.Thread(target=target_thread, daemon=True)
+            t.start()
+            # 主线程等待 done_event 或超时
+            if not done_event.wait(timeout=seconds):
+                raise TimeoutError(f"步骤执行超时（{seconds}秒），线程仍在后台运行")
+            if error_box[0]:
+                raise error_box[0]
+            return result_box[0]
 
         return wrapper
 
@@ -233,6 +247,7 @@ class ClosedLoop:
 
     # 懒加载的 LangGraph 编译图
     _graph = None
+    _graph_lock = threading.Lock()
 
     @staticmethod
     def _services():
@@ -257,16 +272,21 @@ class ClosedLoop:
 
     @staticmethod
     def _get_graph():
-        """懒加载编译好的 LangGraph StateGraph"""
+        """懒加载编译好的 LangGraph StateGraph（线程安全双重检查锁定）"""
         if not _HAS_LANGGRAPH:
             return None
         if ClosedLoop._graph is None:
-            ClosedLoop._graph = ClosedLoop._build_graph()
+            with ClosedLoop._graph_lock:
+                if ClosedLoop._graph is None:
+                    ClosedLoop._graph = ClosedLoop._build_graph()
         return ClosedLoop._graph
 
     @staticmethod
     def _build_graph():
         """构建五步闭环 StateGraph
+
+        当前未在运行时调用，保留用于未来完整编排模式（一次性 graph.invoke() 走完 5 步）。
+        运行时单步执行由 _run_step_via_graph 直接调用节点函数实现。
 
         节点：step1 ~ step5 对应 5 个步骤，fan_out 为并行分发节点
         边：
@@ -481,7 +501,7 @@ class ClosedLoop:
                     pass
                 return {"step": step_no, "error": f"步骤超时：{e}"}
             except Exception as e:
-                logger.exception(f"步骤{step_no}执行失败")
+                logger.exception("步骤%s执行失败", step_no)
                 db.session.rollback()
                 rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
                 if rec:
@@ -541,10 +561,10 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step2(state):
-        """LangGraph 节点：步骤2 人工审核（interrupt 节点）
+        """LangGraph 节点：步骤2 人工审核
 
-        设置等待状态后通过 LangGraph interrupt 暂停图执行，等待人工审核后 resume。
-        直接调用（非 graph.invoke）时不触发中断，仅设置 pending 状态。
+        当前为单步执行模式，interrupt 仅在完整 graph.invoke() 模式下生效。
+        本节点直接返回 need_manual 状态，人工审核通过 API 调用 run_step(3) 推进。
         """
         run_id = state["run_id"]
         actor = state["actor"]
@@ -584,14 +604,6 @@ class ClosedLoop:
                 )
             )
             db.session.commit()
-
-            # LangGraph interrupt：暂停图执行，等待人工 resume
-            # 直接调用（非 graph.invoke）时 interrupt 会抛异常，捕获后忽略
-            if _HAS_LANGGRAPH and interrupt is not None:
-                try:
-                    interrupt({"step": 2, "message": "等待人工审核建议"})
-                except Exception:
-                    pass
 
             return {
                 "step": 2,
@@ -637,9 +649,12 @@ class ClosedLoop:
 
     @staticmethod
     def get_current_run_id():
-        last = LoopState.query.order_by(LoopState.run_id.desc()).first()
+        # 跳过 archived 记录，找最新的未归档 run
+        last = LoopState.query.filter(LoopState.status != "archived").order_by(LoopState.run_id.desc()).first()
         if not last:
-            return 1
+            # 全部归档或无记录，开启新一轮
+            last_any = LoopState.query.order_by(LoopState.run_id.desc()).first()
+            return (last_any.run_id + 1) if last_any else 1
         last_round = LoopState.query.filter_by(run_id=last.run_id).all()
         if all(s.status == "done" for s in last_round) and len(last_round) == 5:
             return last.run_id + 1
@@ -688,9 +703,11 @@ class ClosedLoop:
 
     @staticmethod
     def _run_step_via_graph(step_no, actor="system"):
-        """通过 LangGraph 图节点执行单步
+        """单步执行模式：通过 LangGraph 图节点函数执行单步。
 
-        准备状态后调用对应节点函数，节点函数内部处理锁、LoopState、超时、审计。
+        单步执行模式，不调用 graph.invoke()，而是直接调用对应节点函数，节点函数内部处理
+        锁、LoopState、超时、审计。图定义保留用于未来完整运行模式（一次性走完 5 步），
+        届时通过 graph.invoke() 触发，节点内的 interrupt 才会生效。
         """
         state = ClosedLoop._prepare_state(step_no, actor)
         node_map = {1: "_node_step1", 2: "_node_step2", 3: "_node_step3", 4: "_node_step4", 5: "_node_step5"}
@@ -729,8 +746,6 @@ class ClosedLoop:
                 def _execute():
                     if step_no == 1:
                         return ClosedLoop._step1_generate_suggestions()
-                    elif step_no == 2:
-                        return None  # 人工审核单独处理
                     elif step_no == 3:
                         return ClosedLoop._step3_rpa_order(actor)
                     elif step_no == 4:
@@ -806,7 +821,7 @@ class ClosedLoop:
                     pass
                 return {"step": step_no, "error": f"步骤超时：{e}"}
             except Exception as e:
-                logger.exception(f"步骤{step_no}执行失败")
+                logger.exception("步骤%s执行失败", step_no)
                 db.session.rollback()
                 rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
                 if rec:
@@ -846,65 +861,74 @@ class ClosedLoop:
     def rollback_step(step_no, actor="system"):
         """回滚指定步骤，并补偿已产生的业务副作用。
 
+        P0-6: 入口加跨进程锁，防止与步骤执行并发冲突。获取锁失败说明步骤正在执行。
         补偿策略：
         - 步骤3 RPA下单：取消 draft/confirmed 状态的采购单（received 不可逆，仅记审计）
         - 步骤4 ERP入库：已入库的库存无法直接回退（会破坏移动加权平均成本），
                          仅标记状态 + 审计，需人工冲红
-        - 步骤5 FDE刷新：删除本次生成的 ADS 数据（按 run_id 关联）
+        - 步骤5 FDE刷新：删除本次生成的 ADS 数据（按审计日志记录的 ID 精确关联）
         """
         run_id = ClosedLoop.get_current_run_id()
-        rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
-        if not rec:
-            return {"error": "步骤无记录"}
-        if rec.status == "rolled_back":
-            return {"error": "步骤已回滚，请勿重复操作"}
-        if rec.status == "running":
-            return {"error": "步骤正在执行中，无法回滚"}
+        # P0-6: 回滚前获取跨进程锁，避免与步骤执行并发
+        locked, release = _acquire_lock(run_id, step_no)
+        if not locked:
+            return {"error": f"步骤{step_no}正在执行中（其他进程持有锁），无法回滚", "step": step_no}
 
-        compensations = []
         try:
-            if step_no == 3:
-                compensations = ClosedLoop._compensate_step3(run_id, actor)
-            elif step_no == 4:
-                compensations = ClosedLoop._compensate_step4(run_id, actor)
-            elif step_no == 5:
-                compensations = ClosedLoop._compensate_step5(run_id, actor)
+            rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
+            if not rec:
+                return {"error": "步骤无记录"}
+            if rec.status == "rolled_back":
+                return {"error": "步骤已回滚，请勿重复操作"}
+            if rec.status == "running":
+                return {"error": "步骤正在执行中，无法回滚"}
 
-            old_status = rec.status
-            rec.status = "rolled_back"
-            rec.detail = f"已回滚（原状态：{old_status}）；补偿：{compensations}"
-            rec.finished_at = datetime.now()
-            db.session.commit()
+            compensations = []
+            try:
+                if step_no == 3:
+                    compensations = ClosedLoop._compensate_step3(run_id, actor)
+                elif step_no == 4:
+                    compensations = ClosedLoop._compensate_step4(run_id, actor)
+                elif step_no == 5:
+                    compensations = ClosedLoop._compensate_step5(run_id, actor)
 
-            db.session.add(
-                AuditLog(
-                    actor=actor,
-                    action="loop_step_rollback",
-                    target_type="loop",
-                    target_id=f"{run_id}-{step_no}",
-                    detail=f"回滚步骤{step_no}，原状态{old_status}，补偿 {len(compensations)} 项",
+                old_status = rec.status
+                rec.status = "rolled_back"
+                rec.detail = f"已回滚（原状态：{old_status}）；补偿：{compensations}"
+                rec.finished_at = datetime.now()
+                db.session.commit()
+
+                db.session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="loop_step_rollback",
+                        target_type="loop",
+                        target_id=f"{run_id}-{step_no}",
+                        detail=f"回滚步骤{step_no}，原状态{old_status}，补偿 {len(compensations)} 项",
+                    )
                 )
-            )
-            db.session.commit()
-            return {
-                "step": step_no,
-                "status": "rolled_back",
-                "compensations": compensations,
-            }
-        except Exception as e:
-            db.session.rollback()
-            logger.exception("步骤%s回滚失败", step_no)
-            db.session.add(
-                AuditLog(
-                    actor=actor,
-                    action="loop_rollback_failed",
-                    target_type="loop",
-                    target_id=f"{run_id}-{step_no}",
-                    detail=f"回滚失败：{e}",
+                db.session.commit()
+                return {
+                    "step": step_no,
+                    "status": "rolled_back",
+                    "compensations": compensations,
+                }
+            except Exception as e:
+                db.session.rollback()
+                logger.exception("步骤%s回滚失败", step_no)
+                db.session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="loop_rollback_failed",
+                        target_type="loop",
+                        target_id=f"{run_id}-{step_no}",
+                        detail=f"回滚失败：{e}",
+                    )
                 )
-            )
-            db.session.commit()
-            return {"step": step_no, "error": f"回滚失败：{e}"}
+                db.session.commit()
+                return {"step": step_no, "error": f"回滚失败：{e}"}
+        finally:
+            release()
 
     @staticmethod
     def _compensate_step3(run_id, actor):
@@ -964,40 +988,51 @@ class ClosedLoop:
 
     @staticmethod
     def _compensate_step5(run_id, actor):
-        """补偿步骤5（FDE刷新）：删除本轮生成的 ADS 数据。
-        通过 EtlMeta 的 last_run_at 关联本轮时间。
+        """P0-5: 补偿步骤5（FDE刷新）：按本轮 step5 记录的 ADS 记录 ID 精确删除。
+
+        通过审计日志 action=loop_step5_artifacts 中记录的 ID 列表删除，
+        避免按 date.today() 误删当日历史数据。
         """
-        from models.warehouse import (
-            AdsDailyOpsReport,
-            AdsReplenishmentSuggest,
-            EtlMeta,
-        )
+        from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
 
         compensations = []
-        # 找到本轮 step5 执行的 ETL 元数据
-        step5_log = (
+        # 查找本轮 step5 记录的 ADS 记录 ID（由 _step5_fde_refresh 写入）
+        artifacts_log = (
             AuditLog.query.filter_by(
-                action="loop_step_done",
+                action="loop_step5_artifacts",
                 target_type="loop",
                 target_id=f"{run_id}-5",
             )
             .order_by(AuditLog.id.desc())
             .first()
         )
-        if not step5_log:
-            return ["未找到本轮 step5 记录"]
+        if not artifacts_log or not artifacts_log.detail:
+            # 兼容历史数据：未记录 ID 时仅记审计，不按 date 删除（避免误删）
+            return ["未找到本轮 step5 artifacts 记录，跳过自动删除（请人工核查 ADS 数据）"]
 
-        # 删除今日 ADS 数据（按 run_id 无法精确关联，按 dt 删除）
-        from datetime import date
+        try:
+            ids = json.loads(artifacts_log.detail)
+        except (ValueError, TypeError):
+            return ["step5 artifacts 记录解析失败，跳过自动删除"]
 
-        today = date.today()
-        rep_n = AdsReplenishmentSuggest.query.filter_by(dt=today).delete(synchronize_session=False)
-        rpt_n = AdsDailyOpsReport.query.filter_by(dt=today).delete(synchronize_session=False)
+        rep_ids = ids.get("ads_replenishment_ids", [])
+        rpt_ids = ids.get("ads_daily_ops_ids", [])
+
+        rep_n = 0
+        rpt_n = 0
+        if rep_ids:
+            rep_n = AdsReplenishmentSuggest.query.filter(AdsReplenishmentSuggest.id.in_(rep_ids)).delete(
+                synchronize_session=False
+            )
+        if rpt_ids:
+            rpt_n = AdsDailyOpsReport.query.filter(AdsDailyOpsReport.id.in_(rpt_ids)).delete(synchronize_session=False)
         db.session.commit()
         if rep_n:
-            compensations.append(f"删除今日 ADS 补货建议 {rep_n} 条")
+            compensations.append(f"删除本轮 ADS 补货建议 {rep_n} 条（按 ID 精确删除）")
         if rpt_n:
-            compensations.append(f"删除今日 ADS 经营日报 {rpt_n} 条")
+            compensations.append(f"删除本轮 ADS 经营日报 {rpt_n} 条（按 ID 精确删除）")
+        if not compensations:
+            compensations.append("本轮 step5 无新增 ADS 数据需要清理")
         return compensations
 
     # ==================== 各步骤实现 ====================
@@ -1060,9 +1095,36 @@ class ClosedLoop:
 
     @staticmethod
     def _step5_fde_refresh(actor="system"):
+        """P0-5: 执行 FDE 刷新，并记录本次写入的 ADS 记录 ID 到审计日志，供回滚按 ID 精确删除。"""
+        from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
+
         AIGCService, _, _, WarehouseService = ClosedLoop._services()
+        # 记录 step5 执行前的 ADS 最大 ID，用于定位本次写入的记录
+        pre_max_rep = db.session.query(db.func.max(AdsReplenishmentSuggest.id)).scalar() or 0
+        pre_max_rpt = db.session.query(db.func.max(AdsDailyOpsReport.id)).scalar() or 0
+
         stats = WarehouseService().run_full_pipeline()
         AIGCService().generate_daily_report()
+
+        # 查询本次 step5 新增的 ADS 记录 ID，回滚时按 ID 精确删除（避免误删当日历史数据）
+        new_rep_ids = [
+            r[0]
+            for r in db.session.query(AdsReplenishmentSuggest.id).filter(AdsReplenishmentSuggest.id > pre_max_rep).all()
+        ]
+        new_rpt_ids = [
+            r[0] for r in db.session.query(AdsDailyOpsReport.id).filter(AdsDailyOpsReport.id > pre_max_rpt).all()
+        ]
+        run_id = ClosedLoop.get_current_run_id()
+        db.session.add(
+            AuditLog(
+                actor=actor,
+                action="loop_step5_artifacts",
+                target_type="loop",
+                target_id=f"{run_id}-5",
+                detail=json.dumps({"ads_replenishment_ids": new_rep_ids, "ads_daily_ops_ids": new_rpt_ids}),
+            )
+        )
+        db.session.commit()
 
         # 兼容嵌套返回结构
         def _rows(v):
@@ -1077,11 +1139,30 @@ class ClosedLoop:
 
     @staticmethod
     def reset(actor="system"):
-        LoopState.query.delete()
+        """P0-4: 软结束当前轮次——将当前 run 的步骤标记为 archived，保留历史记录。
+
+        避免全表删除导致历史运行记录丢失。get_current_run_id 会跳过 archived 记录，
+        下次调用自动开启新一轮 run_id。
+        """
+        run_id = ClosedLoop.get_current_run_id()
+        records = LoopState.query.filter_by(run_id=run_id).all()
+        now = datetime.now()
+        for rec in records:
+            rec.status = "archived"
+            rec.detail = (rec.detail or "") + f"（已由 {actor} 归档重置）"
+            rec.finished_at = now
         db.session.commit()
-        db.session.add(AuditLog(actor=actor, action="loop_reset", target_type="loop", detail="闭环状态已重置"))
+        db.session.add(
+            AuditLog(
+                actor=actor,
+                action="loop_reset",
+                target_type="loop",
+                target_id=str(run_id),
+                detail=f"闭环 run #{run_id} 已归档重置（保留历史记录）",
+            )
+        )
         db.session.commit()
-        return "闭环已重置"
+        return f"闭环 run #{run_id} 已重置（历史记录已归档保留）"
 
     @staticmethod
     def check_auto_trigger():

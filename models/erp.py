@@ -20,6 +20,9 @@ class Product(db.Model):
     safety_stock = db.Column(db.Integer, nullable=False, default=10)
     avg_cost = db.Column(db.Numeric(10, 2), default=0)  # 移动加权平均成本
     category = db.Column(db.String(32), default="默认")  # 品类
+    # P1-9: 多币种 + 多税率支持
+    currency_code = db.Column(db.String(3), nullable=False, default="CNY")  # ISO 4217 三字母代码
+    tax_rate = db.Column(db.Numeric(5, 4), nullable=False, default=0.13)  # 增值税率（如 0.13 表示 13%）
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
@@ -62,6 +65,9 @@ class PurchaseOrder(db.Model):
     ext_order_no = db.Column(db.String(64), index=True)
     suggestion_id = db.Column(db.Integer, index=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))  # 入库仓库
+    # P1-9: 多币种 + 多税率支持
+    currency_code = db.Column(db.String(3), nullable=False, default="CNY")
+    tax_rate = db.Column(db.Numeric(5, 4), nullable=False, default=0.13)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
     confirmed_at = db.Column(db.DateTime)
     received_at = db.Column(db.DateTime)
@@ -80,6 +86,9 @@ class SaleOrder(db.Model):
     platform = db.Column(db.String(32), default="线下", index=True)
     status = db.Column(db.String(16), nullable=False, default="confirmed", index=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))
+    # P1-9: 多币种 + 多税率支持
+    currency_code = db.Column(db.String(3), nullable=False, default="CNY")
+    tax_rate = db.Column(db.Numeric(5, 4), nullable=False, default=0.13)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
@@ -99,6 +108,8 @@ class StockMove(db.Model):
     move_type = db.Column(db.String(16), nullable=False, index=True)
     ref_order = db.Column(db.String(40), index=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))
+    # P1-9: 批次管理（关联 StockLot，可空，非批次商品为 NULL）
+    lot_id = db.Column(db.Integer, db.ForeignKey("erp_stock_lot.id"), nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
@@ -111,6 +122,10 @@ class AccountMove(db.Model):
     ref_order = db.Column(db.String(40), index=True)
     amount = db.Column(db.Numeric(12, 2), nullable=False)
     account = db.Column(db.String(32), nullable=False)
+    # P1-9: 多币种 + 税额 + 成本中心
+    tax_amount = db.Column(db.Numeric(12, 2), default=0)  # 税额（按订单 tax_rate 计算）
+    currency_code = db.Column(db.String(3), default="CNY")  # 币种 ISO 4217
+    cost_center_id = db.Column(db.Integer, db.ForeignKey("erp_cost_center.id"), nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
@@ -127,3 +142,79 @@ class ReturnOrder(db.Model):
     reason = db.Column(db.String(256))
     status = db.Column(db.String(16), default="confirmed", index=True)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
+
+
+# ==================== P1-9 业务模块扩展 ====================
+
+
+class StockLot(db.Model):
+    """批次/批次号管理（对应 Odoo stock.production.lot）
+
+    用于食品/医药等有保质期要求的商品，按批次追溯库存与到期日。
+    StockLot.remaining_qty 与 Product.stock_qty 解耦：
+        - Product.stock_qty 为商品总库存（含所有批次）
+        - StockLot.remaining_qty 为单批次剩余数量
+    """
+
+    __tablename__ = "erp_stock_lot"
+    id = db.Column(db.Integer, primary_key=True)
+    lot_no = db.Column(db.String(32), unique=True, nullable=False, index=True)  # 批次号
+    product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
+    supplier_id = db.Column(db.Integer, db.ForeignKey("erp_supplier.id"), nullable=True)  # 供货来源
+    manufacture_date = db.Column(db.DateTime)  # 生产日期
+    expiry_date = db.Column(db.DateTime, nullable=True)  # 过期日期（无保质期商品为空）
+    quantity = db.Column(db.Integer, nullable=False, default=0)  # 入库数量
+    remaining_qty = db.Column(db.Integer, nullable=False, default=0)  # 剩余数量（出库时递减）
+    status = db.Column(db.String(16), default="active", index=True)  # active/expired/exhausted
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class ReorderRule(db.Model):
+    """补货预警规则（对应 Odoo stock.warehouse.orderpoint）
+
+    触发条件：Product.stock_qty <= min_qty
+    建议补货量：max_qty - stock_qty
+    """
+
+    __tablename__ = "erp_reorder_rule"
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=True)
+    min_qty = db.Column(db.Integer, nullable=False, default=10)  # 最低库存阈值
+    max_qty = db.Column(db.Integer, nullable=False, default=50)  # 目标库存上限
+    supplier_id = db.Column(db.Integer, db.ForeignKey("erp_supplier.id"), nullable=True)  # 默认补货供应商
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class CostCenter(db.Model):
+    """成本中心（对应 Odoo account.analytic.account）
+
+    用于会计凭证按部门/项目/产品线分摊成本，支持预算管控。
+    """
+
+    __tablename__ = "erp_cost_center"
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(16), unique=True, nullable=False, index=True)  # 如 CC-01
+    name = db.Column(db.String(64), nullable=False)
+    description = db.Column(db.Text)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class Budget(db.Model):
+    """预算管理（对应 Odoo account.budget）
+
+    按 cost_center + period + category 维度制定预算，actual_amount 由凭证汇总回填。
+    period 格式 YYYY-MM（如 '2026-07'）。
+    """
+
+    __tablename__ = "erp_budget"
+    id = db.Column(db.Integer, primary_key=True)
+    cost_center_id = db.Column(db.Integer, db.ForeignKey("erp_cost_center.id"), nullable=False, index=True)
+    period = db.Column(db.String(7), nullable=False, index=True)  # YYYY-MM
+    budget_amount = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    actual_amount = db.Column(db.Numeric(12, 2), default=0)
+    category = db.Column(db.String(32), default="general")  # 预算类别
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)

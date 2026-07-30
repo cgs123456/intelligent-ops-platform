@@ -30,13 +30,19 @@ class MultiAgentNegotiator:
     # 供应商评级映射：A=5 / B=4 / C=3
     RATING_SCORE = {"A": 5, "B": 4, "C": 3}
 
-    def __init__(self, aigc_service=None, db_session=None):
-        """注入 AIGCService 以复用 LLM 调用与 db_session。"""
+    def __init__(self, aigc_service=None, db_session=None, seed=None):
+        """注入 AIGCService 以复用 LLM 调用与 db_session。
+
+        :param seed: 可选，随机种子（便于测试可复现）；为 None 时不设置
+        """
         # 延迟导入避免循环依赖
         from services.aigc_service import AIGCService
 
         self._aigc = aigc_service or AIGCService(db_session=db_session)
         self.session = self._aigc.session
+        # P2-20: 可选设置随机种子，便于测试可复现
+        if seed is not None:
+            random.seed(seed)
 
     # ---------------- 主入口 ----------------
 
@@ -284,12 +290,13 @@ class MultiAgentNegotiator:
     # ---------------- 工具方法 ----------------
 
     def _mock_competitor(self, product, existing):
-        """候选供应商不足 2 家时构造一个 mock 竞争对手（评级 B、交期 7 天）。"""
-        existing_ids = {self._get(s, "id") for s in existing}
-        mock_id = max([i for i in existing_ids if isinstance(i, int)] + [0]) + 9001
+        """候选供应商不足 2 家时构造一个 mock 竞争对手（评级 B、交期 7 天）。
+
+        P1-16: mock_id 使用负数（-1），避免与真实供应商 ID（正数）冲突。
+        """
         return {
-            "id": mock_id,
-            "name": f"竞争对手-{mock_id}",
+            "id": -1,
+            "name": "竞争对手-模拟",
             "lead_days": 7,
             "rating": "B",
         }

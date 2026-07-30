@@ -46,24 +46,34 @@ class Notifier:
         self._wecom_webhook = None
         self._mail_config = None
         self._initialized = False
+        # P1-3: 保护 _init_from_config 的初始化锁，双重检查锁定模式避免并发重复初始化
+        self._init_lock = threading.Lock()
 
     def _init_from_config(self):
-        """延迟初始化（需要 app context 读取环境变量）"""
+        """延迟初始化（需要 app context 读取环境变量）
+
+        使用双重检查锁定（double-checked locking）：
+        - 第一次检查无锁快速路径，已初始化则直接返回
+        - 未初始化时加锁，再次检查防止并发线程重复初始化
+        """
         if self._initialized:
             return
-        self._dingtalk_webhook = os.getenv("ALERT_DINGTALK_WEBHOOK", "")
-        self._wecom_webhook = os.getenv("ALERT_WECOM_WEBHOOK", "")
-        smtp_host = os.getenv("ALERT_MAIL_SMTP_HOST", "")
-        if smtp_host:
-            self._mail_config = {
-                "host": smtp_host,
-                "port": int(os.getenv("ALERT_MAIL_SMTP_PORT", "465")),
-                "user": os.getenv("ALERT_MAIL_SMTP_USER", ""),
-                "password": os.getenv("ALERT_MAIL_SMTP_PASS", ""),
-                "to": os.getenv("ALERT_MAIL_TO", ""),
-                "from": os.getenv("ALERT_MAIL_FROM", "ops-platform-alert@local"),
-            }
-        self._initialized = True
+        with self._init_lock:
+            if self._initialized:
+                return
+            self._dingtalk_webhook = os.getenv("ALERT_DINGTALK_WEBHOOK", "")
+            self._wecom_webhook = os.getenv("ALERT_WECOM_WEBHOOK", "")
+            smtp_host = os.getenv("ALERT_MAIL_SMTP_HOST", "")
+            if smtp_host:
+                self._mail_config = {
+                    "host": smtp_host,
+                    "port": int(os.getenv("ALERT_MAIL_SMTP_PORT", "465")),
+                    "user": os.getenv("ALERT_MAIL_SMTP_USER", ""),
+                    "password": os.getenv("ALERT_MAIL_SMTP_PASS", ""),
+                    "to": os.getenv("ALERT_MAIL_TO", ""),
+                    "from": os.getenv("ALERT_MAIL_FROM", "ops-platform-alert@local"),
+                }
+            self._initialized = True
 
     def send_alert(self, title, message, level="error", context=None):
         """发送告警（异步，不阻塞主流程）
@@ -78,23 +88,40 @@ class Notifier:
         except Exception:
             pass
 
+        # P0-9: 在主线程捕获当前 Flask app 引用，传给异步线程复用
+        # 避免在 _send_sync 中重复 create_app()（开销巨大且可能死锁递归）
+        # 若无 app context（如纯脚本调用），降级为仅记日志
+        try:
+            app_ref = current_app._get_current_object()
+        except RuntimeError:
+            app_ref = None
+
         # 异步发送，避免阻塞业务线程
         thread = threading.Thread(
             target=self._send_sync,
-            args=(title, message, level, context or {}),
+            args=(title, message, level, context or {}, app_ref),
             daemon=True,
         )
         thread.start()
 
-    def _send_sync(self, title, message, level, context):
-        """同步发送到所有已配置渠道"""
-        # 在新线程中无 app context，需手动 push
-        try:
-            from app import create_app
-            from config import config as default_config
+    def _send_sync(self, title, message, level, context, app_ref=None):
+        """同步发送到所有已配置渠道
 
-            app = create_app(default_config)
-            with app.app_context():
+        :param app_ref: 主线程传入的 Flask app 引用，避免在新线程里重复 create_app()
+                       （create_app 开销巨大且可能死锁递归）；为 None 时降级为仅记日志
+        """
+        # 无 app context：降级为仅记日志，避免 create_app 开销与潜在死锁
+        if app_ref is None:
+            logger.warning(
+                "[Notifier] 无 Flask app context，告警仅记日志 title=%s level=%s msg=%s",
+                title,
+                level,
+                message,
+            )
+            return
+        try:
+            # 复用主线程传入的 app 引用，在新线程中 push app context 后发送
+            with app_ref.app_context():
                 self._send_dingtalk(title, message, level, context)
                 self._send_wecom(title, message, level, context)
                 self._send_email(title, message, level, context)

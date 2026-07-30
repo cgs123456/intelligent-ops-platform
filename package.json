@@ -1,0 +1,31 @@
+{
+  "name": "intelligent-ops-platform-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "智能运维平台前端构建链：仅工具链（clean-css/terser/eslint/chokidar/conventional-changelog），保持原生 JS/CSS/HTML，不引入 React/Vue 等框架。脚本包括构建、压缩、Lint、监听、生成 CHANGELOG。",
+  "scripts": {
+    "build": "node scripts/build-frontend.js",
+    "minify:css": "cleancss -o static/dist/style.min.css static/css/style.css",
+    "minify:js": "terser static/js/app.js -c -m -o static/dist/app.min.js",
+    "lint:js": "eslint static/js/",
+    "watch": "chokidar 'static/css/*.css' 'static/js/*.js' -c 'npm run build'",
+    "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s"
+  },
+  "devDependencies": {
+    "clean-css-cli": "^5.6.0",
+    "terser": "^5.31.0",
+    "eslint": "^9.0.0",
+    "chokidar-cli": "^3.0.0",
+    "conventional-changelog-cli": "^4.0.0"
+  },
+  "eslintConfig": {
+    "env": {
+      "browser": true,
+      "es2021": true
+    },
+    "extends": "eslint:recommended",
+    "rules": {
+      "no-unused-vars": "warn"
+    }
+  }
+}

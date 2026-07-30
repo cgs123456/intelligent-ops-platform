@@ -1,7 +1,20 @@
 """models 包初始化 · 按层组织数据模型"""
 
 from .aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
-from .erp import AccountMove, Product, PurchaseOrder, ReturnOrder, SaleOrder, StockMove, Supplier, Warehouse
+from .erp import (
+    AccountMove,
+    Budget,
+    CostCenter,
+    Product,
+    PurchaseOrder,
+    ReorderRule,
+    ReturnOrder,
+    SaleOrder,
+    StockLot,
+    StockMove,
+    Supplier,
+    Warehouse,
+)
 from .external import ExtEcommerceOrder, ExtSupplierQuote
 from .system import AuditLog, LoopState, Role, User, user_roles
 from .warehouse import (
@@ -29,6 +42,11 @@ __all__ = [
     "StockMove",
     "AccountMove",
     "ReturnOrder",
+    # P1-9 ERP 业务模块扩展
+    "StockLot",
+    "ReorderRule",
+    "CostCenter",
+    "Budget",
     # 外部数据源
     "ExtSupplierQuote",
     "ExtEcommerceOrder",

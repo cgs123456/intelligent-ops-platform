@@ -23,13 +23,16 @@ from models.erp import (
     AccountMove,
     Product,
     PurchaseOrder,
+    ReorderRule,
     ReturnOrder,
     SaleOrder,
+    StockLot,
     StockMove,
     Supplier,
     Warehouse,
 )
 from models.system import AuditLog
+from services.notifier import notifier
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +75,26 @@ class ERPService:
         warehouse_id=None,
         ext_order_no=None,
         suggestion_id=None,
+        currency_code=None,
+        tax_rate=None,
         actor="system",
         ip=None,
     ):
-        """创建采购单（对应 Odoo purchase.order 创建，状态 draft）"""
+        """创建采购单（对应 Odoo purchase.order 创建，状态 draft）
+
+        P1-9: 支持 currency_code/tax_rate 参数，未传时回退到 Product 默认值。
+        """
         try:
+            # P1-9: 未显式传入币种/税率时，从 Product 取默认值（保证向后兼容）
+            if currency_code is None or tax_rate is None:
+                product = self.db.get(Product, product_id)
+                if product is None:
+                    raise ValueError(f"产品不存在: {product_id}")
+                if currency_code is None:
+                    currency_code = product.currency_code or "CNY"
+                if tax_rate is None:
+                    tax_rate = product.tax_rate if product.tax_rate is not None else Decimal("0.13")
+
             order = PurchaseOrder(
                 order_no=self._gen_order_no("PO"),
                 supplier_id=supplier_id,
@@ -87,6 +105,8 @@ class ERPService:
                 ext_order_no=ext_order_no,
                 suggestion_id=suggestion_id,
                 warehouse_id=warehouse_id,
+                currency_code=currency_code,
+                tax_rate=Decimal(tax_rate),
             )
             self.db.add(order)
             self.db.flush()  # 取 order.id
@@ -96,7 +116,8 @@ class ERPService:
                 "purchase_order",
                 order.id,
                 detail=f"创建采购单 {order.order_no} supplier={supplier_id} "
-                f"product={product_id} qty={qty} price={unit_price}",
+                f"product={product_id} qty={qty} price={unit_price} "
+                f"currency={currency_code} tax_rate={tax_rate}",
                 ip=ip,
             )
             self.db.commit()
@@ -110,6 +131,10 @@ class ERPService:
     def confirm_purchase_order(self, order_id, ext_order_no=None, actor="system", ip=None):
         """确认采购单（对应 Odoo purchase.button_confirm）：draft -> confirmed，生成应付凭证
         - ext_order_no: 可选，RPA 场景下回填外部平台订单号（如 1688/京东 采购单号）
+
+        P1-9: 凭证写入 currency_code 与 tax_amount（税额 = 不含税金额 * tax_rate）。
+              约定：amount 字段保持不含税金额，tax_amount 单独存储税额。
+              若订单无税率字段（旧数据），按 0 处理，向后兼容。
         """
         try:
             order = self.db.get(PurchaseOrder, order_id)
@@ -124,12 +149,18 @@ class ERPService:
                 order.ext_order_no = ext_order_no
 
             # 生成应付凭证（对应 Odoo account.move payable）
+            # P1-9: 计算税额 tax_amount = 不含税金额 * tax_rate
             amount = Decimal(order.qty) * Decimal(order.unit_price)
+            tax_rate = Decimal(order.tax_rate) if order.tax_rate is not None else Decimal(0)
+            tax_amount = (amount * tax_rate).quantize(Decimal("0.01"))
+            currency_code = order.currency_code or "CNY"
             acc = AccountMove(
                 ref_type="payable",
                 ref_order=order.order_no,
                 amount=amount,
                 account="应付账款",
+                tax_amount=tax_amount,
+                currency_code=currency_code,
             )
             self.db.add(acc)
 
@@ -138,7 +169,8 @@ class ERPService:
                 "confirm",
                 "purchase_order",
                 order.id,
-                detail=f"确认采购单 {order.order_no} 生成应付凭证 {amount}"
+                detail=f"确认采购单 {order.order_no} 生成应付凭证 {amount} 税额 {tax_amount} "
+                f"currency={currency_code}"
                 f'{f" ext_order_no={ext_order_no}" if ext_order_no else ""}',
                 ip=ip,
             )
@@ -150,11 +182,24 @@ class ERPService:
             logger.exception("确认采购单失败: %s", e)
             raise
 
-    def receive_purchase_order(self, order_id, actor="system", ip=None):
+    def receive_purchase_order(
+        self,
+        order_id,
+        lot_no=None,
+        manufacture_date=None,
+        expiry_date=None,
+        actor="system",
+        ip=None,
+    ):
         """到货入库（对应 Odoo purchase.button_done + stock.picking 入库）
         - 更新 Product.stock_qty
         - 按移动加权平均法更新 Product.avg_cost
         - 生成入库流水 StockMove(in)
+        - P1-9: 支持可选 lot_no 参数，传入时创建 StockLot 批次记录并关联 StockMove
+
+        :param lot_no: 批次号（可选）。传入时创建 StockLot，并关联到入库流水
+        :param manufacture_date: 生产日期（可选，配合 lot_no）
+        :param expiry_date: 过期日期（可选，配合 lot_no）
         """
         try:
             order = self.db.get(PurchaseOrder, order_id)
@@ -181,6 +226,23 @@ class ERPService:
             product.stock_qty = int(new_qty)
             product.avg_cost = new_avg
 
+            # P1-9: 批次管理 —— 传入 lot_no 时创建 StockLot 记录
+            lot_id = None
+            if lot_no:
+                lot = StockLot(
+                    lot_no=lot_no,
+                    product_id=product.id,
+                    supplier_id=order.supplier_id,
+                    manufacture_date=manufacture_date,
+                    expiry_date=expiry_date,
+                    quantity=int(in_qty),
+                    remaining_qty=int(in_qty),
+                    status="active",
+                )
+                self.db.add(lot)
+                self.db.flush()  # 取 lot.id
+                lot_id = lot.id
+
             # 入库流水（对应 Odoo stock.move in）
             move = StockMove(
                 product_id=product.id,
@@ -188,6 +250,7 @@ class ERPService:
                 move_type="in",
                 ref_order=order.order_no,
                 warehouse_id=order.warehouse_id,
+                lot_id=lot_id,
             )
             self.db.add(move)
 
@@ -199,11 +262,13 @@ class ERPService:
                 "receive",
                 "purchase_order",
                 order.id,
-                detail=f"采购入库 {order.order_no} qty={order.qty} " f"avg_cost {old_avg}->{new_avg}",
+                detail=f"采购入库 {order.order_no} qty={order.qty} "
+                f"avg_cost {old_avg}->{new_avg}"
+                f'{f" lot_no={lot_no}" if lot_no else ""}',
                 ip=ip,
             )
             self.db.commit()
-            logger.info("采购入库完成: %s avg_cost=%s", order.order_no, new_avg)
+            logger.info("采购入库完成: %s avg_cost=%s lot=%s", order.order_no, new_avg, lot_no or "-")
             return order
         except Exception as e:
             self.db.rollback()
@@ -231,13 +296,26 @@ class ERPService:
     # ==================== 销售管理 ====================
 
     def create_sale_order(
-        self, product_id, qty, unit_price, customer, warehouse_id=None, platform="线下", actor="system", ip=None
+        self,
+        product_id,
+        qty,
+        unit_price,
+        customer,
+        warehouse_id=None,
+        platform="线下",
+        currency_code=None,
+        tax_rate=None,
+        actor="system",
+        ip=None,
     ):
         """创建销售单（对应 Odoo sale.order 创建 + 确认 + 出库）
         - 扣减库存
         - 出库流水 StockMove(out)
         - 应收凭证 AccountMove(receivable)
         - 按 avg_cost 结转成本（COGS 记入审计）
+
+        P1-9: 支持 currency_code/tax_rate 参数，未传时回退到 Product 默认值；
+              应收凭证写入 currency_code 与 tax_amount。
         """
         try:
             product = self.db.get(Product, product_id)
@@ -245,6 +323,12 @@ class ERPService:
                 raise ValueError(f"产品不存在: {product_id}")
             if product.stock_qty < qty:
                 raise ValueError(f"库存不足: 当前={product.stock_qty} 需要={qty}")
+
+            # P1-9: 未显式传入币种/税率时，从 Product 取默认值（保证向后兼容）
+            if currency_code is None:
+                currency_code = product.currency_code or "CNY"
+            if tax_rate is None:
+                tax_rate = product.tax_rate if product.tax_rate is not None else Decimal("0.13")
 
             # 扣减库存
             product.stock_qty -= qty
@@ -258,6 +342,8 @@ class ERPService:
                 platform=platform,
                 status="confirmed",
                 warehouse_id=warehouse_id,
+                currency_code=currency_code,
+                tax_rate=Decimal(tax_rate),
             )
             self.db.add(order)
             self.db.flush()
@@ -273,12 +359,17 @@ class ERPService:
             self.db.add(move)
 
             # 应收凭证（对应 Odoo account.move receivable）
+            # P1-9: 计算税额 tax_amount = 不含税金额 * tax_rate
             receivable = Decimal(qty) * Decimal(unit_price)
+            tax_rate_dec = Decimal(tax_rate)
+            tax_amount = (receivable * tax_rate_dec).quantize(Decimal("0.01"))
             acc = AccountMove(
                 ref_type="receivable",
                 ref_order=order.order_no,
                 amount=receivable,
                 account="应收账款",
+                tax_amount=tax_amount,
+                currency_code=currency_code,
             )
             self.db.add(acc)
 
@@ -291,11 +382,18 @@ class ERPService:
                 "sale_order",
                 order.id,
                 detail=f"创建销售单 {order.order_no} customer={customer} "
-                f"qty={qty} receivable={receivable} cogs={cogs}",
+                f"qty={qty} receivable={receivable} tax={tax_amount} "
+                f"currency={currency_code} cogs={cogs}",
                 ip=ip,
             )
             self.db.commit()
-            logger.info("销售单已创建: %s receivable=%s cogs=%s", order.order_no, receivable, cogs)
+            logger.info(
+                "销售单已创建: %s receivable=%s tax=%s cogs=%s",
+                order.order_no,
+                receivable,
+                tax_amount,
+                cogs,
+            )
             return order
         except Exception as e:
             self.db.rollback()
@@ -524,3 +622,72 @@ class ERPService:
         # 按库存降序
         summary.sort(key=lambda x: x["net_stock"], reverse=True)
         return summary
+
+    # ==================== P1-9: 库存预警 ====================
+
+    def check_reorder_rules(self):
+        """库存预警检查（对应 Odoo stock.warehouse.orderpoint cron）
+
+        触发条件：
+            - Product.stock_qty <= safety_stock（兜底，所有产品均检查）
+            - 命中 ReorderRule 时按 rule.min_qty 阈值判定
+        命中后通过 Notifier 发送告警，并返回告警列表供调用方记录/落库。
+
+        :return: list[dict]，每条 dict 包含 product_id/sku/current_qty/min_qty/suggest_qty
+        """
+        try:
+            # 预取所有启用的补货规则，建 product_id -> rule map
+            rules = (
+                self.db.query(ReorderRule).filter(ReorderRule.is_active.is_(True)).all()
+            )
+            rule_map = {}
+            for r in rules:
+                # 同一 product 取 min_qty 最大的规则（更严格的阈值优先）
+                if r.product_id not in rule_map or r.min_qty > rule_map[r.product_id].min_qty:
+                    rule_map[r.product_id] = r
+
+            # 取所有在售产品
+            products = self.db.query(Product).filter(Product.is_active.is_(True)).all()
+            alerts = []
+            for p in products:
+                rule = rule_map.get(p.id)
+                # 阈值：命中 ReorderRule 用 rule.min_qty，否则兜底用 product.safety_stock
+                threshold = rule.min_qty if rule else (p.safety_stock or 0)
+                if p.stock_qty <= threshold:
+                    # 建议补货量：达到 max_qty（rule 或 safety_stock * 5 兜底）
+                    target_qty = rule.max_qty if rule else max(threshold * 2, (p.safety_stock or 10) * 5)
+                    suggest_qty = max(0, target_qty - p.stock_qty)
+                    alert = {
+                        "product_id": p.id,
+                        "sku": p.sku,
+                        "name": p.name,
+                        "current_qty": p.stock_qty,
+                        "min_qty": threshold,
+                        "suggest_qty": suggest_qty,
+                        "supplier_id": rule.supplier_id if rule else None,
+                    }
+                    alerts.append(alert)
+
+            # 通过 Notifier 异步发送告警（无 app context 时降级为仅记日志）
+            if alerts:
+                try:
+                    lines = [
+                        f"- SKU={a['sku']} 当前={a['current_qty']} 阈值={a['min_qty']} 建议补货={a['suggest_qty']}"
+                        for a in alerts
+                    ]
+                    message = "\n".join(lines)
+                    notifier.send_alert(
+                        title=f"库存预警：{len(alerts)} 个 SKU 低于安全库存",
+                        message=message,
+                        level="warning",
+                        context={"alert_count": len(alerts)},
+                    )
+                except Exception as ne:
+                    # 告警发送失败不影响主流程
+                    logger.warning("库存预警通知发送失败: %s", ne)
+
+            logger.info("库存预警检查完成: %d 条告警", len(alerts))
+            return alerts
+        except Exception as e:
+            logger.exception("库存预警检查失败: %s", e)
+            raise

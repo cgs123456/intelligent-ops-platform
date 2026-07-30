@@ -1,3 +1,4 @@
+# 注意：本文件仅用于本地开发联调，生产环境请使用 docker-compose.prod.yml
 version: '3.8'
 
 services:
@@ -7,9 +8,11 @@ services:
       - "5000:5000"
     environment:
       - FLASK_ENV=production
-      - DATABASE_URL=postgresql://ops:ops@db:5432/ops_platform
+      # P0-12: 密码改为环境变量，避免硬编码弱口令
+      - DATABASE_URL=postgresql://ops:${DB_PASSWORD:-ops_dev_only}@db:5432/ops_platform
       - CACHE_TYPE=redis
-      - CACHE_REDIS_URL=redis://redis:6379/0
+      # dev Redis 已启用认证（requirepass dev_only），连接 URL 需带密码
+      - CACHE_REDIS_URL=redis://:dev_only@redis:6379/0
       - LLM_PROVIDER=rule
     depends_on:
       - db
@@ -20,17 +23,18 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ops
-      POSTGRES_PASSWORD: ops
+      # P0-12: 密码改为环境变量（仅本地开发默认值，生产用 docker-compose.prod.yml）
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ops_dev_only}
       POSTGRES_DB: ops_platform
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # P0-12: 不暴露 5432 端口到宿主机，容器内网通信即可（避免外部直连）
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # dev Redis 加认证 + 内存上限，避免未授权访问与内存膨胀
+    command: redis-server --requirepass dev_only --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # 不暴露 6379 端口到宿主机，容器内网通信即可（避免外部直连）
 
 volumes:
   pgdata:

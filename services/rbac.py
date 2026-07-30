@@ -37,6 +37,9 @@ def require_permission(permission):
     - RBAC_ENABLED=False 且无 Authorization 头：放行（dev demo 模式）
     - RBAC_ENABLED=False 但带了 Authorization 头：验证 JWT，但不校验权限
     - RBAC_ENABLED=True：JWT 认证 + 权限校验
+
+    :param permission: 权限字符串（如 "erp:read"）。传 None 或空字符串表示
+                       "仅需认证无需特定权限"（P1-14：/me、/change-password 使用）。
     """
 
     def decorator(f):
@@ -50,6 +53,9 @@ def require_permission(permission):
 
             auth_header = request.headers.get("Authorization", "")
             has_token = auth_header.startswith("Bearer ")
+            # P1-12: 无 Authorization Header 时回退 HttpOnly cookie
+            token = auth_header[7:] if has_token else request.cookies.get("access_token", "")
+            has_token = bool(token)
 
             # dev 模式（RBAC_ENABLED=False）且无 token：放行
             if not current_app.config.get("RBAC_ENABLED") and not has_token:
@@ -57,7 +63,6 @@ def require_permission(permission):
 
             # 有 token 必须验证
             if has_token:
-                token = auth_header[7:]
                 payload = AuthService.verify_token(token)
                 if not payload:
                     return jsonify({"error": "Token无效或已过期"}), 401
@@ -65,6 +70,9 @@ def require_permission(permission):
 
             # 第二步：RBAC 权限校验（仅 RBAC_ENABLED=True 时执行）
             if not current_app.config.get("RBAC_ENABLED"):
+                return f(*args, **kwargs)
+            # P1-14: permission 为 None/空表示仅需认证，跳过权限校验
+            if not permission:
                 return f(*args, **kwargs)
             user = get_current_user()
             if not user:
@@ -77,6 +85,55 @@ def require_permission(permission):
         return wrapped
 
     return decorator
+
+
+def verify_sse_auth(permission):
+    """SSE 端点认证：EventSource 不支持自定义 Header，改为从 query 参数 ?token=xxx 读取 token。
+
+    复用 AuthService.verify_token 做 JWT 校验，RBAC 开启时同步校验权限。
+    同时兼容 Authorization Header（fetch 场景），优先 Header，缺失时回退 query 参数。
+    返回 None 表示放行，返回 (Response, status) 表示需立即返回错误。
+    注意：日志中不记录 token 值，仅记录是否通过。
+    """
+    # 测试模式跳过认证
+    if current_app.config.get("TESTING"):
+        return None
+
+    from services.auth import AuthService
+
+    # 优先 Authorization Header，其次 query 参数 token（兼容 EventSource），最后 HttpOnly cookie
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.args.get("token", "").strip()
+        # P1-12: cookie fallback（SSE 场景 EventSource 自动携带 cookie）
+        if not token:
+            token = request.cookies.get("access_token", "")
+
+    has_token = bool(token)
+
+    # dev 模式（RBAC_ENABLED=False）且无 token：放行
+    if not current_app.config.get("RBAC_ENABLED") and not has_token:
+        return None
+
+    # 有 token 必须验证
+    if has_token:
+        payload = AuthService.verify_token(token)
+        if not payload:
+            return jsonify({"error": "Token无效或已过期"}), 401
+        g.current_user = payload
+
+    # 第二步：RBAC 权限校验（仅 RBAC_ENABLED=True 时执行）
+    if not current_app.config.get("RBAC_ENABLED"):
+        return None
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "用户不存在或已禁用"}), 401
+    user_perms = _collect_permissions_safely(user)
+    if permission not in user_perms and "*:*" not in user_perms:
+        return jsonify({"error": f"无权限：{permission}"}), 403
+    return None
 
 
 def _collect_permissions_safely(user):
@@ -151,17 +208,27 @@ def init_rbac_data(app):
         db.session.add(admin)
         db.session.commit()
 
-        # 打印初始密码到日志（仅首次启动）。注意：用 f-string 而非 %s，
-        # 否则日志 formatter 会把字符串中的 %s 当作未替换占位符重复渲染
-        border = "=" * 60
-        msg = (
-            f"\n{border}\n"
-            f"首次启动：admin 账号已创建，初始密码：\n"
-            f"    {initial_password}\n"
-            f"请立即登录并修改密码！登录后系统会清除该标记。\n"
-            f"此密码仅本次启动显示，请妥善保存。\n"
-            f"{border}"
-        )
-        logger.warning(msg)
-        # 同时输出到 stdout，方便 docker logs 查看
-        print(msg)
+        # P0-2: 密码写入受保护文件（权限 0o600），不进日志避免被 ELK 长期采集
+        import os
+
+        try:
+            instance_dir = app.instance_path
+            os.makedirs(instance_dir, exist_ok=True)
+            pwd_file = os.path.join(instance_dir, ".initial_password")
+            # O_CREAT|O_WRONLY|O_EXCL|O_NOFOLLOW：不存在则创建，已存在则失败，不跟随符号链接
+            fd = os.open(pwd_file, os.O_CREAT | os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as fp:
+                fp.write(initial_password)
+            logger.warning(
+                "首次启动：admin 账号已创建，初始密码已写入 %s（权限 0o600）。"
+                "请立即读取并删除该文件，然后登录修改密码。",
+                pwd_file,
+            )
+        except FileExistsError:
+            logger.warning("admin 账号已创建，.initial_password 文件已存在，请先删除后再重试")
+        except Exception as e:
+            # 文件写入失败时回退到 stderr 一次性输出（不进日志采集系统）
+            import sys
+
+            print(f"[启动提示] admin 初始密码（写入文件失败，仅本次 stderr 输出）：{initial_password}", file=sys.stderr)
+            logger.warning("初始密码文件写入失败：%s，已回退到 stderr 输出", e)

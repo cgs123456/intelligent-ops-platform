@@ -1,0 +1,41 @@
+{{- /*
+   HorizontalPodAutoscaler：基于 CPU / 内存利用率的弹性伸缩
+   - 扩容触发：CPU 平均利用率 > targetCPUUtilizationPercentage（默认 70%）
+              或内存平均利用率 > targetMemoryUtilizationPercentage（默认 80%）
+   - 缩容策略：stabilizationWindowSeconds 稳定窗口（默认 300s）后平滑缩容，
+              通过 Percent / Pods 两种 policy 取 Max，避免副本数抖动
+   - 启用后 Deployment.spec.replicas 由 HPA 接管
+   */ -}}
+{{- if .Values.hpa.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "intelligent-ops-platform.fullname" . }}
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  metrics:
+    # CPU 平均利用率超过 70% 触发扩容
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+    # 内存平均利用率超过 80% 触发扩容
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.targetMemoryUtilizationPercentage }}
+  # 弹性伸缩行为策略（平滑缩容，避免抖动）
+  behavior:
+    {{- toYaml .Values.hpa.behavior | nindent 4 }}
+{{- end }}

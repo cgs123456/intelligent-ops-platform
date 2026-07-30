@@ -2,6 +2,8 @@
 
 from datetime import date, datetime
 
+from sqlalchemy import Index
+
 from extensions import db
 
 
@@ -41,6 +43,8 @@ class ChatHistory(db.Model):
     """多轮对话历史"""
 
     __tablename__ = "aigc_chat_history"
+    # P1-13: (session_id, created_at) 复合索引优化多轮对话历史查询
+    __table_args__ = (Index("idx_chat_session_created", "session_id", "created_at"),)
     id = db.Column(db.Integer, primary_key=True)
     session_id = db.Column(db.String(64), nullable=False, index=True)  # 会话ID
     role = db.Column(db.String(16), nullable=False)  # user/assistant
@@ -52,8 +56,13 @@ class SuggestionFeedback(db.Model):
     """审核反馈（用于 AIGC 自学习）"""
 
     __tablename__ = "aigc_suggestion_feedback"
+    # P1-11: 复合索引优化按 action + 时间范围的查询（自学习统计高频使用）
+    __table_args__ = (Index("idx_feedback_action_created", "action", "created_at"),)
     id = db.Column(db.Integer, primary_key=True)
-    suggestion_id = db.Column(db.Integer, nullable=False, index=True)
+    # P1-12: 外键约束防止孤儿反馈记录，删除建议时级联删除反馈
+    suggestion_id = db.Column(
+        db.Integer, db.ForeignKey("aigc_suggestion.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     original_qty = db.Column(db.Integer)
     final_qty = db.Column(db.Integer)  # 审核后的实际量（approved=原量或修改量, rejected=0）
     action = db.Column(db.String(16))  # approved/rejected

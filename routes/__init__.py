@@ -15,6 +15,7 @@ from .audit import bp as audit_bp
 from .auth import bp as auth_bp
 from .erp import bp as erp_bp
 from .fde import bp as fde_bp
+from .finance import bp as finance_bp
 from .loop import bp as loop_bp
 from .rpa import bp as rpa_bp
 
@@ -28,6 +29,7 @@ def register_blueprints(app):
     app.register_blueprint(aigc_bp)
     app.register_blueprint(loop_bp)
     app.register_blueprint(audit_bp)
+    app.register_blueprint(finance_bp)  # P2-17: 财务对账模块
 
     # ---- /api/dashboard：保留实现，但加权限校验 ----
     @app.route("/api/dashboard")
@@ -67,14 +69,19 @@ def register_blueprints(app):
         "/api/fde/run": "/api/v1/fde/run",
         "/api/fde/stats": "/api/v1/fde/stats",
         "/api/fde/ads": "/api/v1/fde/ads",
+        "/api/fde/anomalies": "/api/v1/fde/anomalies",  # P2-25: 补全缺失映射
         "/api/aigc/suggestions": "/api/v1/aigc/suggestions",
         "/api/aigc/generate-suggestions": "/api/v1/aigc/generate-suggestions",
         "/api/aigc/review": "/api/v1/aigc/review",
         "/api/aigc/report": "/api/v1/aigc/report",
         "/api/aigc/generate-report": "/api/v1/aigc/generate-report",
         "/api/aigc/query": "/api/v1/aigc/query",
+        "/api/aigc/negotiate": "/api/v1/aigc/negotiate",  # P2-25: 补全缺失映射
+        "/api/aigc/data-query": "/api/v1/aigc/data-query",  # P2-25: 补全缺失映射
         "/api/loop/status": "/api/v1/loop/status",
         "/api/loop/run-step": "/api/v1/loop/run-step",
+        "/api/loop/run-step-async": "/api/v1/loop/run-step-async",  # P2-25: 补全缺失映射
+        "/api/loop/rollback": "/api/v1/loop/rollback",  # P2-25: 补全缺失映射
         "/api/loop/reset": "/api/v1/loop/reset",
     }
 
