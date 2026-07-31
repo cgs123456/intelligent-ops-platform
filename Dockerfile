@@ -33,7 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 先装依赖（利用 layer 缓存）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# P0-fix: 升级 pip 避免旧版 resolver 误报冲突 + 打印 requirements 便于排错 + 关闭进度条
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    echo "===== requirements.txt =====" && cat requirements.txt && \
+    pip install --no-cache-dir --progress-bar off -r requirements.txt
 
 # 复制业务代码
 COPY . .
