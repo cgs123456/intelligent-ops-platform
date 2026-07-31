@@ -11,7 +11,7 @@
 """
 
 import logging
-import os
+import threading
 
 from config import config as default_config
 from extensions import celery_app
@@ -46,19 +46,34 @@ def _task(name=None, **kwargs):
 
 
 # Flask app context 工厂（Celery worker 需要在 app context 内执行）
-_app_ctx = None
+# P0-3 fix: 使用 threading.local() 替代全局变量，每个线程独立 push app context
+# 原因：Flask app context 基于 thread-local storage，第一个线程 push 的 context
+# 在其他线程中不可见，导致 "Working outside of application context" 错误
+_app_ctx_local = threading.local()
+_app_lock = threading.Lock()
+_app_instance = None  # 共享 app 实例（创建一次），但 context 每线程独立
 
 
 def _get_app():
-    """获取 Flask app 实例（延迟初始化，仅在 worker 中首次调用时创建）"""
-    global _app_ctx
-    if _app_ctx is None:
-        from app import create_app
+    """获取 Flask app context（线程局部，每个线程独立 push）
 
-        app = create_app(default_config)
-        _app_ctx = app.app_context()
-        _app_ctx.push()
-    return _app_ctx
+    P0-3 fix: Flask app context 基于 thread-local storage，无法跨线程共享。
+    使用 threading.local() 确保每个 Celery worker 线程都有自己独立的 app context。
+    app 实例本身只创建一次（双重检查锁定），但 context 每线程 push 一次。
+    """
+    global _app_instance
+    ctx = getattr(_app_ctx_local, "ctx", None)
+    if ctx is None:
+        with _app_lock:
+            if _app_instance is None:  # 双重检查：app 只创建一次
+                from app import create_app
+
+                _app_instance = create_app(default_config)
+            # 每个线程独立 push context
+            ctx = _app_instance.app_context()
+            ctx.push()
+            _app_ctx_local.ctx = ctx
+    return _app_instance
 
 
 # ==================== 闭环任务 ====================
@@ -185,7 +200,7 @@ def detect_anomalies_async(self):
         raise
 
 
-@_task(name="tasks.cleanup_token_blacklist_async")
+@_task(name="tasks.cleanup_token_blacklist_async", bind=True, max_retries=1)
 def cleanup_token_blacklist_async(self):
     """P1-10: 清理已过期的 Token 黑名单记录，避免表无限增长。"""
     try:
@@ -195,7 +210,7 @@ def cleanup_token_blacklist_async(self):
         count = TokenBlacklist.cleanup_expired()
         logger.info("[celery] token blacklist cleanup done: removed=%d", count)
         return {"removed": count}
-    except Exception as exc:
+    except Exception:
         logger.exception("[celery] token blacklist cleanup failed")
         raise
 

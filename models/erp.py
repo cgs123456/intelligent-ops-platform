@@ -4,7 +4,23 @@
 
 from datetime import datetime
 
+from sqlalchemy.ext.hybrid import hybrid_property
+
 from extensions import db
+
+
+def _encrypt_field(value):
+    """加密字段值（延迟导入避免循环依赖）"""
+    from services.crypto import field_crypto
+
+    return field_crypto.encrypt(value)
+
+
+def _decrypt_field(value):
+    """解密字段值（延迟导入避免循环依赖）"""
+    from services.crypto import field_crypto
+
+    return field_crypto.decrypt(value)
 
 
 class Product(db.Model):
@@ -23,6 +39,8 @@ class Product(db.Model):
     # P1-9: 多币种 + 多税率支持
     currency_code = db.Column(db.String(3), nullable=False, default="CNY")  # ISO 4217 三字母代码
     tax_rate = db.Column(db.Numeric(5, 4), nullable=False, default=0.13)  # 增值税率（如 0.13 表示 13%）
+    # P1-9: 成本中心（用于预算管控，从产品维度归集成本，创建凭证时继承到 AccountMove）
+    cost_center_id = db.Column(db.Integer, db.ForeignKey("erp_cost_center.id"), nullable=True, index=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
@@ -35,9 +53,28 @@ class Supplier(db.Model):
     name = db.Column(db.String(64), nullable=False, index=True)
     lead_days = db.Column(db.Integer, nullable=False, default=3)
     rating = db.Column(db.String(1), nullable=False, default="A")
-    contact = db.Column(db.String(64))  # 联系人
-    phone = db.Column(db.String(32))
+    # P0-fix: PII 字段加密存储（密文存储，通过 _contact/_phone 访问明文）
+    _contact = db.Column("contact", db.String(256))  # 联系人（加密）
+    _phone = db.Column("phone", db.String(256))  # 手机号（加密）
     is_active = db.Column(db.Boolean, default=True)
+
+    @hybrid_property
+    def contact(self):
+        """联系人（明文读取）"""
+        return _decrypt_field(self._contact)
+
+    @contact.setter
+    def contact(self, value):
+        self._contact = _encrypt_field(value) if value else None
+
+    @hybrid_property
+    def phone(self):
+        """手机号（明文读取）"""
+        return _decrypt_field(self._phone)
+
+    @phone.setter
+    def phone(self, value):
+        self._phone = _encrypt_field(value) if value else None
 
 
 class Warehouse(db.Model):
@@ -71,6 +108,8 @@ class PurchaseOrder(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
     confirmed_at = db.Column(db.DateTime)
     received_at = db.Column(db.DateTime)
+    # P1-12: 部分到货支持 —— 累计已收货数量，当 received_qty >= qty 时状态置 received
+    received_qty = db.Column(db.Integer, nullable=False, default=0)
 
 
 class SaleOrder(db.Model):
@@ -216,5 +255,56 @@ class Budget(db.Model):
     budget_amount = db.Column(db.Numeric(12, 2), nullable=False, default=0)
     actual_amount = db.Column(db.Numeric(12, 2), default=0)
     category = db.Column(db.String(32), default="general")  # 预算类别
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class ExchangeRate(db.Model):
+    """汇率换算（对应 Odoo res.currency.rate）
+
+    用于多币种场景下将外币金额折算为本位币（CNY）。
+    get_account_summary 在检测到非 CNY 币种时，按 from_currency + to_currency
+    取 date 最新的一条 rate 进行折算。
+    """
+
+    __tablename__ = "erp_exchange_rate"
+    id = db.Column(db.Integer, primary_key=True)
+    from_currency = db.Column(db.String(3), nullable=False, index=True)  # ISO 4217 三字母代码
+    to_currency = db.Column(db.String(3), nullable=False, index=True)  # 通常为 CNY
+    rate = db.Column(db.Numeric(18, 8), nullable=False)  # 汇率：1 from_currency = rate to_currency
+    date = db.Column(db.Date, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class StockTake(db.Model):
+    """库存盘点（对应 Odoo stock.inventory）
+
+    记录盘点单：系统库存 vs 实际库存，差异 diff = actual_qty - system_qty。
+    状态流转：draft -> confirmed。
+    """
+
+    __tablename__ = "erp_stock_take"
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=True, index=True)
+    system_qty = db.Column(db.Integer, nullable=False, default=0)  # 盘点时系统库存
+    actual_qty = db.Column(db.Integer, nullable=False, default=0)  # 实际盘点数量
+    diff = db.Column(db.Integer, nullable=False, default=0)  # 差异 = actual_qty - system_qty
+    status = db.Column(db.String(16), default="draft", index=True)  # draft/confirmed
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class Customer(db.Model):
+    """客户主数据（对应 Odoo res.partner）
+
+    管理客户档案、信用额度与当前余额，支持销售订单信用管控。
+    """
+
+    __tablename__ = "erp_customer"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False, index=True)
+    credit_limit = db.Column(db.Numeric(12, 2), nullable=False, default=0)  # 信用额度
+    balance = db.Column(db.Numeric(12, 2), nullable=False, default=0)  # 当前应收余额
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)

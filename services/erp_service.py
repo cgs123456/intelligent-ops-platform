@@ -14,13 +14,15 @@ ERP 服务层（模拟 Odoo 进销存 + 财务核心链路）
 """
 
 import logging
-import random
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
 from extensions import db
 from models.erp import (
     AccountMove,
+    Budget,
+    ExchangeRate,
     Product,
     PurchaseOrder,
     ReorderRule,
@@ -28,6 +30,7 @@ from models.erp import (
     SaleOrder,
     StockLot,
     StockMove,
+    StockTake,
     Supplier,
     Warehouse,
 )
@@ -61,8 +64,25 @@ class ERPService:
 
     @staticmethod
     def _gen_order_no(prefix):
-        """生成带随机后缀的单号，避免高并发冲突"""
-        return f'{prefix}-{datetime.now().strftime("%Y%m%d%H%M%S")}-{random.randint(1000, 9999)}'
+        """生成带随机后缀的单号，避免高并发冲突
+
+        P2-26: 改用 uuid.uuid4().hex[:8] 替代 random.randint(1000, 9999)，
+        避免随机数碰撞及 random 模块在多进程下的可预测性问题。
+        """
+        return f'{prefix}-{datetime.now().strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:8]}'
+
+    @staticmethod
+    def _to_decimal(value) -> Decimal:
+        """P1-1: 安全转换为 Decimal，避免 Decimal(float) 精度污染。
+
+        None/空值返回 0；Decimal 原样返回；其他类型先 str() 再 Decimal()，
+        规避 Decimal(0.1) == 0.1000000000000000055511151231257827021181583404541015625 的问题。
+        """
+        if value is None:
+            return Decimal(0)
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
 
     # ==================== 采购管理 ====================
 
@@ -106,7 +126,7 @@ class ERPService:
                 suggestion_id=suggestion_id,
                 warehouse_id=warehouse_id,
                 currency_code=currency_code,
-                tax_rate=Decimal(tax_rate),
+                tax_rate=self._to_decimal(tax_rate),
             )
             self.db.add(order)
             self.db.flush()  # 取 order.id
@@ -150,10 +170,13 @@ class ERPService:
 
             # 生成应付凭证（对应 Odoo account.move payable）
             # P1-9: 计算税额 tax_amount = 不含税金额 * tax_rate
-            amount = Decimal(order.qty) * Decimal(order.unit_price)
-            tax_rate = Decimal(order.tax_rate) if order.tax_rate is not None else Decimal(0)
+            amount = self._to_decimal(order.qty) * self._to_decimal(order.unit_price)
+            tax_rate = self._to_decimal(order.tax_rate) if order.tax_rate is not None else Decimal(0)
             tax_amount = (amount * tax_rate).quantize(Decimal("0.01"))
             currency_code = order.currency_code or "CNY"
+            # P1-9: 从 Product 继承 cost_center_id 写入凭证（支持预算实际金额回填）
+            product = self.db.get(Product, order.product_id)
+            cost_center_id = product.cost_center_id if product else None
             acc = AccountMove(
                 ref_type="payable",
                 ref_order=order.order_no,
@@ -161,6 +184,7 @@ class ERPService:
                 account="应付账款",
                 tax_amount=tax_amount,
                 currency_code=currency_code,
+                cost_center_id=cost_center_id,
             )
             self.db.add(acc)
 
@@ -185,6 +209,7 @@ class ERPService:
     def receive_purchase_order(
         self,
         order_id,
+        qty=None,
         lot_no=None,
         manufacture_date=None,
         expiry_date=None,
@@ -196,7 +221,10 @@ class ERPService:
         - 按移动加权平均法更新 Product.avg_cost
         - 生成入库流水 StockMove(in)
         - P1-9: 支持可选 lot_no 参数，传入时创建 StockLot 批次记录并关联 StockMove
+        - P1-12: 支持部分到货 —— 传入 qty 参数为本次到货数量，累计 received_qty，
+          当 received_qty >= order.qty 时状态置 received。
 
+        :param qty: 本次到货数量（可选）。None 表示全量到货（向后兼容）
         :param lot_no: 批次号（可选）。传入时创建 StockLot，并关联到入库流水
         :param manufacture_date: 生产日期（可选，配合 lot_no）
         :param expiry_date: 过期日期（可选，配合 lot_no）
@@ -208,15 +236,25 @@ class ERPService:
             if order.status != "confirmed":
                 raise ValueError(f"采购单状态非 confirmed，无法入库: 当前={order.status}")
 
-            product = self.db.get(Product, order.product_id)
+            # P1-12: 部分到货支持 —— qty 为 None 时全量入库（向后兼容）
+            this_qty = qty if qty is not None else (order.qty - (order.received_qty or 0))
+            if this_qty <= 0:
+                raise ValueError(f"本次到货数量必须为正数: qty={this_qty}")
+            remaining_to_receive = order.qty - (order.received_qty or 0)
+            if this_qty > remaining_to_receive:
+                raise ValueError(f"本次到货数量超过未交数量: 本次={this_qty} 未交={remaining_to_receive}")
+
+            # P0-2: 加行锁 SELECT FOR UPDATE，防止高并发入库库存/成本错乱
+            # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
+            product = self.db.query(Product).filter_by(id=order.product_id).with_for_update().first()
             if not product:
                 raise ValueError(f"产品不存在: {order.product_id}")
 
             # 移动加权平均成本：avg_cost = (原库存*原avg_cost + 入库数量*采购单价) / (原库存+入库数量)
-            old_qty = Decimal(product.stock_qty or 0)
-            old_avg = Decimal(product.avg_cost or 0)
-            in_qty = Decimal(order.qty)
-            in_price = Decimal(order.unit_price)
+            old_qty = self._to_decimal(product.stock_qty or 0)
+            old_avg = self._to_decimal(product.avg_cost or 0)
+            in_qty = self._to_decimal(this_qty)
+            in_price = self._to_decimal(order.unit_price)
             new_qty = old_qty + in_qty
             if new_qty > 0:
                 new_avg = (old_qty * old_avg + in_qty * in_price) / new_qty
@@ -254,21 +292,35 @@ class ERPService:
             )
             self.db.add(move)
 
-            order.status = "received"
-            order.received_at = datetime.now()
+            # P1-12: 累计 received_qty，全部到货时状态置 received
+            order.received_qty = (order.received_qty or 0) + int(in_qty)
+            if order.received_qty >= order.qty:
+                order.status = "received"
+                order.received_at = datetime.now()
+            else:
+                order.status = "confirmed"
 
             self._audit(
                 actor,
                 "receive",
                 "purchase_order",
                 order.id,
-                detail=f"采购入库 {order.order_no} qty={order.qty} "
+                detail=f"采购入库 {order.order_no} this_qty={int(in_qty)} "
+                f"received_qty={order.received_qty}/{order.qty} "
                 f"avg_cost {old_avg}->{new_avg}"
                 f'{f" lot_no={lot_no}" if lot_no else ""}',
                 ip=ip,
             )
             self.db.commit()
-            logger.info("采购入库完成: %s avg_cost=%s lot=%s", order.order_no, new_avg, lot_no or "-")
+            logger.info(
+                "采购入库完成: %s this_qty=%s received=%s/%s avg_cost=%s lot=%s",
+                order.order_no,
+                int(in_qty),
+                order.received_qty,
+                order.qty,
+                new_avg,
+                lot_no or "-",
+            )
             return order
         except Exception as e:
             self.db.rollback()
@@ -276,15 +328,50 @@ class ERPService:
             raise
 
     def cancel_purchase_order(self, order_id, actor="system", ip=None):
-        """取消采购单（对应 Odoo purchase.button_cancel）：置 cancelled 状态"""
+        """取消采购单（对应 Odoo purchase.button_cancel）：置 cancelled 状态
+
+        P1-11: 取消 confirmed 状态的采购单时，生成红字（负数金额）应付凭证冲销原凭证。
+        draft 状态的取消无需冲销（尚未生成凭证）。
+
+        P1-2: 部分到货（received_qty > 0 且 < qty）的 confirmed 单取消时，
+        按整单全额生成红字凭证会与实际入库数量不符，故禁止直接取消；
+        received / returned 状态也不允许取消。
+        """
         try:
             order = self.db.get(PurchaseOrder, order_id)
             if not order:
                 raise ValueError(f"采购单不存在: {order_id}")
-            if order.status == "received":
-                raise ValueError("采购单已入库，无法取消")
+            # P1-2: received / returned 状态拦截（已入库或已退货不可取消）
+            if order.status in ("received", "returned"):
+                raise ValueError(f"采购单状态 {order.status} 无法取消")
+            # P1-2: 部分到货拦截 —— confirmed 但 received_qty > 0 时禁止整单取消
+            if order.received_qty and order.received_qty > 0:
+                raise ValueError("已部分到货，不可直接取消")
+
+            # P1-11: confirmed 状态取消时，生成红字应付凭证冲销原凭证
+            if order.status == "confirmed":
+                amount = self._to_decimal(order.qty) * self._to_decimal(order.unit_price)
+                tax_rate = self._to_decimal(order.tax_rate) if order.tax_rate is not None else Decimal(0)
+                tax_amount = (amount * tax_rate).quantize(Decimal("0.01"))
+                currency_code = order.currency_code or "CNY"
+                reversal = AccountMove(
+                    ref_type="payable",
+                    ref_order=order.order_no,
+                    amount=-amount,
+                    account="应付账款",
+                    tax_amount=-tax_amount,
+                    currency_code=currency_code,
+                )
+                self.db.add(reversal)
+                cancel_detail = (
+                    f"取消采购单 {order.order_no} 生成红字应付凭证 -{amount} 税额 -{tax_amount} "
+                    f"currency={currency_code}"
+                )
+            else:
+                cancel_detail = f"取消采购单 {order.order_no}"
+
             order.status = "cancelled"
-            self._audit(actor, "cancel", "purchase_order", order.id, detail=f"取消采购单 {order.order_no}", ip=ip)
+            self._audit(actor, "cancel", "purchase_order", order.id, detail=cancel_detail, ip=ip)
             self.db.commit()
             logger.info("采购单已取消: %s", order.order_no)
             return order
@@ -318,7 +405,9 @@ class ERPService:
               应收凭证写入 currency_code 与 tax_amount。
         """
         try:
-            product = self.db.get(Product, product_id)
+            # P0-1: 加行锁 SELECT FOR UPDATE，防止高并发超卖
+            # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
+            product = self.db.query(Product).filter_by(id=product_id).with_for_update().first()
             if not product:
                 raise ValueError(f"产品不存在: {product_id}")
             if product.stock_qty < qty:
@@ -343,26 +432,72 @@ class ERPService:
                 status="confirmed",
                 warehouse_id=warehouse_id,
                 currency_code=currency_code,
-                tax_rate=Decimal(tax_rate),
+                tax_rate=self._to_decimal(tax_rate),
             )
             self.db.add(order)
             self.db.flush()
 
-            # 出库流水（对应 Odoo stock.move out，负数=出库）
-            move = StockMove(
-                product_id=product_id,
-                qty=-qty,
-                move_type="out",
-                ref_order=order.order_no,
-                warehouse_id=warehouse_id,
+            # P1-9: 出库流水（对应 Odoo stock.move out，负数=出库）
+            # 按 FEFO（先到期先出）选择批次，扣减 StockLot.remaining_qty 并关联 StockMove.lot_id
+            # 如果无批次（无 StockLot 记录）则跳过批次分配，兼容无批次产品
+            lots = (
+                self.db.query(StockLot)
+                .filter(
+                    StockLot.product_id == product_id,
+                    StockLot.remaining_qty > 0,
+                    StockLot.status == "active",
+                )
+                .order_by(StockLot.expiry_date.asc().nullslast(), StockLot.id.asc())
+                .with_for_update()
+                .all()
             )
-            self.db.add(move)
+            if lots:
+                # 有批次：按 FEFO 分配，每个批次生成一条出库流水
+                remaining_to_pick = qty
+                for lot in lots:
+                    if remaining_to_pick <= 0:
+                        break
+                    pick_qty = min(lot.remaining_qty, remaining_to_pick)
+                    lot.remaining_qty -= pick_qty
+                    if lot.remaining_qty == 0:
+                        lot.status = "exhausted"
+                    out_move = StockMove(
+                        product_id=product_id,
+                        qty=-pick_qty,
+                        move_type="out",
+                        ref_order=order.order_no,
+                        warehouse_id=warehouse_id,
+                        lot_id=lot.id,
+                    )
+                    self.db.add(out_move)
+                    remaining_to_pick -= pick_qty
+                # 批次库存不足时回退到无批次出库（兼容部分批次商品）
+                if remaining_to_pick > 0:
+                    fallback_move = StockMove(
+                        product_id=product_id,
+                        qty=-remaining_to_pick,
+                        move_type="out",
+                        ref_order=order.order_no,
+                        warehouse_id=warehouse_id,
+                    )
+                    self.db.add(fallback_move)
+            else:
+                # 无批次：单条出库流水（向后兼容）
+                move = StockMove(
+                    product_id=product_id,
+                    qty=-qty,
+                    move_type="out",
+                    ref_order=order.order_no,
+                    warehouse_id=warehouse_id,
+                )
+                self.db.add(move)
 
             # 应收凭证（对应 Odoo account.move receivable）
             # P1-9: 计算税额 tax_amount = 不含税金额 * tax_rate
-            receivable = Decimal(qty) * Decimal(unit_price)
-            tax_rate_dec = Decimal(tax_rate)
+            receivable = self._to_decimal(qty) * self._to_decimal(unit_price)
+            tax_rate_dec = self._to_decimal(tax_rate)
             tax_amount = (receivable * tax_rate_dec).quantize(Decimal("0.01"))
+            # P1-9: 从 product 继承 cost_center_id 写入凭证（支持预算实际金额回填）
             acc = AccountMove(
                 ref_type="receivable",
                 ref_order=order.order_no,
@@ -370,11 +505,34 @@ class ERPService:
                 account="应收账款",
                 tax_amount=tax_amount,
                 currency_code=currency_code,
+                cost_center_id=product.cost_center_id,
             )
             self.db.add(acc)
 
-            # 按 avg_cost 结转成本（COGS），记入审计
-            cogs = Decimal(qty) * Decimal(product.avg_cost or 0)
+            # 按 avg_cost 结转成本（COGS）
+            cogs = self._to_decimal(qty) * self._to_decimal(product.avg_cost or 0)
+
+            # P1-17: COGS 入凭证 —— 生成两条 AccountMove 结转成本
+            # 借：主营业务成本（amount=cogs）
+            # 贷：库存商品（amount=-cogs，负数表示减少）
+            if cogs > 0:
+                cogs_debit = AccountMove(
+                    ref_type="cogs",
+                    ref_order=order.order_no,
+                    amount=cogs,
+                    account="主营业务成本",
+                    currency_code=currency_code,
+                    cost_center_id=product.cost_center_id,
+                )
+                cogs_credit = AccountMove(
+                    ref_type="cogs",
+                    ref_order=order.order_no,
+                    amount=-cogs,
+                    account="库存商品",
+                    currency_code=currency_code,
+                    cost_center_id=product.cost_center_id,
+                )
+                self.db.add_all([cogs_debit, cogs_credit])
 
             self._audit(
                 actor,
@@ -412,12 +570,64 @@ class ERPService:
         - ReturnOrder 记录
         """
         try:
-            product = self.db.get(Product, product_id)
+            # P1-7: 校验原销售单存在 + product_id 一致 + 退货数量不超过原销量（扣减已退量）
+            sale_order = self.db.query(SaleOrder).filter_by(order_no=original_order_no).first()
+            if not sale_order:
+                raise ValueError(f"原销售单不存在: {original_order_no}")
+            if sale_order.product_id != product_id:
+                raise ValueError(
+                    f"退货产品与原单不一致: 原单 product_id={sale_order.product_id} " f"退货 product_id={product_id}"
+                )
+            # 累计已退货数量
+            already_returned = (
+                self.db.query(db.func.sum(ReturnOrder.qty))
+                .filter(
+                    ReturnOrder.original_order_no == original_order_no,
+                    ReturnOrder.status == "confirmed",
+                )
+                .scalar()
+            ) or 0
+            max_returnable = sale_order.qty - int(already_returned)
+            if qty > max_returnable:
+                raise ValueError(
+                    f"退货数量超过可退数量: 本次={qty} 已退={int(already_returned)} "
+                    f"原单={sale_order.qty} 可退={max_returnable}"
+                )
+
+            # P0-ERP2: 加行锁 SELECT FOR UPDATE，防止高并发库存回增错乱
+            # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
+            product = self.db.query(Product).filter_by(id=product_id).with_for_update().first()
             if not product:
                 raise ValueError(f"产品不存在: {product_id}")
 
             # 库存回增
             product.stock_qty += qty
+
+            # P1-4: 回写 StockLot.remaining_qty —— 查找原销售单的出库 StockMove（按
+            # original_order_no 关联 ref_order），获取 lot_id 后回增批次剩余库存。
+            # 找不到原出库记录或无批次时跳过（兼容无批次销售场景）。
+            original_out_moves = (
+                self.db.query(StockMove)
+                .filter_by(ref_order=original_order_no, move_type="out")
+                .order_by(StockMove.id.asc())
+                .all()
+            )
+            remaining_to_return = qty
+            for mv in original_out_moves:
+                if remaining_to_return <= 0:
+                    break
+                if mv.lot_id is None:
+                    continue
+                lot = self.db.get(StockLot, mv.lot_id)
+                if lot is None:
+                    continue
+                # 回增上限：该出库流水的数量（取绝对值，避免超回填）
+                returnable_to_lot = min(abs(mv.qty), remaining_to_return)
+                lot.remaining_qty += returnable_to_lot
+                # 批次状态从 exhausted 恢复为 active
+                if lot.status == "exhausted" and lot.remaining_qty > 0:
+                    lot.status = "active"
+                remaining_to_return -= returnable_to_lot
 
             return_no = self._gen_order_no("RO")
             ret = ReturnOrder(
@@ -441,14 +651,46 @@ class ERPService:
             )
             self.db.add(move)
 
-            # 红字应收凭证（对应 Odoo account.move refund）
+            # P1-8: 红字应收凭证（对应 Odoo account.move refund）
+            # 从原销售单获取 currency_code 和 tax_rate，计算 tax_amount = refund_amount * tax_rate
+            currency_code = sale_order.currency_code or "CNY"
+            tax_rate = self._to_decimal(sale_order.tax_rate) if sale_order.tax_rate is not None else Decimal(0)
+            tax_amount = (self._to_decimal(refund_amount) * tax_rate).quantize(Decimal("0.01"))
+            # P1-9: 从 product 继承 cost_center_id 写入凭证（支持预算实际金额回填）
             acc = AccountMove(
                 ref_type="refund",
                 ref_order=return_no,
-                amount=Decimal(refund_amount),
+                amount=self._to_decimal(refund_amount),
                 account="应收账款",
+                tax_amount=tax_amount,
+                currency_code=currency_code,
+                cost_center_id=product.cost_center_id,
             )
             self.db.add(acc)
+
+            # P1-3: 反向 COGS 凭证 —— 原销售单结转了 COGS，退货时按 qty * avg_cost
+            # 生成反向结转凭证（冲减原 COGS，库存回增）：
+            #   借：库存商品（amount=cogs）
+            #   贷：主营业务成本（amount=-cogs）
+            cogs = self._to_decimal(qty) * self._to_decimal(product.avg_cost or 0)
+            if cogs > 0:
+                cogs_debit = AccountMove(
+                    ref_type="cogs",
+                    ref_order=return_no,
+                    amount=cogs,
+                    account="库存商品",
+                    currency_code=currency_code,
+                    cost_center_id=product.cost_center_id,
+                )
+                cogs_credit = AccountMove(
+                    ref_type="cogs",
+                    ref_order=return_no,
+                    amount=-cogs,
+                    account="主营业务成本",
+                    currency_code=currency_code,
+                    cost_center_id=product.cost_center_id,
+                )
+                self.db.add_all([cogs_debit, cogs_credit])
 
             self._audit(
                 actor,
@@ -456,11 +698,12 @@ class ERPService:
                 "return_order",
                 ret.id,
                 detail=f"创建退货单 {return_no} 原单={original_order_no} "
-                f"qty={qty} refund={refund_amount} reason={reason}",
+                f"qty={qty} refund={refund_amount} tax={tax_amount} "
+                f"currency={currency_code} cogs={cogs} reason={reason}",
                 ip=ip,
             )
             self.db.commit()
-            logger.info("退货单已创建: %s", return_no)
+            logger.info("退货单已创建: %s cogs=%s", return_no, cogs)
             return ret
         except Exception as e:
             self.db.rollback()
@@ -478,12 +721,30 @@ class ERPService:
             if from_warehouse_id == to_warehouse_id:
                 raise ValueError("源仓库与目标仓库相同")
 
+            # P1-5: 加行锁 SELECT FOR UPDATE，防止并发调拨导致超卖
+            # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
+            self.db.query(Product).filter_by(id=product_id).with_for_update().first()
+
+            # P1-10: 校验源仓库库存 —— 聚合源仓库 StockMove.qty 求和，校验 >= qty
+            source_stock = (
+                self.db.query(db.func.sum(StockMove.qty))
+                .filter(
+                    StockMove.product_id == product_id,
+                    StockMove.warehouse_id == from_warehouse_id,
+                )
+                .scalar()
+            ) or 0
+            if source_stock < qty:
+                raise ValueError(
+                    f"源仓库库存不足: 当前={int(source_stock)} 需要={qty} " f"warehouse_id={from_warehouse_id}"
+                )
+
             # 源仓库出库流水
             out_move = StockMove(
                 product_id=product_id,
                 qty=-qty,
                 move_type="transfer",
-                ref_order=f'TR-{datetime.now().strftime("%Y%m%d%H%M%S")}-{random.randint(1000, 9999)}',
+                ref_order=f'TR-{datetime.now().strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:8]}',
                 warehouse_id=from_warehouse_id,
             )
             # 目标仓库入库流水
@@ -522,7 +783,7 @@ class ERPService:
         products = self.db.query(Product).filter(Product.is_active.is_(True)).all()
         result = []
         for p in products:
-            stock_value = Decimal(p.stock_qty or 0) * Decimal(p.avg_cost or 0)
+            stock_value = self._to_decimal(p.stock_qty or 0) * self._to_decimal(p.avg_cost or 0)
             result.append(
                 {
                     "id": p.id,
@@ -575,22 +836,67 @@ class ERPService:
         return result
 
     def get_account_summary(self):
-        """会计汇总（对应 Odoo account.move 聚合）：应付 / 应收 / 红字退款 余额"""
+        """会计汇总（对应 Odoo account.move 聚合）：应付 / 应收 / 红字退款 余额
+
+        P2-18: 分开返回 subtotal（amount 之和）、tax_total（tax_amount 之和）、
+              total = subtotal + tax_total，避免税额被遗漏。
+        P2-21: 多币种场景下，非 CNY 凭证按最新汇率折算为 CNY 后再汇总；
+              无汇率数据时保持原值（仅记日志注释），不阻断汇总。
+        """
         rows = (
             self.db.query(
                 AccountMove.ref_type,
+                AccountMove.currency_code,
                 db.func.sum(AccountMove.amount),
+                db.func.sum(AccountMove.tax_amount),
             )
-            .group_by(AccountMove.ref_type)
+            .group_by(AccountMove.ref_type, AccountMove.currency_code)
             .all()
         )
         summary = {"payable": 0.0, "receivable": 0.0, "refund": 0.0}
-        for ref_type, total in rows:
-            if ref_type in summary:
-                summary[ref_type] = float(total or 0)
+        subtotal = Decimal(0)  # 不含税金额合计（折算后）
+        tax_total = Decimal(0)  # 税额合计（折算后）
+        for ref_type, currency_code, amount_sum, tax_sum in rows:
+            if ref_type not in summary:
+                continue
+            amount_dec = self._to_decimal(amount_sum or 0)
+            tax_dec = self._to_decimal(tax_sum or 0)
+            # P2-21: 非 CNY 凭证按最新汇率折算为 CNY
+            currency_code = currency_code or "CNY"
+            if currency_code != "CNY":
+                rate = self._get_latest_rate(currency_code, "CNY")
+                if rate is not None:
+                    amount_dec = (amount_dec * Decimal(str(rate))).quantize(Decimal("0.01"))
+                    tax_dec = (tax_dec * Decimal(str(rate))).quantize(Decimal("0.01"))
+                else:
+                    # 无汇率数据：保持原值（不阻断汇总，仅记录便于运维补充汇率）
+                    logger.warning("未找到 %s->CNY 汇率，凭证按原值汇总", currency_code)
+            summary[ref_type] += float(amount_dec)
+            subtotal += amount_dec
+            tax_total += tax_dec
         # 净应收 = 应收 - 退款
         summary["net_receivable"] = summary["receivable"] - summary["refund"]
+        # P2-18: 不含税合计 / 税额合计 / 含税合计
+        summary["subtotal"] = float(subtotal)
+        summary["tax_total"] = float(tax_total)
+        summary["total"] = float(subtotal + tax_total)
         return summary
+
+    def _get_latest_rate(self, from_currency, to_currency):
+        """P2-21: 取 from_currency -> to_currency 的最新汇率（按 date 降序取首条）。
+
+        :return: 汇率（float）或 None（无数据时）
+        """
+        rate = (
+            self.db.query(ExchangeRate.rate)
+            .filter(
+                ExchangeRate.from_currency == from_currency,
+                ExchangeRate.to_currency == to_currency,
+            )
+            .order_by(ExchangeRate.date.desc())
+            .first()
+        )
+        return rate[0] if rate else None
 
     def get_warehouse_summary(self):
         """仓库汇总（对应 Odoo stock 仓库视图）：按仓库聚合 StockMove 得仓库级库存余额"""
@@ -637,9 +943,7 @@ class ERPService:
         """
         try:
             # 预取所有启用的补货规则，建 product_id -> rule map
-            rules = (
-                self.db.query(ReorderRule).filter(ReorderRule.is_active.is_(True)).all()
-            )
+            rules = self.db.query(ReorderRule).filter(ReorderRule.is_active.is_(True)).all()
             rule_map = {}
             for r in rules:
                 # 同一 product 取 min_qty 最大的规则（更严格的阈值优先）
@@ -691,3 +995,332 @@ class ERPService:
         except Exception as e:
             logger.exception("库存预警检查失败: %s", e)
             raise
+
+    # ==================== P2-20: 预算实际金额回填 ====================
+
+    def refresh_budget_actual(self, budget_id, actor="system", ip=None):
+        """刷新预算实际发生额（对应 Odoo account.budget cron 汇总）
+
+        按 cost_center_id + period 聚合 AccountMove.amount（含 tax_amount），
+        写入 Budget.actual_amount，实现预算执行情况的自动回填。
+
+        聚合口径：
+            - period 为 YYYY-MM，按 AccountMove.created_at 月份过滤
+            - cost_center_id 匹配预算的成本中心
+            - 金额 = SUM(amount) + SUM(tax_amount)（含税口径）
+            - 仅统计非 COGS 结转凭证（cogs 借贷成对自抵，不重复计入预算执行）
+
+        :param budget_id: 预算 ID
+        :return: 更新后的 actual_amount
+        :raises ValueError: 预算不存在时抛出
+        """
+        try:
+            budget = self.db.get(Budget, budget_id)
+            if not budget:
+                raise ValueError(f"预算不存在: {budget_id}")
+
+            period = budget.period or ""  # YYYY-MM
+            try:
+                year, month = period.split("-")
+                period_start = datetime(int(year), int(month), 1)
+                if int(month) == 12:
+                    period_end = datetime(int(year) + 1, 1, 1)
+                else:
+                    period_end = datetime(int(year), int(month) + 1, 1)
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"预算 period 格式非法：{period}") from e
+
+            # 聚合该成本中心 + 期间内的凭证金额（不含 cogs 自抵分录）
+            rows = (
+                self.db.query(
+                    db.func.sum(AccountMove.amount),
+                    db.func.sum(AccountMove.tax_amount),
+                )
+                .filter(AccountMove.cost_center_id == budget.cost_center_id)
+                .filter(AccountMove.created_at >= period_start)
+                .filter(AccountMove.created_at < period_end)
+                .filter(AccountMove.ref_type != "cogs")
+                .first()
+            )
+            amount_sum = self._to_decimal(rows[0] or 0)
+            tax_sum = self._to_decimal(rows[1] or 0)
+            actual = (amount_sum + tax_sum).quantize(Decimal("0.01"))
+
+            old_actual = self._to_decimal(budget.actual_amount or 0)
+            budget.actual_amount = actual
+
+            self._audit(
+                actor,
+                "refresh",
+                "budget",
+                budget.id,
+                detail=f"刷新预算实际金额 budget={budget_id} cost_center={budget.cost_center_id} "
+                f"period={period} {old_actual}->{actual}",
+                ip=ip,
+            )
+            self.db.commit()
+            logger.info("预算实际金额已刷新: budget=%s actual=%s", budget_id, actual)
+            return actual
+        except Exception as e:
+            self.db.rollback()
+            logger.exception("刷新预算实际金额失败: %s", e)
+            raise
+
+    # ==================== P2-27: 采购退货 ====================
+
+    def create_purchase_return(self, order_no, qty, reason, actor="system", ip=None):
+        """创建采购退货（对应 Odoo purchase 退货 + 红字应付凭证）
+
+        流程：
+            - 校验采购单存在且状态为 received
+            - 校验退货数量不超过已收货数量
+            - 减少产品库存（Product.stock_qty）
+            - 生成出库流水 StockMove(return_out，负数)
+            - 生成红字应付凭证 AccountMove(payable，负数金额)
+            - 采购单状态置 returned
+
+        :param order_no: 采购单号
+        :param qty: 退货数量（正数）
+        :param reason: 退货原因
+        :param actor: 操作人
+        :param ip: 操作 IP
+        :return: PurchaseOrder 对象
+        :raises ValueError: 采购单不存在 / 状态非 received / 退货数量超限时抛出
+        """
+        try:
+            order = self.db.query(PurchaseOrder).filter_by(order_no=order_no).first()
+            if not order:
+                raise ValueError(f"采购单不存在: {order_no}")
+            if order.status != "received":
+                raise ValueError(f"采购单状态非 received，无法退货: 当前={order.status}")
+            if qty <= 0:
+                raise ValueError(f"退货数量必须为正数: qty={qty}")
+            received = order.received_qty or order.qty
+            if qty > received:
+                raise ValueError(f"退货数量超过已收货数量: 本次={qty} 已收={received}")
+
+            # P1-5: 加行锁 SELECT FOR UPDATE，防止并发退货库存错乱
+            # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
+            product = (
+                self.db.query(Product)
+                .filter_by(id=order.product_id)
+                .with_for_update()
+                .first()
+            )
+            if not product:
+                raise ValueError(f"产品不存在: {order.product_id}")
+            if product.stock_qty < qty:
+                raise ValueError(f"库存不足无法退货: 当前={product.stock_qty} 退货={qty}")
+
+            # 减少库存
+            product.stock_qty -= qty
+
+            # 出库流水（return_out，负数表示出库）
+            move = StockMove(
+                product_id=product.id,
+                qty=-qty,
+                move_type="return_out",
+                ref_order=order.order_no,
+                warehouse_id=order.warehouse_id,
+            )
+            self.db.add(move)
+
+            # 红字应付凭证（负数金额冲销原应付）
+            amount = self._to_decimal(qty) * self._to_decimal(order.unit_price)
+            tax_rate = self._to_decimal(order.tax_rate) if order.tax_rate is not None else Decimal(0)
+            tax_amount = (amount * tax_rate).quantize(Decimal("0.01"))
+            currency_code = order.currency_code or "CNY"
+            # P1-9: 从 product 继承 cost_center_id 写入凭证（支持预算实际金额回填）
+            acc = AccountMove(
+                ref_type="payable",
+                ref_order=order.order_no,
+                amount=-amount,
+                account="应付账款",
+                tax_amount=-tax_amount,
+                currency_code=currency_code,
+                cost_center_id=product.cost_center_id,
+            )
+            self.db.add(acc)
+
+            # 状态置 returned
+            order.status = "returned"
+
+            self._audit(
+                actor,
+                "return",
+                "purchase_order",
+                order.id,
+                detail=f"采购退货 {order.order_no} qty={qty} reason={reason} "
+                f"红字应付凭证 -{amount} 税额 -{tax_amount} currency={currency_code}",
+                ip=ip,
+            )
+            self.db.commit()
+            logger.info("采购退货完成: %s qty=%s", order.order_no, qty)
+            return order
+        except Exception as e:
+            self.db.rollback()
+            logger.exception("采购退货失败: %s", e)
+            raise
+
+    # ==================== 库存盘点（P1: cycle count）====================
+
+    def create_stock_take(self, product_id, warehouse_id=None, actor="system", ip=None):
+        """创建盘点单（对应 Odoo stock.inventory）
+
+        记录当前系统库存 system_qty，等待人工录入 actual_qty 后确认。
+        状态：draft → confirmed。
+
+        :param product_id: 盘点产品 ID
+        :param warehouse_id: 盘点仓库 ID（可选，None 表示总库存盘点）
+        :param actor: 操作人
+        :param ip: 操作 IP
+        :return: StockTake 对象
+        :raises ValueError: 产品不存在时抛出
+        """
+        try:
+            product = self.db.get(Product, product_id)
+            if not product:
+                raise ValueError(f"产品不存在: {product_id}")
+
+            # 记录系统库存：若指定仓库则聚合 StockMove，否则用 Product.stock_qty
+            if warehouse_id:
+                system_qty = (
+                    self.db.query(db.func.sum(StockMove.qty))
+                    .filter(
+                        StockMove.product_id == product_id,
+                        StockMove.warehouse_id == warehouse_id,
+                    )
+                    .scalar()
+                ) or 0
+            else:
+                system_qty = product.stock_qty or 0
+
+            take = StockTake(
+                product_id=product_id,
+                warehouse_id=warehouse_id,
+                system_qty=int(system_qty),
+                actual_qty=int(system_qty),  # 默认实际=系统，待人工修改
+                diff=0,
+                status="draft",
+            )
+            self.db.add(take)
+            self._audit(
+                actor,
+                "create",
+                "stock_take",
+                None,
+                detail=f"创建盘点单 product={product_id} warehouse={warehouse_id} system_qty={system_qty}",
+                ip=ip,
+            )
+            self.db.commit()
+            logger.info("盘点单创建: product=%s system_qty=%s", product_id, system_qty)
+            return take
+        except Exception as e:
+            self.db.rollback()
+            logger.exception("创建盘点单失败: %s", e)
+            raise
+
+    def confirm_stock_take(self, take_id, actual_qty, actor="system", ip=None):
+        """确认盘点单：计算差异并调整库存（对应 Odoo stock.inventory.action_done）
+
+        流程：
+            - 校验盘点单存在且状态为 draft
+            - 计算 diff = actual_qty - system_qty
+            - 加行锁更新 Product.stock_qty
+            - 生成 StockMove(adjust，正/负) 记录差异调整
+            - 状态置 confirmed
+
+        :param take_id: 盘点单 ID
+        :param actual_qty: 实际盘点数量
+        :param actor: 操作人
+        :param ip: 操作 IP
+        :return: StockTake 对象
+        :raises ValueError: 盘点单不存在 / 状态非 draft / 实际数量非整数时抛出
+        """
+        try:
+            if not isinstance(actual_qty, int) or actual_qty < 0:
+                raise ValueError(f"实际盘点数量必须为非负整数: actual_qty={actual_qty}")
+
+            take = self.db.get(StockTake, take_id)
+            if not take:
+                raise ValueError(f"盘点单不存在: {take_id}")
+            if take.status != "draft":
+                raise ValueError(f"盘点单状态非 draft，不可确认: 当前={take.status}")
+
+            # P1-5: 加行锁防止并发调整库存
+            product = (
+                self.db.query(Product).filter_by(id=take.product_id).with_for_update().first()
+            )
+            if not product:
+                raise ValueError(f"产品不存在: {take.product_id}")
+
+            diff = actual_qty - take.system_qty
+            take.actual_qty = actual_qty
+            take.diff = diff
+
+            # 仅当差异不为 0 时调整库存 + 生成流水
+            if diff != 0:
+                product.stock_qty = (product.stock_qty or 0) + diff
+                move = StockMove(
+                    product_id=take.product_id,
+                    qty=diff,
+                    move_type="adjust",
+                    ref_order=f"STK-{take.id}",
+                    warehouse_id=take.warehouse_id,
+                )
+                self.db.add(move)
+
+            take.status = "confirmed"
+            self._audit(
+                actor,
+                "confirm",
+                "stock_take",
+                take.id,
+                detail=f"确认盘点单 product={take.product_id} system={take.system_qty} "
+                f"actual={actual_qty} diff={diff}",
+                ip=ip,
+            )
+            self.db.commit()
+            logger.info(
+                "盘点单确认: id=%s product=%s system=%s actual=%s diff=%s",
+                take_id,
+                take.product_id,
+                take.system_qty,
+                actual_qty,
+                diff,
+            )
+            return take
+        except Exception as e:
+            self.db.rollback()
+            logger.exception("确认盘点单失败: %s", e)
+            raise
+
+    def list_stock_takes(self, product_id=None, status=None, limit=50):
+        """查询盘点单列表
+
+        :param product_id: 按产品过滤（可选）
+        :param status: 按状态过滤（draft/confirmed，可选）
+        :param limit: 返回条数上限（默认 50，最大 200）
+        :return: list[dict]
+        """
+        limit = max(1, min(limit, 200))
+        query = self.db.query(StockTake)
+        if product_id:
+            query = query.filter_by(product_id=product_id)
+        if status:
+            query = query.filter_by(status=status)
+        rows = query.order_by(StockTake.id.desc()).limit(limit).all()
+        return [
+            {
+                "id": r.id,
+                "product_id": r.product_id,
+                "warehouse_id": r.warehouse_id,
+                "system_qty": r.system_qty,
+                "actual_qty": r.actual_qty,
+                "diff": r.diff,
+                "status": r.status,
+                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None,
+                "updated_at": r.updated_at.strftime("%Y-%m-%d %H:%M:%S") if r.updated_at else None,
+            }
+            for r in rows
+        ]

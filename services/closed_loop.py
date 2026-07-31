@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import threading
-import time
 from datetime import datetime
 from functools import wraps
 from typing import TypedDict
@@ -150,8 +149,13 @@ def _acquire_lock(run_id, step):
 def with_timeout(seconds):
     """P2-5/P1-1: 步骤超时装饰器。
     使用 threading 模式（daemon 线程 + Event.wait），避免 multiprocessing 破坏 DB 事务。
-    线程无法被强制 kill，超时后主线程抛 TimeoutError，daemon 线程会在进程退出时自动结束。
+    线程无法被强制 kill，超时后主线程抛 TimeoutError 并通过 cancel_event 通知子线程取消。
     会自动把 Flask app context 传递到子线程。
+
+    P0-运维2: 增加 cooperative cancellation 机制：
+    - 创建 cancel_event，尝试注入被装饰函数 kwargs，子线程可在关键操作前检查并提前返回不 commit
+    - 主线程超时后 set cancel_event 通知子线程退出
+    - 被装饰函数若不接受 cancel_event 参数（TypeError），降级为不检查
     """
 
     def decorator(func):
@@ -161,6 +165,7 @@ def with_timeout(seconds):
 
             app = current_app._get_current_object()
 
+            cancel_event = threading.Event()
             result_box = [None]
             error_box = [None]
             done_event = threading.Event()
@@ -168,7 +173,12 @@ def with_timeout(seconds):
             def target_thread():
                 try:
                     with app.app_context():
-                        result_box[0] = func(*args, **kwargs)
+                        try:
+                            # 尝试将 cancel_event 注入 kwargs，让被装饰函数可以检查
+                            result_box[0] = func(*args, cancel_event=cancel_event, **kwargs)
+                        except TypeError:
+                            # 被装饰函数不接受 cancel_event 参数，降级为不检查
+                            result_box[0] = func(*args, **kwargs)
                 except Exception as e:
                     error_box[0] = e
                 finally:
@@ -178,7 +188,8 @@ def with_timeout(seconds):
             t.start()
             # 主线程等待 done_event 或超时
             if not done_event.wait(timeout=seconds):
-                raise TimeoutError(f"步骤执行超时（{seconds}秒），线程仍在后台运行")
+                cancel_event.set()  # 通知子线程取消
+                raise TimeoutError(f"步骤执行超时（{seconds}秒），已发送取消信号，后台线程可能仍在运行")
             if error_box[0]:
                 raise error_box[0]
             return result_box[0]
@@ -281,6 +292,11 @@ class ClosedLoop:
                     ClosedLoop._graph = ClosedLoop._build_graph()
         return ClosedLoop._graph
 
+    # P0-fix 注意：本方法构建的 LangGraph 图当前未被 graph.invoke() 调用。
+    # 实际执行路径为 _run_step_via_graph() 中的 getattr 直接调用节点函数。
+    # 图的条件路由（_route_after_step1/step3）和并行执行（fan_out）暂未生效。
+    # 保留代码供未来启用完整图编排，但当前应视为未使用的死代码。
+    # 如需启用，需在 run_step 中改为 graph.invoke({"step_no": step_no, ...})。
     @staticmethod
     def _build_graph():
         """构建五步闭环 StateGraph
@@ -449,8 +465,16 @@ class ClosedLoop:
                 timeout = ClosedLoop._get_timeout()
 
                 @with_timeout(timeout)
-                def _execute():
-                    return step_func(actor)
+                def _execute(cancel_event=None):
+                    # P0-2 fix: check cancel_event before and after step execution
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise TimeoutError("Step cancelled before execution")
+                    detail = step_func(actor)
+                    # P0-2 fix: if cancelled during execution, rollback instead of commit
+                    if cancel_event is not None and cancel_event.is_set():
+                        db.session.rollback()
+                        raise TimeoutError("Step cancelled during execution")
+                    return detail
 
                 detail = _execute()
                 rec.status = "done"
@@ -499,6 +523,9 @@ class ClosedLoop:
                     )
                 except Exception:
                     pass
+                # P0-2 fix: release session after timeout to prevent daemon thread
+                # from using the shared db.session (SQLAlchemy sessions are not thread-safe)
+                db.session.remove()
                 return {"step": step_no, "error": f"步骤超时：{e}"}
             except Exception as e:
                 logger.exception("步骤%s执行失败", step_no)
@@ -705,9 +732,19 @@ class ClosedLoop:
     def _run_step_via_graph(step_no, actor="system"):
         """单步执行模式：通过 LangGraph 图节点函数执行单步。
 
-        单步执行模式，不调用 graph.invoke()，而是直接调用对应节点函数，节点函数内部处理
-        锁、LoopState、超时、审计。图定义保留用于未来完整运行模式（一次性走完 5 步），
-        届时通过 graph.invoke() 触发，节点内的 interrupt 才会生效。
+        当前实际执行方式（P0-fix 标注）：
+            本方法 **不调用 graph.invoke()**，而是通过 ``getattr(ClosedLoop, node_map[step_no])``
+            直接获取并调用对应的节点函数（``_node_step1`` ~ ``_node_step5``）。节点函数
+            内部自行处理跨进程锁、LoopState、超时、审计日志、告警通知等逻辑。
+
+            因此 ``_build_graph()`` 中定义的条件路由（``_route_after_step1`` /
+            ``_route_after_step3``）和并行 fan_out（``_node_fan_out``）在当前模式下
+            **不会生效**，步骤间的推进由外部调用方（API/定时任务）通过 ``run_step(step_no)``
+            串行驱动。
+
+            图定义（``_build_graph``）保留用于未来完整运行模式（一次性走完 5 步），届时
+            需在 ``run_step`` 中改为 ``graph.invoke({"step_no": step_no, ...})``，节点内
+            的 ``interrupt`` 才会生效。
         """
         state = ClosedLoop._prepare_state(step_no, actor)
         node_map = {1: "_node_step1", 2: "_node_step2", 3: "_node_step3", 4: "_node_step4", 5: "_node_step5"}
@@ -743,16 +780,25 @@ class ClosedLoop:
                 timeout = ClosedLoop._get_timeout()
 
                 @with_timeout(timeout)
-                def _execute():
+                def _execute(cancel_event=None):
+                    # P0-2 fix: check cancel_event before step execution
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise TimeoutError("Step cancelled before execution")
                     if step_no == 1:
-                        return ClosedLoop._step1_generate_suggestions()
+                        detail = ClosedLoop._step1_generate_suggestions()
                     elif step_no == 3:
-                        return ClosedLoop._step3_rpa_order(actor)
+                        detail = ClosedLoop._step3_rpa_order(actor)
                     elif step_no == 4:
-                        return ClosedLoop._step4_erp_receive(actor)
+                        detail = ClosedLoop._step4_erp_receive(actor)
                     elif step_no == 5:
-                        return ClosedLoop._step5_fde_refresh(actor)
-                    return None
+                        detail = ClosedLoop._step5_fde_refresh(actor)
+                    else:
+                        detail = None
+                    # P0-2 fix: if cancelled during execution, rollback instead of commit
+                    if cancel_event is not None and cancel_event.is_set():
+                        db.session.rollback()
+                        raise TimeoutError("Step cancelled during execution")
+                    return detail
 
                 # 步骤2特殊处理
                 if step_no == 2:
@@ -819,6 +865,9 @@ class ClosedLoop:
                     )
                 except Exception:
                     pass
+                # P0-2 fix: release session after timeout to prevent daemon thread
+                # from using the shared db.session (SQLAlchemy sessions are not thread-safe)
+                db.session.remove()
                 return {"step": step_no, "error": f"步骤超时：{e}"}
             except Exception as e:
                 logger.exception("步骤%s执行失败", step_no)
@@ -953,7 +1002,7 @@ class ClosedLoop:
         # 更可靠的方式：通过 suggestion_id 关联
         from models.aigc import Suggestion
 
-        ordered_sugs = Suggestion.query.filter_by(status="ordered").all()
+        ordered_sugs = Suggestion.query.filter_by(status="ordered", run_id=run_id).all()
         sug_ids = [s.id for s in ordered_sugs]
 
         pos_to_cancel = (
@@ -1059,20 +1108,37 @@ class ClosedLoop:
         approved = Suggestion.query.filter_by(status="approved").all()
         if not approved:
             return "无已审核建议，跳过下单（请先在步骤2审核建议）"
+        import time as _time
+
+        run_id = ClosedLoop.get_current_run_id()
         rpa = RPAService()
         results = []
         for sug in approved:
-            try:
-                result = rpa.place_supplier_order(
-                    {"id": sug.id, "product_id": sug.product_id, "suggested_qty": sug.suggested_qty}
-                )
-                if result["status"] == "ok":
-                    sug.status = "ordered"
-                    results.append(f'{sug.product_name}→{result["supplier"]}({result["ext_order_no"]})')
-                else:
-                    results.append(f'{sug.product_name}下单失败：{result["reason"]}')
-            except Exception as e:
-                results.append(f"{sug.product_name}异常：{e}")
+            success = False
+            # P1-4: 每条下单最多重试 2 次（共 3 次尝试），间隔 1 秒
+            for attempt in range(3):
+                try:
+                    result = rpa.place_supplier_order(
+                        {"id": sug.id, "product_id": sug.product_id, "suggested_qty": sug.suggested_qty}
+                    )
+                    if result["status"] == "ok":
+                        sug.status = "ordered"
+                        sug.run_id = run_id
+                        results.append(f'{sug.product_name}→{result["supplier"]}({result["ext_order_no"]})')
+                        success = True
+                        break
+                    elif attempt < 2:
+                        _time.sleep(1)
+                        continue
+                    else:
+                        results.append(f'{sug.product_name}下单失败：{result["reason"]}')
+                except Exception as e:
+                    if attempt < 2:
+                        _time.sleep(1)
+                        continue
+                    results.append(f"{sug.product_name}异常：{e}")
+            if not success and not any(sug.product_name in r for r in results):
+                results.append(f"{sug.product_name}下单失败：重试 3 次均未成功")
         db.session.commit()
         return "下单 " + "；".join(results)
 
@@ -1223,7 +1289,7 @@ class ClosedLoop:
             return {
                 "triggered": True,
                 "reason": f"检测到 {len(anomalies)} 个 critical 时序异常，已触发闭环补货",
-                "loop_run_id": status.get("run_id"),
+                "loop_run_id": ClosedLoop.get_status().get("run_id"),
                 "anomaly_count": len(anomalies),
                 "run_step_result": run_result,
             }

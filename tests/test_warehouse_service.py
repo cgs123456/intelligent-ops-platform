@@ -400,7 +400,9 @@ class TestDataQualityTests:
             svc = WarehouseService()
             svc.run_full_pipeline()
             # 注入坏数据：qty=0 的 ODS 库存移动（触发 range 失败）
-            bad = OdsStockMove(product_id=seed_erp_data["p_low_id"], qty=0, move_type="in", ref_order="BAD-001", dt=date.today())
+            bad = OdsStockMove(
+                product_id=seed_erp_data["p_low_id"], qty=0, move_type="in", ref_order="BAD-001", dt=date.today()
+            )
             db.session.add(bad)
             db.session.commit()
 
@@ -505,8 +507,8 @@ class TestQueryInterfaces:
             assert isinstance(report, dict)
             assert len(report) > 0
             # 每张表包含 not_null/unique/range 测试结果
-            for table, tests in report.items():
-                for test_name, info in tests.items():
+            for _table, tests in report.items():
+                for _test_name, info in tests.items():
                     assert info["status"] in ("pass", "fail")
 
     def test_get_ads_data_cached(self, app, seed_erp_data):

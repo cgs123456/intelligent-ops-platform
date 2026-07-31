@@ -1,12 +1,15 @@
 """闭环路由 Blueprint + SSE 进度推送（含心跳）"""
 
 import json
+import logging
 import time
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.closed_loop import ClosedLoop
 from services.rbac import require_permission, verify_sse_auth
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("loop", __name__, url_prefix="/api/v1/loop")
 
@@ -51,8 +54,9 @@ def run_step_async():
         return jsonify({"task_id": result.id, "status": "queued"})
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503
-    except Exception as e:
-        return jsonify({"error": f"异步任务提交失败：{e}"}), 500
+    except Exception:
+        logger.exception("异步任务提交失败 step=%s actor=%s", step_no, actor)
+        return jsonify({"error": "异步任务提交失败，请联系管理员"}), 500
 
 
 @bp.route("/task/<task_id>")
@@ -76,8 +80,9 @@ def get_task_status(task_id):
                 "error": str(r.result) if r.failed() else None,
             }
         )
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.exception("查询任务状态失败 task_id=%s", task_id)
+        return jsonify({"error": "查询任务状态失败，请联系管理员"}), 500
 
 
 @bp.route("/rollback", methods=["POST"])
@@ -118,7 +123,7 @@ def stream():
     def generate():
         last_status = None
         last_heartbeat = time.time()
-        for _ in range(120):  # 最多 120 秒
+        for _ in range(24):  # P1-6: 降低查询频率到 5 秒，最多 120 秒
             status = ClosedLoop.get_status()
             if status != last_status:
                 yield f"data: {json.dumps(status, ensure_ascii=False)}\n\n"
@@ -132,7 +137,7 @@ def stream():
             if now - last_heartbeat > 15:
                 yield ": heartbeat\n\n"
                 last_heartbeat = now
-            time.sleep(1)
+            time.sleep(5)  # P1-6: 降低查询频率，减少 DB session 占用
         yield 'data: {"event":"end"}\n\n'
 
     return Response(

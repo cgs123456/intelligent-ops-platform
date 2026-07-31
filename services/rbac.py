@@ -13,6 +13,7 @@ from flask import current_app, g, jsonify, request
 
 from extensions import db
 from models.system import Role, User
+from services.response import ErrorCode, error_response
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,11 @@ def require_permission(permission):
             token = auth_header[7:] if has_token else request.cookies.get("access_token", "")
             has_token = bool(token)
 
-            # dev 模式（RBAC_ENABLED=False）且无 token：放行
-            if not current_app.config.get("RBAC_ENABLED") and not has_token:
+            # P0-5: RBAC_ENABLED=False 时仅在开发环境放行（防 prod 误关 RBAC 绕过认证）
+            if not current_app.config.get("RBAC_ENABLED", True):
+                if current_app.config.get("ENV") != "development":
+                    return error_response(ErrorCode.FORBIDDEN, "RBAC 未启用且非开发环境，拒绝访问")
+                g.current_user = {"sub": 0, "username": "dev", "roles": ["admin"]}
                 return f(*args, **kwargs)
 
             # 有 token 必须验证
@@ -77,6 +81,11 @@ def require_permission(permission):
             user = get_current_user()
             if not user:
                 return jsonify({"error": "用户不存在或已禁用"}), 401
+            # P0-9 fix: must_change_password=True blocks all except change-password/me/logout/refresh
+            if getattr(user, "must_change_password", False):
+                _allowed = {"auth.change_password", "auth.me", "auth.logout", "auth.refresh"}
+                if request.endpoint not in _allowed:
+                    return jsonify({"error": "Password must be changed before accessing this resource"}), 403
             user_perms = _collect_permissions_safely(user)
             if permission not in user_perms and "*:*" not in user_perms:
                 return jsonify({"error": f"无权限：{permission}"}), 403
@@ -130,6 +139,9 @@ def verify_sse_auth(permission):
     user = get_current_user()
     if not user:
         return jsonify({"error": "用户不存在或已禁用"}), 401
+    # P0-9 fix: must_change_password=True blocks SSE access
+    if getattr(user, "must_change_password", False):
+        return jsonify({"error": "Password must be changed before accessing this resource"}), 403
     user_perms = _collect_permissions_safely(user)
     if permission not in user_perms and "*:*" not in user_perms:
         return jsonify({"error": f"无权限：{permission}"}), 403
@@ -170,6 +182,15 @@ def init_rbac_data(app):
                     [
                         "erp:read",
                         "erp:write",
+                        # P2-23: 细粒度权限（保留 erp:write / finance:write 向后兼容）
+                        "purchase:write",
+                        "sale:write",
+                        "transfer:write",
+                        "return:write",
+                        "recon:create",
+                        "recon:import",
+                        "recon:match",
+                        "recon:close",
                         "rpa:read",
                         "rpa:write",
                         "fde:read",

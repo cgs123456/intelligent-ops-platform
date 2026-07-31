@@ -1,0 +1,60 @@
+{{- /*
+   NetworkPolicy：默认拒绝入站，仅允许指定来源访问 web 端口（P2-7）
+
+   策略：
+   - 入站（ingress）：默认拒绝所有，仅放行
+     * 同命名空间内 Pod 访问 web 容器端口（service.port，默认 5000）
+     * 命名空间标签 network-policy/allow-ingress=true 的 Ingress 控制器 Pod
+       （由 .Values.networkPolicy.ingressNamespaceSelector 控制）
+   - 出站（egress）：默认放行（应用需访问 PostgreSQL / Redis / 外部 API）
+   - 启用开关：.Values.networkPolicy.enabled（默认 true）
+   - 注意：要求集群 NetworkPlugin 支持 NetworkPolicy（Calico / Cilium / kube-router）
+*/ -}}
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "intelligent-ops-platform.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  # 入站：默认拒绝，仅允许指定来源访问 web 端口
+  ingress:
+    # 1. 同命名空间内 Pod 可访问 web 端口（Service Mesh / 内部调用）
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    # 2. Ingress 控制器命名空间（带指定标签）可访问 web 端口
+    {{- if .Values.networkPolicy.ingressNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    {{- end }}
+    # 3. 额外放行的命名空间/Pod 选择器（可选，用于监控抓取等）
+    {{- range .Values.networkPolicy.ingressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.service.port }}
+    {{- end }}
+  # 出站：放行所有（应用需访问数据库、Redis、外部 LLM/RPA API）
+  # 如需收紧出站，可在 .Values.networkPolicy.egress 配置白名单
+  egress:
+    {{- if .Values.networkPolicy.egress }}
+    {{- toYaml .Values.networkPolicy.egress | nindent 4 }}
+    {{- else }}
+    - {}
+    {{- end }}
+{{- end }}

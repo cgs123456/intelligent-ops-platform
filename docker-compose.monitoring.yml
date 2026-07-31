@@ -1,9 +1,11 @@
 # ====================================================================
-# 监控栈独立 Compose 文件（P1-13 日志聚合 + 告警）
+# 监控栈独立 Compose 文件（P1-13 日志聚合 + 告警 + P0-4 Prometheus）
 # --------------------------------------------------------------------
 # 本文件作为 docker-compose.prod.yml 的 override 补充，不修改原文件
-# 包含三个服务：loki / promtail / alertmanager
-# （prometheus 与 grafana 已由 P0 监控栈提供，本文件不重复定义）
+# 包含四个服务：prometheus / loki / promtail / alertmanager
+#
+# P0-4 修复：新增 prometheus 服务定义，加载 alerts.yml 告警规则，使告警链路完整。
+# P1-7 修复：Loki 移除宿主机端口映射，仅通过内网访问，防止未授权写入。
 #
 # 启动方式（与生产 compose 联合启动）：
 #   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
@@ -12,21 +14,57 @@
 #   docker compose -f docker-compose.monitoring.yml up -d
 #
 # 停止：
-#   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml stop loki promtail alertmanager
+#   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml stop prometheus loki promtail alertmanager
 # ====================================================================
 
 version: '3.8'
 
 services:
 
-  # ============== Loki：日志聚合存储 ==============
+  # ============== Prometheus：指标采集 + 告警评估（P0-4） ==============
+  # 加载 alerts.yml 告警规则，抓取 web/redis/postgres/node 指标
+  # 告警触发后推送至 alertmanager:9093
+  prometheus:
+    image: prom/prometheus:v0.27.0
+    container_name: ops-prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ============== Loki：日志聚合存储（P1-7 移除端口映射） ==============
   # 接收 promtail 推送的日志，提供 LogQL 查询接口
   # Grafana 数据源添加 http://loki:3100 即可查询
   loki:
     image: grafana/loki:2.9.7
     container_name: ops-loki
-    ports:
-      - "3100:3100"   # Loki HTTP API 端口
+    # P1-7: 不映射到宿主机，仅内网可访问，防止未授权写入
+    expose:
+      - "3100"
     volumes:
       # 挂载配置目录（loki-config.yml）
       - ./monitoring/loki:/etc/loki:ro
@@ -91,14 +129,22 @@ services:
     image: prom/alertmanager:v0.27.0
     container_name: ops-alertmanager
     ports:
-      - "9093:9093"   # Alertmanager HTTP API / UI 端口
+      # P2-2: 仅监听本地回环，避免 Alertmanager HTTP API/UI 对外暴露（未授权访问可静默告警）
+      - "127.0.0.1:9093:9093"   # Alertmanager HTTP API / UI 端口（仅本机访问）
     volumes:
-      # 挂载 alertmanager 配置
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 挂载 alertmanager 配置模板（由 entrypoint 渲染为实际配置）
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+      # 渲染脚本
+      - ./monitoring/alertmanager/alertmanager-entrypoint.sh:/entrypoint.sh:ro
       # 持久化静默规则与通知状态
       - alertmanager_data:/alertmanager
+    environment:
+      # P0-fix: 告警通知 webhook URL（生产必须设置为真实钉钉/企业微信 URL）
+      - ALERTMANAGER_DEFAULT_WEBHOOK=${ALERTMANAGER_DEFAULT_WEBHOOK:-http://127.0.0.1:5001/alertmanager/default}
+      - ALERTMANAGER_CRITICAL_WEBHOOK=${ALERTMANAGER_CRITICAL_WEBHOOK:-http://127.0.0.1:5001/alertmanager/critical}
+      - ALERTMANAGER_WARNING_WEBHOOK=${ALERTMANAGER_WARNING_WEBHOOK:-http://127.0.0.1:5001/alertmanager/warning}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
     restart: unless-stopped
     healthcheck:
@@ -119,16 +165,122 @@ services:
     networks:
       - default
 
+  # ============== redis-exporter：Redis 指标采集（P2-3） ==============
+  # 采集 Redis 实例指标（内存使用、键数、命中率、慢查询等），暴露 :9121 供 Prometheus 抓取
+  # 参考社区标准配置：https://github.com/oliver006/redis_exporter
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    container_name: ops-redis-exporter
+    environment:
+      # 连接 redis 服务（与 docker-compose.prod.yml 中 redis 服务名一致）
+      - REDIS_ADDR=redis://redis:6379
+      # Redis 密码从环境变量注入（生产必填）
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    ports:
+      # 仅监听本地，避免 exporter 端口对外暴露
+      - "127.0.0.1:9121:9121"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9121/metrics || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.2'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ============== postgres-exporter：PostgreSQL 指标采集（P2-3） ==============
+  # 采集 PostgreSQL 指标（连接数、事务、缓存命中率、表大小等），暴露 :9187 供 Prometheus 抓取
+  # 参考社区标准配置：https://github.com/prometheus-community/postgres_exporter
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: ops-postgres-exporter
+    environment:
+      # 数据源（与 docker-compose.prod.yml 中 db 服务名一致；密码通过环境变量注入）
+      - DATA_SOURCE_NAME=postgresql://ops:${DB_PASSWORD:-}@db:5432/ops_platform?sslmode=disable
+    ports:
+      # 仅监听本地，避免 exporter 端口对外暴露
+      - "127.0.0.1:9187:9187"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9187/metrics || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.2'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
+  # ============== node-exporter：主机节点指标采集（P2-3） ==============
+  # 采集宿主机指标（CPU、内存、磁盘、网络 IO），暴露 :9100 供 Prometheus 抓取
+  # 参考社区标准配置：https://github.com/prometheus/node_exporter
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: ops-node-exporter
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      # 仅监听本地，避免 exporter 端口对外暴露
+      - "127.0.0.1:9100:9100"
+    volumes:
+      # 挂载宿主机根文件系统（只读），采集磁盘/文件系统指标
+      - /:/host:ro,rslave
+      # 挂载 /proc 与 /sys（只读），采集 CPU/内存/网络指标
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9100/metrics || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.2'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
 # ====================================================================
-# 数据卷：用于持久化 Loki / Promtail / Alertmanager 运行数据
+# 数据卷：持久化 Prometheus / Loki / Promtail / Alertmanager 运行数据
 # ====================================================================
 volumes:
-  loki_data:          # Loki chunks + index
-  promtail_data:      # Promtail positions 文件
-  alertmanager_data:  # Alertmanager 静默规则与通知状态
+  prometheus_data:     # P0-4: Prometheus TSDB 数据
+  loki_data:           # Loki chunks + index
+  promtail_data:       # Promtail positions 文件
+  alertmanager_data:   # Alertmanager 静默规则与通知状态
 
 # 使用默认网络，与 docker-compose.prod.yml 中的服务互通
-# 这样 promtail 可通过服务名 loki 推送日志，alertmanager 可被 prometheus 访问
+# 这样 promtail 可通过服务名 loki 推送日志，alertmanager 可被 prometheus 访问，
+# redis-exporter / postgres-exporter / node-exporter 也可被 prometheus 抓取
 networks:
   default:
     name: intelligent-ops-platform_default

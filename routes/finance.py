@@ -1,18 +1,26 @@
 """财务对账路由 Blueprint
 
 提供对账批次的创建、明细导入、自动匹配、报告查询、关闭等接口。
-权限：
-    - finance:read：查询批次列表 / 对账报告
-    - finance:write：创建批次 / 导入明细 / 自动匹配 / 关闭批次
+权限（P2-23 细粒度）：
+    - finance:read：查询批次列表 / 对账报告（向后兼容保留）
+    - recon:create：创建批次
+    - recon:import：导入明细
+    - recon:match：自动匹配
+    - recon:close：关闭批次
 """
+
+import logging
 
 from flask import Blueprint, request
 
 from extensions import db
 from models.finance import ReconciliationBatch, ReconciliationEntry
 from services.finance_recon_service import ReconciliationService
+from services.idempotency import idempotent
 from services.rbac import require_permission
 from services.response import error_response, success_response
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("finance", __name__, url_prefix="/api/v1/finance")
 
@@ -35,7 +43,8 @@ def _serialize_batch(batch: ReconciliationBatch) -> dict:
 
 
 @bp.route("/reconciliation/batches", methods=["POST"])
-@require_permission("finance:write")
+@require_permission("recon:create")
+@idempotent()
 def create_batch():
     """创建对账批次
 
@@ -57,8 +66,9 @@ def create_batch():
         return success_response(data=_serialize_batch(batch), message="对账批次已创建")
     except ValueError as e:
         return error_response("ERR_SYS_002", str(e))
-    except Exception as e:
-        return error_response("ERR_SYS_001", f"创建对账批次失败：{e}")
+    except Exception:
+        logger.exception("创建对账批次失败 period=%s", period)
+        return error_response("ERR_SYS_001", "创建对账批次失败，请联系管理员")
 
 
 @bp.route("/reconciliation/batches", methods=["GET"])
@@ -86,7 +96,8 @@ def list_batches():
 
 
 @bp.route("/reconciliation/batches/<int:batch_id>/import", methods=["POST"])
-@require_permission("finance:write")
+@require_permission("recon:import")
+@idempotent()
 def import_entries(batch_id: int):
     """导入外部流水明细到指定批次
 
@@ -103,12 +114,14 @@ def import_entries(batch_id: int):
         return success_response(data={"imported": imported}, message=f"已导入 {imported} 条明细")
     except ValueError as e:
         return error_response("ERR_SYS_002", str(e))
-    except Exception as e:
-        return error_response("ERR_SYS_001", f"导入明细失败：{e}")
+    except Exception:
+        logger.exception("导入明细失败 batch_id=%s", batch_id)
+        return error_response("ERR_SYS_001", "导入明细失败，请联系管理员")
 
 
 @bp.route("/reconciliation/batches/<int:batch_id>/auto-match", methods=["POST"])
-@require_permission("finance:write")
+@require_permission("recon:match")
+@idempotent()
 def auto_match(batch_id: int):
     """自动匹配批次明细（按 reference_no + amount 精确匹配）
 
@@ -123,8 +136,9 @@ def auto_match(batch_id: int):
         return success_response(data=result, message="自动匹配完成")
     except ValueError as e:
         return error_response("ERR_SYS_002", str(e))
-    except Exception as e:
-        return error_response("ERR_SYS_001", f"自动匹配失败：{e}")
+    except Exception:
+        logger.exception("自动匹配失败 batch_id=%s", batch_id)
+        return error_response("ERR_SYS_001", "自动匹配失败，请联系管理员")
 
 
 @bp.route("/reconciliation/batches/<int:batch_id>/report", methods=["GET"])
@@ -179,12 +193,14 @@ def batch_report(batch_id: int):
         return success_response(data=report)
     except ValueError as e:
         return error_response("ERR_SYS_002", str(e))
-    except Exception as e:
-        return error_response("ERR_SYS_001", f"查询对账报告失败：{e}")
+    except Exception:
+        logger.exception("查询对账报告失败 batch_id=%s", batch_id)
+        return error_response("ERR_SYS_001", "查询对账报告失败，请联系管理员")
 
 
 @bp.route("/reconciliation/batches/<int:batch_id>/close", methods=["POST"])
-@require_permission("finance:write")
+@require_permission("recon:close")
+@idempotent()
 def close_batch(batch_id: int):
     """关闭对账批次（要求无未匹配明细）
 
@@ -198,5 +214,6 @@ def close_batch(batch_id: int):
         return success_response(data={"closed": ok}, message="对账批次已关闭")
     except ValueError as e:
         return error_response("ERR_SYS_002", str(e))
-    except Exception as e:
-        return error_response("ERR_SYS_001", f"关闭批次失败：{e}")
+    except Exception:
+        logger.exception("关闭批次失败 batch_id=%s", batch_id)
+        return error_response("ERR_SYS_001", "关闭批次失败，请联系管理员")

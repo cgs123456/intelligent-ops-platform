@@ -47,6 +47,11 @@ def app():
     )
 
     with app.app_context():
+        # P1-3: 测试使用 db.create_all() 从最新 model 定义建表（Flask 测试标准做法）。
+        # 原因：测试用临时 SQLite，而部分迁移含 PostgreSQL 特定语法（如分区），
+        #       跑完整迁移链在 SQLite 上会失败。db.create_all() 确保测试基于最新 model。
+        # 生产环境 schema 变更必须用 flask db upgrade（硬约束），迁移链完整性由
+        # tests/test_migrations.py 验证（head 单一、可被 alembic 解析）。
         db.create_all()
         yield app
         db.session.remove()

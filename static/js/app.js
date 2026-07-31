@@ -11,16 +11,16 @@
  */
 
 // ---- Token 管理 ----
-// P1-12: 优先使用 HttpOnly cookie（JS 不可读，防御 XSS），sessionStorage 作为开发/旧客户端 fallback。
-// fetch 携带 credentials: 'include'，浏览器自动发送 cookie；后端 Authorization Header 仍兼容。
-let accessToken = sessionStorage.getItem('access_token') || '';
-let refreshToken = sessionStorage.getItem('refresh_token') || '';
+// P0-10: 移除 sessionStorage token 存储，完全依赖 HttpOnly cookie（JS 不可读，防御 XSS）。
+// fetch 携带 credentials: 'include'，浏览器自动发送 cookie。
+// accessToken 变量仅在登录后临时保存（用于 SSE URL fallback），不持久化到 sessionStorage。
+let accessToken = '';
+let refreshToken = '';
 
 function getAuthHeaders() {
     return {
         'Content-Type': 'application/json',
-        // P1-12: 仍发送 Authorization（兼容旧客户端 + 非 cookie 场景）；cookie 由浏览器自动携带
-        'Authorization': accessToken ? `Bearer ${accessToken}` : '',
+        // P0-10: 不再发送 Authorization header，完全依赖 HttpOnly cookie 认证
     };
 }
 
@@ -106,8 +106,7 @@ async function doLogin() {
         }
         accessToken = r.access_token;
         refreshToken = r.refresh_token;
-        sessionStorage.setItem('access_token', accessToken);
-        sessionStorage.setItem('refresh_token', refreshToken);
+        // P0-10: 不再将 token 存入 sessionStorage，依赖 HttpOnly cookie
         document.getElementById('loginPage').style.display = 'none';
         document.getElementById('app').style.display = '';
         loadDashboard(); loadOrders(); loadReport();
@@ -133,9 +132,8 @@ async function tryRefresh() {
             accessToken = r.access_token;
             if (r.refresh_token) {
                 refreshToken = r.refresh_token;
-                sessionStorage.setItem('refresh_token', refreshToken);
             }
-            sessionStorage.setItem('access_token', accessToken);
+            // P0-10: 不再将 token 存入 sessionStorage，依赖 HttpOnly cookie
             return true;
         }
     } catch (e) {}
@@ -159,8 +157,7 @@ async function logout() {
     } catch (e) {}
     accessToken = '';
     refreshToken = '';
-    sessionStorage.removeItem('access_token');
-    sessionStorage.removeItem('refresh_token');
+    // P0-10: 不再从 sessionStorage 移除 token（从未存储过），HttpOnly cookie 由后端清除
     showLogin();
 }
 
@@ -800,6 +797,12 @@ function reopenGuide() {
     document.getElementById('guideOverlay').style.display = 'flex';
 }
 
+// P0-12: closeGuide 函数（从内联 script 移入，避免 CSP 拦截）
+function closeGuide() {
+    document.getElementById('guideOverlay').style.display = 'none';
+    localStorage.setItem('guide_shown', '1');
+}
+
 // ---- P2: CSV 导出 ----
 function exportTable(tableId, filename) {
     const table = document.getElementById(tableId);
@@ -822,11 +825,96 @@ function exportTable(tableId, filename) {
     showToast('已导出 ' + filename, 'success');
 }
 
+// ---- P0-12: 事件绑定（替代所有内联 onclick/oninput/onkeydown）----
+function bindEvents() {
+    // 登录
+    document.getElementById('loginBtn')?.addEventListener('click', doLogin);
+    document.getElementById('loginPass')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doLogin();
+    });
+
+    // 头部按钮
+    document.getElementById('guideBtn')?.addEventListener('click', reopenGuide);
+    document.getElementById('logoutBtn')?.addEventListener('click', logout);
+
+    // 指标卡片（data-tab 属性指定目标 tab）
+    document.querySelectorAll('.metric-card[data-tab]').forEach(card => {
+        card.addEventListener('click', () => switchTab(card.dataset.tab));
+    });
+
+    // 概览
+    document.getElementById('genReportBtn')?.addEventListener('click', genReport);
+
+    // 闭环控制
+    document.getElementById('runStepBtn')?.addEventListener('click', runCurrentStep);
+    document.getElementById('resetLoopBtn')?.addEventListener('click', resetLoop);
+
+    // ERP
+    document.getElementById('invSearch')?.addEventListener('input', (e) => tableSearch('invTable', e.target.value));
+    document.getElementById('invExportBtn')?.addEventListener('click', () => exportTable('invTable', 'inventory.csv'));
+
+    // RPA
+    document.getElementById('negotiateBtn')?.addEventListener('click', negotiateQuotes);
+    document.getElementById('loadQuotesBtn')?.addEventListener('click', loadQuotes);
+    document.getElementById('quoteSearch')?.addEventListener('input', (e) => tableSearch('quoteTable', e.target.value));
+    document.getElementById('quoteExportBtn')?.addEventListener('click', () => exportTable('quoteTable', 'quotes.csv'));
+    document.getElementById('syncOrdersBtn')?.addEventListener('click', syncOrders);
+
+    // FDE
+    document.getElementById('runEtlBtn')?.addEventListener('click', runETL);
+    document.getElementById('loadDqBtn')?.addEventListener('click', loadDQ);
+    document.getElementById('adsSearch')?.addEventListener('input', (e) => tableSearch('adsTable', e.target.value));
+    document.getElementById('adsExportBtn')?.addEventListener('click', () => exportTable('adsTable', 'ads_suggestions.csv'));
+
+    // AIGC
+    document.getElementById('loadSuggestionsBtn')?.addEventListener('click', loadSuggestions);
+    document.getElementById('batchApproveBtn')?.addEventListener('click', () => batchReview('approve'));
+    document.getElementById('batchRejectBtn')?.addEventListener('click', () => batchReview('reject'));
+    document.getElementById('sendQueryBtn')?.addEventListener('click', sendQuery);
+    document.getElementById('chatInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendQuery();
+    });
+    document.querySelectorAll('.chip[data-question]').forEach(chip => {
+        chip.addEventListener('click', () => quickAsk(chip.dataset.question));
+    });
+
+    // 引导浮层
+    document.getElementById('closeGuideBtn')?.addEventListener('click', closeGuide);
+}
+
 // ---- 初始化 ----
-if (!accessToken) {
-    showLogin();
+// P0-10: 无 sessionStorage token，通过 HttpOnly cookie 检查登录状态
+async function initApp() {
+    // P0-12: 绑定所有事件监听器
+    bindEvents();
+
+    // 引导浮层（首次访问显示）
+    if (!localStorage.getItem('guide_shown')) {
+        document.getElementById('guideOverlay').style.display = 'flex';
+    }
+
+    // 初始隐藏 app 区域，避免未认证时闪烁空白内容
+    document.getElementById('app').style.display = 'none';
+
+    // P0-10: 通过 cookie 检查是否已登录（HttpOnly cookie 由浏览器自动携带）
+    try {
+        const r = await fetch('/api/v1/auth/me', { credentials: 'include' });
+        if (r.ok) {
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            loadDashboard(); loadOrders(); loadReport();
+            startLoopStream();
+        } else {
+            showLogin();
+        }
+    } catch (e) {
+        showLogin();
+    }
+}
+
+// 启动应用（DOMContentLoaded 后执行）
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
 } else {
-    document.getElementById('loginPage').style.display = 'none';
-    loadDashboard(); loadOrders(); loadReport();
-    startLoopStream();  // P1-1: 启动 SSE 监听
+    initApp();
 }

@@ -138,15 +138,22 @@ class AnomalyDetector:
         target_sale = next((d["qty"] for d in daily_sales if d["dt"] == target_date), None)
         product_name = daily_sales[-1].get("name") or f"产品{product_id}"
 
-        # 用 target_date 之前 7 天计算移动平均 + σ（不含 target_date 本身，避免泄露）
-        history_before = [d["qty"] for d in daily_sales if d["dt"] < target_date]
+        # P1-5: 改为按同星期几计算均值 + σ（处理周季节性）
+        history_before = [d for d in daily_sales if d["dt"] < target_date]
         if len(history_before) < self.WINDOW:
             return None
-        recent_7 = history_before[-self.WINDOW :]
-        mean = statistics.mean(recent_7)
-        stdev = statistics.stdev(recent_7) if len(recent_7) > 1 else 0
-        # 如果均值为 0 或 σ 为 0，跳过（无法判断异常）
-        if mean <= 0 or stdev <= 0:
+        # 取 target_date 的星期几，仅用同星期几的历史数据计算均值和标准差
+        target_weekday = target_date.weekday()
+        same_weekday_vals = [d["qty"] for d in history_before if d["dt"].weekday() == target_weekday]
+        # 如果同星期几数据不足 3 天，回退到近 7 天全部数据
+        if len(same_weekday_vals) >= 3:
+            recent_vals = same_weekday_vals
+        else:
+            recent_vals = [d["qty"] for d in history_before[-self.WINDOW :]]
+        mean = statistics.mean(recent_vals)
+        stdev = statistics.stdev(recent_vals) if len(recent_vals) > 1 else 0
+        # 如果均值为 0，跳过（无法判断异常）
+        if mean <= 0:
             return None
 
         # ---------------- 异常判定 ----------------
@@ -154,43 +161,56 @@ class AnomalyDetector:
         deviation = 0.0
         reason = ""
 
-        if target_sale is not None:
+        # P2-24: stdev == 0 漏报修复 —— 历史值全部相同时（stdev=0），
+        # 偏差百分比超过 50% 时报告 warning，避免异常被吞掉。
+        if stdev == 0:
+            if target_sale is not None and mean > 0:
+                pct_deviation = (target_sale - mean) / mean  # 与均值的相对偏差（带符号）
+                if abs(pct_deviation) > 0.5:
+                    severity = "warning"
+                    # deviation 用相对偏差百分比填充，便于排序与展示
+                    deviation = pct_deviation
+                    reason = (
+                        f"{target_date} 销量 {target_sale} 偏离均值 {pct_deviation * 100:.1f}%"
+                        f"（历史值均相同，均值 {mean:.1f}，σ=0，触发 50% 偏差告警）"
+                    )
+        elif target_sale is not None:
             deviation = (target_sale - mean) / stdev
             # 突破 3σ 下限 → critical
             if deviation <= -self.SIGMA_CRITICAL:
                 severity = "critical"
                 reason = (
                     f"{target_date} 销量 {target_sale} 突破 3σ 下限"
-                    f"（7日均值 {mean:.1f}，3σ 下限 {mean - self.SIGMA_CRITICAL * stdev:.1f}）"
+                    f"（同星期几均值 {mean:.1f}，3σ 下限 {mean - self.SIGMA_CRITICAL * stdev:.1f}）"
                 )
             # 突破 2σ 下限 → warning
             elif deviation <= -self.SIGMA_WARNING:
                 severity = "warning"
                 reason = (
                     f"{target_date} 销量 {target_sale} 突破 2σ 下限"
-                    f"（7日均值 {mean:.1f}，2σ 下限 {mean - self.SIGMA_WARNING * stdev:.1f}）"
+                    f"（同星期几均值 {mean:.1f}，2σ 下限 {mean - self.SIGMA_WARNING * stdev:.1f}）"
                 )
             # 突破 3σ 上限 → critical（异常高，可能是刷单或数据错误）
             elif deviation >= self.SIGMA_CRITICAL:
                 severity = "critical"
                 reason = (
                     f"{target_date} 销量 {target_sale} 突破 3σ 上限"
-                    f"（7日均值 {mean:.1f}，3σ 上限 {mean + self.SIGMA_CRITICAL * stdev:.1f}）"
+                    f"（同星期几均值 {mean:.1f}，3σ 上限 {mean + self.SIGMA_CRITICAL * stdev:.1f}）"
                 )
             # 突破 2σ 上限 → warning
             elif deviation >= self.SIGMA_WARNING:
                 severity = "warning"
                 reason = (
                     f"{target_date} 销量 {target_sale} 突破 2σ 上限"
-                    f"（7日均值 {mean:.1f}，2σ 上限 {mean + self.SIGMA_WARNING * stdev:.1f}）"
+                    f"（同星期几均值 {mean:.1f}，2σ 上限 {mean + self.SIGMA_WARNING * stdev:.1f}）"
                 )
 
         # 连续 3 天低于均值 50% → info（销量下滑趋势）
         if severity is None:
             recent_3 = history_before[-3:] if len(history_before) >= 3 else []
-            if len(recent_3) == 3 and mean > 0 and all(q < mean * 0.5 for q in recent_3):
+            if len(recent_3) == 3 and mean > 0 and all(q["qty"] < mean * 0.5 for q in recent_3):
                 severity = "info"
-                deviation = (sum(recent_3) / 3 - mean) / mean
+                deviation = (sum(q["qty"] for q in recent_3) / 3 - mean) / mean
                 reason = f"连续 3 天销量低于均值 50%" f"（近3日 {recent_3}，均值 {mean:.1f}）"
 
         if severity is None:

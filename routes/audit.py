@@ -24,7 +24,6 @@ def _parse_date(s, end_of_day=False):
     try:
         d = datetime.strptime(s, "%Y-%m-%d")
         if end_of_day:
-            from datetime import timedelta
 
             return d.replace(hour=23, minute=59, second=59)
         return d

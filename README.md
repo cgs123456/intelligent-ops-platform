@@ -363,6 +363,20 @@ flask db upgrade
 | GET | /api/v1/erp/warehouses | erp:read | 仓库列表 |
 | POST | /api/v1/erp/returns | erp:write | 创建退货(@idempotent) |
 | POST | /api/v1/erp/transfers | erp:write | 创建调拨(@idempotent) |
+| GET | /api/v1/erp/reorder-rules | erp:read | 补货预警规则列表 |
+| GET | /api/v1/erp/reorder-check | erp:read | 触发库存预警检查 |
+| GET | /api/v1/erp/budgets | erp:read | 预算列表 |
+| POST | /api/v1/erp/budgets/<id>/refresh | erp:write | 刷新预算实际发生额(@idempotent) |
+| GET | /api/v1/erp/cost-centers | erp:read | 成本中心列表 |
+| POST | /api/v1/erp/purchase-orders | purchase:write | 创建采购单(@idempotent) |
+| POST | /api/v1/erp/purchase-orders/<no>/confirm | purchase:write | 确认采购单(@idempotent) |
+| POST | /api/v1/erp/purchase-orders/<no>/receive | purchase:write | 到货入库(@idempotent) |
+| POST | /api/v1/erp/purchase-orders/<no>/cancel | purchase:write | 取消采购单(@idempotent) |
+| POST | /api/v1/erp/purchase-orders/<no>/return | purchase:write | 采购退货(@idempotent) |
+| POST | /api/v1/erp/sale-orders | sale:write | 创建销售单(@idempotent) |
+| POST | /api/v1/erp/stock-takes | erp:write | 创建盘点单(@idempotent) |
+| GET | /api/v1/erp/stock-takes | erp:read | 盘点单列表(支持 product_id/status 过滤) |
+| POST | /api/v1/erp/stock-takes/<id>/confirm | erp:write | 确认盘点:调整库存+流水(@idempotent) |
 
 ### RPA(rpa)
 
@@ -457,7 +471,7 @@ pytest                              # 或 make test
 pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
 ```
 
-测试套件覆盖 7 个模块 41 个用例:
+测试套件覆盖 20+ 模块 470+ 用例(coverage >= 60%):
 - `test_health.py`:健康检查端点
 - `test_auth.py`:登录/认证流程
 - `test_data_agent.py`:改进8 SQL sqlglot AST 安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT/列名含关键字/嵌套 CTE)
@@ -465,6 +479,15 @@ pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
 - `test_multiagent.py`:改进7 多 Agent 评分(价格权重/空列表/单供应商/min-max 归一化)
 - `test_daily_report.py`:改进10 4 段式日报(趋势加载/上下文构建/模板降级)
 - `test_evaluator.py`:Agent 评测框架(gold SQL 加载/SQL 三级对比/准确率/退化检测)
+- `test_erp_service.py`:ERP 进销存全链路(采购/销售/退货/调拨/盘点/预算/成本核算)
+- `test_mrp_service.py`:MRP 物料需求计划(BOM 多层展开/净需求计算/计划下达)
+- `test_finance_recon.py`:财务对账(容忍度匹配/差异分析/RBAC)
+- `test_rbac_authorization.py`:RBAC 权限矩阵(三级角色 + 细粒度权限点)
+- `test_tasks.py`:Celery 异步任务(多线程 App Context / 双重检查锁定)
+- `test_crypto_service.py`:字段级加密(AES-GCM / 加密解密)
+- `test_mfa_service.py`:MFA 双因素认证(TOTP 生成/验证/备用码)
+- `test_migrations.py`:数据库迁移(单 head / 无合并冲突)
+- `test_coverage_boost.py`:覆盖率补充(边界条件/异常路径)
 
 [tests/conftest.py](tests/conftest.py) 提供公共 fixtures:
 - `app`:会话级 Flask app(临时 SQLite,`db.create_all()`)

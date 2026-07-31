@@ -32,6 +32,8 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # P1-2: 优雅终止宽限期 —— preStop sleep 10s + 原有处理时间，共 60s
+      terminationGracePeriodSeconds: 60
       containers:
         - name: web
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -89,6 +91,12 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secret.name }}
                   key: CORS_ORIGINS
+            # P0-7 fix: FIELD_ENCRYPTION_KEY
+            - name: FIELD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: FIELD_ENCRYPTION_KEY
             # 连接串：基于已定义的 env 变量动态拼接
             - name: DATABASE_URL
               value: "postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
@@ -123,6 +131,11 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          # P1-2: preStop 钩子 —— sleep 10s 等待 Service 端点摘除，避免流量打到正在终止的 Pod
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           # volumeMounts：readOnlyRootFilesystem=true 时需挂载可写卷
           # - /tmp：通用临时目录（gunicorn / 系统库写入）
           # - /app/instance/logs：应用日志目录（Dockerfile 已创建，只读根 FS 下需可写）

@@ -1,6 +1,6 @@
 """AIGC 层模型"""
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Index
 
@@ -27,6 +27,8 @@ class Suggestion(db.Model):
     reviewed_at = db.Column(db.DateTime)
     review_note = db.Column(db.String(256))
     reviewed_by = db.Column(db.String(64))  # 审核人
+    # P0-3: 关联闭环轮次，回滚 step3 时按 run_id 精确过滤本轮采购单
+    run_id = db.Column(db.Integer, nullable=True, index=True)
 
 
 class DailyReport(db.Model):

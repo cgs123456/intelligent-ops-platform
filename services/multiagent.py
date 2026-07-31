@@ -292,10 +292,11 @@ class MultiAgentNegotiator:
     def _mock_competitor(self, product, existing):
         """候选供应商不足 2 家时构造一个 mock 竞争对手（评级 B、交期 7 天）。
 
-        P1-16: mock_id 使用负数（-1），避免与真实供应商 ID（正数）冲突。
+        P1-1: mock_id 使用 9001，与 rpa_service.py 中 supplier_id >= 9001 的过滤条件一致，
+        避免 mock 数据被写入 ExtSupplierQuote。
         """
         return {
-            "id": -1,
+            "id": 9001,
             "name": "竞争对手-模拟",
             "lead_days": 7,
             "rating": "B",

@@ -1,0 +1,17 @@
+{{- /*
+   PodDisruptionBudget（PDB）：保证自愿驱逐（节点维护 / 集群升级）时
+   至少 1 个 Pod 保持可用，避免全量副本同时中断导致服务不可用。
+   - minAvailable: 1 表示至少保留 1 个 Ready Pod
+   - selector 与 Deployment 的 selectorLabels 保持一致
+   */ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "intelligent-ops-platform.fullname" . }}
+  labels:
+    {{- include "intelligent-ops-platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "intelligent-ops-platform.selectorLabels" . | nindent 6 }}

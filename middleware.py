@@ -10,7 +10,7 @@
 import logging
 import uuid
 
-from flask import current_app, g, request
+from flask import g, request
 
 
 # 全局 request_id 过滤器（所有日志自动带上）

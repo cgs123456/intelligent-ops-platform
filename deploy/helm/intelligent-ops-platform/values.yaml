@@ -122,6 +122,22 @@ hpa:
           periodSeconds: 60
       # 取上述两策略中影响更大的（即缩容更保守的上限）
       selectPolicy: Max
+  # P2-12: 自定义指标扩容（基于 HTTP 请求 P95 延迟）
+  # 依赖 prometheus-adapter 将 PromQL 映射为自定义指标：
+  #   histogram_quantile(0.95, sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le))
+  # adapter rule 示例：
+  #   - seriesQuery: 'flask_http_request_duration_seconds_bucket'
+  #     resources: { overrides: { kubernetes_pod_name: { resource: pod } } }
+  #     name: { matches: "^(.*)_bucket"; as: "${1}_p95" }
+  #     queries:
+  #       - aggregate: "quantile(0.95, sum(rate(<<.Series>>[5m])) by (le, <<.GroupBy>>))"
+  customMetrics:
+    requestP95Latency:
+      enabled: true
+      # 自定义指标名称（需与 prometheus-adapter 映射规则产物一致）
+      metricName: flask_http_request_duration_seconds_p95
+      # 扩容阈值：Pod 平均 P95 延迟达到 500ms 即触发扩容
+      targetAverageValue: 500m
 
 # 非敏感环境变量（写入 ConfigMap，敏感值见 secret 段）
 env:
@@ -165,8 +181,37 @@ secret:
     REDIS_PASSWORD: "REPLACE_ME_WITH_REDIS_PASSWORD"
     # CORS 允许源（生产必须显式指定，不可用 *）
     CORS_ORIGINS: "https://ops.example.com"
+    # P0-7 fix: field encryption key (required by ProdConfig)
+    FIELD_ENCRYPTION_KEY: "REPLACE_ME_WITH_FIELD_ENCRYPTION_KEY"
 
 # 节点调度
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ===================================================================
+# NetworkPolicy（P2-7：默认拒绝入站，仅允许 web 端口）
+# 入站仅放行同命名空间 Pod + Ingress 控制器命名空间访问 service.port；
+# 出站默认放行（应用需访问 PostgreSQL / Redis / 外部 API）。
+# 注意：要求集群 CNI 支持 NetworkPolicy（Calico / Cilium / kube-router）。
+# ===================================================================
+networkPolicy:
+  enabled: true
+  # Ingress 控制器所在命名空间选择器（按命名空间标签匹配）
+  # 示例：{ "kubernetes.io/metadata.name": "ingress-nginx" } 或 { "network-policy/allow-ingress": "true" }
+  ingressNamespaceSelector: {}
+  # 额外放行的入站来源（命名空间/Pod 选择器列表），如监控命名空间抓取 /metrics
+  # 示例：
+  #   - namespaceSelector:
+  #       kubernetes.io/metadata.name: monitoring
+  ingressFrom: []
+  # 出站白名单（留空则放行所有出站；收紧示例见下方注释）
+  # egress:
+  #   - to:
+  #       - namespaceSelector: {}
+  #     ports:
+  #       - protocol: TCP
+  #         port: 5432   # PostgreSQL
+  #       - protocol: TCP
+  #         port: 6379   # Redis
+  egress: []

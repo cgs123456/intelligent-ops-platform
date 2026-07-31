@@ -406,11 +406,12 @@ class WarehouseService:
             products = {p.id: p.name for p in self.session.query(Product).all()}
 
             # ---- 销售事实表（按 order_no 去重）----
-            existing_sale = {r[0] for r in self.session.query(DwdSalesFact.order_no).all()}
+            # P1-7: NOT EXISTS 子查询在 DB 层去重，避免将整张 DWD 目标表加载到内存
+            exists_sale_subq = self.session.query(DwdSalesFact).filter(
+                DwdSalesFact.order_no == OdsSaleOrder.order_no
+            ).exists()
             n = 0
-            for ods in self.session.query(OdsSaleOrder).all():
-                if ods.order_no in existing_sale:
-                    continue
+            for ods in self.session.query(OdsSaleOrder).filter(~exists_sale_subq).all():
                 self.session.add(
                     DwdSalesFact(
                         order_no=ods.order_no,
@@ -428,17 +429,19 @@ class WarehouseService:
             details["dwd_sales_order_di"] = n
 
             # ---- 库存移动事实表（按 ref_order+dt+move_type+product_id 去重）----
-            existing_stock = {
-                (r[0], r[1], r[2], r[3])
-                for r in self.session.query(
-                    DwdStockFact.ref_order, DwdStockFact.dt, DwdStockFact.move_type, DwdStockFact.product_id
-                ).all()
-            }
+            # P1-7: NOT EXISTS 子查询在 DB 层去重（复合键：ref_order+dt+move_type+product_id）
+            exists_stock_subq = (
+                self.session.query(DwdStockFact)
+                .filter(
+                    DwdStockFact.ref_order == OdsStockMove.ref_order,
+                    DwdStockFact.dt == OdsStockMove.dt,
+                    DwdStockFact.move_type == OdsStockMove.move_type,
+                    DwdStockFact.product_id == OdsStockMove.product_id,
+                )
+                .exists()
+            )
             n = 0
-            for ods in self.session.query(OdsStockMove).all():
-                key = (ods.ref_order, ods.dt, ods.move_type, ods.product_id)
-                if key in existing_stock:
-                    continue
+            for ods in self.session.query(OdsStockMove).filter(~exists_stock_subq).all():
                 self.session.add(
                     DwdStockFact(
                         product_id=ods.product_id,
@@ -604,10 +607,12 @@ class WarehouseService:
                         best = RPAService(self.session).get_best_quote(p.id)
                     except Exception as e:
                         logger.warning("RPA get_best_quote failed for product %s: %s", p.id, e)
-                lead_days = best[1].lead_days if best else 5
+                # P1-8: 防御性检查 best[1] 避免访问 None 或空值导致 TypeError
+                best_supplier = best[1] if best and len(best) > 1 and best[1] is not None else None
+                lead_days = best_supplier.lead_days if best_supplier else 5
                 suggested = max(0, int(p.safety_stock + avg_daily * lead_days - p.stock_qty - in_transit))
-                sup_id = best[1].id if best else None
-                sup_name = best[1].name if best else "无可用供应商"
+                sup_id = best_supplier.id if best_supplier else None
+                sup_name = best_supplier.name if best_supplier else "无可用供应商"
 
                 reason = (
                     f"近7日销量{recent_sales}件(日均{avg_daily:.1f})，当前库存{p.stock_qty}件，"

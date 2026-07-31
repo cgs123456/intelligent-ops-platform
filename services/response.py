@@ -7,10 +7,11 @@
 """
 
 from datetime import datetime
+
 from flask import g, jsonify
 
-
 # ==================== 错误码定义 ====================
+
 
 class ErrorCode:
     """错误码常量（按模块分组）"""
@@ -82,15 +83,18 @@ HTTP_STATUS = {
 def _build(code, message, data, http_status):
     """构造统一响应 envelope"""
     request_id = getattr(g, "request_id", None) if g else None
-    return jsonify(
-        {
-            "code": code,
-            "message": message,
-            "data": data,
-            "request_id": request_id,
-            "timestamp": datetime.now().isoformat(),
-        }
-    ), http_status
+    return (
+        jsonify(
+            {
+                "code": code,
+                "message": message,
+                "data": data,
+                "request_id": request_id,
+                "timestamp": datetime.now().isoformat(),
+            }
+        ),
+        http_status,
+    )
 
 
 def success_response(data=None, message="success", code=ErrorCode.OK):

@@ -24,6 +24,7 @@
 import logging
 import os
 import threading
+import time
 
 from flask import current_app
 
@@ -48,6 +49,11 @@ class Notifier:
         self._initialized = False
         # P1-3: 保护 _init_from_config 的初始化锁，双重检查锁定模式避免并发重复初始化
         self._init_lock = threading.Lock()
+        # P2-3: requests.Session 复用 HTTP 连接，避免每次 send_alert 新建连接
+        self._session = None
+        # P2-25: 告警聚合与抑制 —— 同一 (level, product_id) 在 suppress_window 内只发送一次
+        self._alert_buffer = {}
+        self.suppress_window = 300  # 默认 300 秒
 
     def _init_from_config(self):
         """延迟初始化（需要 app context 读取环境变量）
@@ -73,6 +79,13 @@ class Notifier:
                     "to": os.getenv("ALERT_MAIL_TO", ""),
                     "from": os.getenv("ALERT_MAIL_FROM", "ops-platform-alert@local"),
                 }
+            # P2-3: 创建 requests.Session 复用连接池（钉钉/企微 webhook 均走同一 session）
+            try:
+                import requests
+
+                self._session = requests.Session()
+            except ImportError:
+                self._session = None
             self._initialized = True
 
     def send_alert(self, title, message, level="error", context=None):
@@ -87,6 +100,25 @@ class Notifier:
             self._init_from_config()
         except Exception:
             pass
+
+        # P2-25: 告警聚合与抑制 —— 按 (level, product_id) 聚合，
+        # 同一 key 在 suppress_window 窗口内只发送一次，避免短时间内重复告警轰炸。
+        product_id = (context or {}).get("product_id")
+        buffer_key = (level, product_id)
+        now = time.time()
+        last_sent = self._alert_buffer.get(buffer_key)
+        if last_sent is not None and (now - last_sent) < self.suppress_window:
+            logger.info(
+                "[Notifier] 告警抑制 level=%s product_id=%s 距上次发送 %ds < 窗口 %ds，跳过 title=%s",
+                level,
+                product_id,
+                int(now - last_sent),
+                self.suppress_window,
+                title,
+            )
+            return
+        # 记录本次发送时间，开启抑制窗口
+        self._alert_buffer[buffer_key] = now
 
         # P0-9: 在主线程捕获当前 Flask app 引用，传给异步线程复用
         # 避免在 _send_sync 中重复 create_app()（开销巨大且可能死锁递归）
@@ -132,8 +164,6 @@ class Notifier:
         if not self._dingtalk_webhook:
             return
         try:
-            import requests
-
             ctx_str = "\n".join(f"- {k}: {v}" for k, v in context.items()) if context else ""
             payload = {
                 "msgtype": "markdown",
@@ -149,7 +179,7 @@ class Notifier:
                 },
                 "at": {"isAtAll": level in ("error", "critical")},
             }
-            resp = requests.post(self._dingtalk_webhook, json=payload, timeout=5)
+            resp = self._session.post(self._dingtalk_webhook, json=payload, timeout=5)
             if resp.status_code != 200:
                 logger.warning("钉钉告警非 200：%s", resp.status_code)
         except Exception as e:
@@ -159,8 +189,6 @@ class Notifier:
         if not self._wecom_webhook:
             return
         try:
-            import requests
-
             ctx_str = " | ".join(f"{k}={v}" for k, v in context.items()) if context else ""
             content = (
                 f"【{level.upper()}】{title}\n"
@@ -169,7 +197,7 @@ class Notifier:
                 f'{("上下文: " + ctx_str) if ctx_str else ""}'
             )
             payload = {"msgtype": "text", "text": {"content": content}}
-            resp = requests.post(self._wecom_webhook, json=payload, timeout=5)
+            resp = self._session.post(self._wecom_webhook, json=payload, timeout=5)
             if resp.status_code != 200:
                 logger.warning("企微告警非 200：%s", resp.status_code)
         except Exception as e:

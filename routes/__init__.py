@@ -6,7 +6,7 @@
   装饰器统一生效。/api/dashboard 无对应 v1 路由，保留实现但加 @require_permission。
 """
 
-from flask import jsonify, redirect, request, url_for
+from flask import jsonify, redirect
 
 from services.rbac import require_permission
 
@@ -17,6 +17,7 @@ from .erp import bp as erp_bp
 from .fde import bp as fde_bp
 from .finance import bp as finance_bp
 from .loop import bp as loop_bp
+from .mrp import bp as mrp_bp
 from .rpa import bp as rpa_bp
 
 
@@ -30,6 +31,7 @@ def register_blueprints(app):
     app.register_blueprint(loop_bp)
     app.register_blueprint(audit_bp)
     app.register_blueprint(finance_bp)  # P2-17: 财务对账模块
+    app.register_blueprint(mrp_bp)  # P0-fix: MRP/BOM 模块
 
     # ---- /api/dashboard：保留实现，但加权限校验 ----
     @app.route("/api/dashboard")

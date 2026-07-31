@@ -249,9 +249,7 @@ class TestSyncEcommerceOrders:
             ok_order = ExtEcommerceOrder(
                 platform="taobao", product_sku=prod.sku, qty=2, unit_price=20, customer="客户A"
             )
-            bad_order = ExtEcommerceOrder(
-                platform="jd", product_sku="BAD-SKU", qty=1, unit_price=10, customer="客户B"
-            )
+            bad_order = ExtEcommerceOrder(platform="jd", product_sku="BAD-SKU", qty=1, unit_price=10, customer="客户B")
             db.session.add_all([ok_order, bad_order])
             db.session.commit()
 

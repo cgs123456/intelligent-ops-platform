@@ -13,6 +13,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from extensions import db
 
@@ -32,7 +33,9 @@ class ReconciliationBatch(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     batch_no = db.Column(db.String(40), unique=True, nullable=False, index=True)  # 对账批次号
     period = db.Column(db.String(7), nullable=False, index=True)  # 对账期间 YYYY-MM
-    status = db.Column(db.String(16), nullable=False, default="draft", index=True)  # draft/pending/matched/discrepancy/closed
+    status = db.Column(
+        db.String(16), nullable=False, default="draft", index=True
+    )  # draft/pending/matched/discrepancy/closed
     total_system_amount = db.Column(db.Numeric(18, 2), nullable=False, default=0)  # 系统侧合计金额
     total_external_amount = db.Column(db.Numeric(18, 2), nullable=False, default=0)  # 外部侧合计金额
     discrepancy_amount = db.Column(db.Numeric(18, 2), nullable=False, default=0)  # 差异金额 = 系统侧 - 外部侧
@@ -67,4 +70,7 @@ class ReconciliationEntry(db.Model):
     matched = db.Column(db.Boolean, nullable=False, default=False, index=True)
     matched_entry_id = db.Column(db.Integer, db.ForeignKey("finance_reconciliation_entry.id"), nullable=True)
     mismatch_reason = db.Column(db.String(256))  # 未匹配/差异原因
+    # P0-ERP5: 容差匹配支持——系统侧明细记录税率（用于计算匹配容差），匹配类型用于审计
+    tax_rate = db.Column(db.Numeric(5, 4), nullable=True, default=Decimal("0.13"))  # 税率（如 0.13 表示 13%）
+    match_type = db.Column(db.String(16), nullable=True)  # 匹配类型：exact(精确)/tolerance(容差)
     created_at = db.Column(db.DateTime, default=datetime.now)

@@ -22,7 +22,22 @@ EOF
 
 # 启动 cron 前先做一次手动备份（验证脚本能跑通）
 echo "[entrypoint] 首次启动，执行一次手动备份以验证脚本 ..."
-/usr/local/bin/backup_db.sh || echo "[entrypoint] 首次备份失败（数据库可能尚未就绪），将等待 cron 调度"
+# P1-9: first backup retry 3 times, fail all then exit 1
+MAX_BACKUP_RETRIES=3
+RETRY_INTERVAL=30
+for i in $(seq 1 $MAX_BACKUP_RETRIES); do
+    if /usr/local/bin/backup_db.sh 2>/dev/null; then
+        echo "[entrypoint] backup ok (attempt $i/$MAX_BACKUP_RETRIES)"
+        break
+    fi
+    if [ $i -lt $MAX_BACKUP_RETRIES ]; then
+        echo "[entrypoint] backup failed (attempt $i), retry in ${RETRY_INTERVAL}s..."
+        sleep $RETRY_INTERVAL
+    else
+        echo "[entrypoint] backup failed ${MAX_BACKUP_RETRIES} times, exit to trigger restart" >&2
+        exit 1
+    fi
+done
 
 echo "[entrypoint] cron 已启动，调度：${BACKUP_CRON}"
 echo "[entrypoint] 备份目录：/backups，保留天数：${BACKUP_RETENTION_DAYS:-7} 天"

@@ -19,9 +19,6 @@ from collections import Counter
 from datetime import date, datetime
 from types import MappingProxyType
 
-import requests
-from flask import current_app
-
 from extensions import db
 from models.aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
 from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
@@ -159,12 +156,13 @@ class AIGCService:
                 self._llm_backend = RuleLLMBackend()
         return self._llm_backend
 
-    def _call_llm(self, messages, temperature=0.3):
+    def _call_llm(self, messages, temperature=0.3, timeout=30.0):
         """LLM 统一调用入口（委托给 backend）。
         - 任何异常：记日志并返回 None，保证规则引擎兜底。
+        - timeout：调用超时秒数（默认 30），防止长时间阻塞。
         """
         try:
-            return self._get_llm_backend().call(messages, temperature)
+            return self._get_llm_backend().call(messages, temperature, timeout=timeout)
         except Exception as e:
             logger.warning("LLM 调用异常：%s，回退规则引擎", e)
             return None

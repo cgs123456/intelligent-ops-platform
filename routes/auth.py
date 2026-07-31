@@ -3,7 +3,7 @@
 from flask import Blueprint, g, jsonify, make_response, request
 
 from extensions import limiter
-from services.auth import AuthService, jwt_required
+from services.auth import AuthService
 from services.rbac import require_permission
 
 bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
@@ -65,14 +65,80 @@ def login():
         return jsonify({"error": "请求参数校验失败", "detail": errors}), 400
     username = data.get("username", "").strip()
     password = data.get("password", "")
+    mfa_code = data.get("mfa_code")  # P0-fix: MFA 二次认证码
     ip = request.remote_addr or "unknown"
-    result, err = AuthService.login(username, password, ip=ip)
+    result, err = AuthService.login(username, password, ip=ip, mfa_code=mfa_code)
     if err:
         return jsonify({"error": err}), 401
+    # P0-fix: MFA required 时不设 cookie，返回 mfa_token 让前端二次提交
+    if result.get("mfa_required"):
+        return jsonify(result), 200
     # P1-12: HttpOnly cookie（向后兼容：JSON body 仍返回 token）
     resp = make_response(jsonify(result), 200)
     _set_token_cookies(resp, result["access_token"], result.get("refresh_token"))
     return resp
+
+
+@bp.route("/mfa/setup", methods=["POST"])
+@require_permission("auth:mfa:setup")
+def mfa_setup():
+    """P0-fix: 启用 MFA - 生成 TOTP secret + 二维码 URI"""
+    import json as _json
+
+    from extensions import db
+    from models.system import User
+    from services.mfa import mfa_service
+
+    # P0-4 fix: g.user_id never set, use g.current_user (JWT payload) sub
+    _payload = getattr(g, "current_user", {})
+    _uid = int(_payload.get("sub", 0))
+    if not _uid:
+        return jsonify({"error": "无法识别用户"}), 400
+    user = User.query.get(_uid)
+    if not user:
+        return jsonify({"error": "用户不存在"}), 404
+    if user.mfa_enabled:
+        return jsonify({"error": "MFA 已启用，如需重置请先禁用"}), 400
+    secret = mfa_service.generate_secret()
+    user.mfa_secret = secret
+    backup_codes, hashed = mfa_service.generate_backup_codes()
+    user.mfa_backup_codes = _json.dumps(hashed)  # Text 字段存 JSON 字符串
+    user.mfa_enabled = True
+    db.session.commit()
+    # 返回 otpauth URI 供前端生成二维码
+    uri = mfa_service.get_provisioning_uri(secret, user.username)
+    return (
+        jsonify(
+            {
+                "secret": secret,
+                "otpauth_uri": uri,
+                "backup_codes": backup_codes,  # 仅此次返回明文
+            }
+        ),
+        200,
+    )
+
+
+@bp.route("/mfa/disable", methods=["POST"])
+@require_permission("auth:mfa:disable")
+def mfa_disable():
+    """P0-fix: 禁用 MFA"""
+    from extensions import db
+    from models.system import User
+
+    # P0-4 fix: g.user_id never set, use g.current_user (JWT payload) sub
+    _payload = getattr(g, "current_user", {})
+    _uid = int(_payload.get("sub", 0))
+    if not _uid:
+        return jsonify({"error": "无法识别用户"}), 400
+    user = User.query.get(_uid)
+    if not user:
+        return jsonify({"error": "用户不存在"}), 404
+    user.mfa_enabled = False
+    user.mfa_secret = None
+    user.mfa_backup_codes = None
+    db.session.commit()
+    return jsonify({"message": "MFA 已禁用"}), 200
 
 
 @bp.route("/refresh", methods=["POST"])

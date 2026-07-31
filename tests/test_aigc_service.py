@@ -422,9 +422,7 @@ class TestFeedbackLearning:
             svc.record_feedback(seed_suggestion, "approved", 30, 30, note="")
             svc.record_feedback(seed_suggestion, "rejected", 30, 0, note="价格过高")
             # 再创建一条 suggestion + 反馈（approved 减量）
-            s2 = Suggestion(
-                product_id=2, product_name="商品2", suggested_qty=20, original_qty=20, status="pending"
-            )
+            s2 = Suggestion(product_id=2, product_name="商品2", suggested_qty=20, original_qty=20, status="pending")
             db.session.add(s2)
             db.session.commit()
             svc.record_feedback(s2.id, "approved", 20, 15, note="减量")
@@ -470,7 +468,9 @@ class TestReviewSuggestion:
         """approve 修改数量：review_note 记录调整"""
         with app.app_context():
             svc = AIGCService()
-            s = svc.review_suggestion(seed_pending_suggestion, action="approve", final_qty=20, note="减量", reviewer="admin")
+            s = svc.review_suggestion(
+                seed_pending_suggestion, action="approve", final_qty=20, note="减量", reviewer="admin"
+            )
             assert s.status == "approved"
             assert "数量调整 30→20" in (s.review_note or "")
 

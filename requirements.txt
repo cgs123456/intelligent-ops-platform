@@ -26,3 +26,6 @@ opentelemetry-instrumentation-sqlalchemy>=0.40,<1.0
 # P0-8: 安全增强 - 字段加密 + MFA TOTP
 cryptography>=42.0,<46.0
 pyotp>=2.9,<3.0
+# P0-fix: 异步任务 + Redis 客户端（生产必需，否则 Celery worker/beat 无法启动）
+celery>=5.3,<6.0
+redis>=5.0,<6.0

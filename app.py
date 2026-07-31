@@ -312,7 +312,11 @@ def create_app(config_class=None):
 
     # 初始化数据库 + 种子数据
     with app.app_context():
-        db.create_all()
+        # P1-10: ENV=development TESTING=False 
+        if app.config.get("ENV") == "development" and not app.config.get("TESTING"):
+            db.create_all()
+        else:
+            logger.info("db.create_all() skipped")
 
         # RBAC 初始化（仅在 RBAC_ENABLED=True 时执行，幂等）
         try:
@@ -351,13 +355,17 @@ def create_app(config_class=None):
         logger.info("优雅关闭完成")
 
     # P1-13: 信号处理兼容 Windows（SIGTERM 在 Windows 不生效，用 SIGBREAK 替代）
-    signal.signal(signal.SIGINT, graceful_shutdown)
-    if os.name == "nt":
-        # Windows 下 SIGTERM 不可靠，注册 SIGBREAK（Ctrl+Break）
-        signal.signal(signal.SIGBREAK, graceful_shutdown)
-    else:
-        signal.signal(signal.SIGTERM, graceful_shutdown)
-    atexit.register(graceful_shutdown, None, None)
+    # P2-1: gunicorn preload_app 模式下 master 进程会注册信号处理，worker 进程再注册
+    # 自定义信号处理会与 gunicorn 自身的 worker 生命周期管理冲突。检测 GUNICORN_SERVER
+    # 环境变量，存在则说明运行在 gunicorn 下，跳过自定义信号注册，交由 gunicorn 管理。
+    if not os.environ.get("GUNICORN_SERVER"):
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        if os.name == "nt":
+            # Windows 下 SIGTERM 不可靠，注册 SIGBREAK（Ctrl+Break）
+            signal.signal(signal.SIGBREAK, graceful_shutdown)
+        else:
+            signal.signal(signal.SIGTERM, graceful_shutdown)
+        atexit.register(graceful_shutdown, None, None)
 
     return app
 

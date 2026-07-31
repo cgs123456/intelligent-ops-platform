@@ -5,10 +5,14 @@
 
 设计要点：
   - engine 使用模块级单例 + threading.Lock 双重检查，保证线程安全。
-  - @read_replica 装饰器与 use_read_replica() 上下文管理器均基于
-    SQLAlchemy 的 db.session.using_bind() / sessionMaker using(bind) 实现，
-    让被包裹代码块内的 db.session 绑定到从库连接。
   - 健康检查 check_replica_lag() 用 SELECT 1 探活（轻量，不依赖复制视图）。
+
+限制（P0-架构1 修复）：
+  Flask-SQLAlchemy 3.x 不支持 session.using_bind()，因此 @read_replica 装饰器
+  与 use_read_replica() 上下文管理器当前为占位实现：仅返回 read_engine 供调用方
+  参考，db.session 仍绑定主库。生产环境如需真正读写分离，需升级到 SQLAlchemy 2.x
+  显式 bind，或在调用处使用
+  ``db.session.execute(text(...), bind_arguments={'bind': read_engine})``。
 """
 
 from __future__ import annotations
@@ -17,8 +21,9 @@ import functools
 import logging
 import os
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, TypeVar
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -38,10 +43,10 @@ class ReadWriteRouter:
     所有 engine 均为模块级单例，通过 ``threading.Lock`` 双重检查保证线程安全。
     """
 
-    _instance: Optional["ReadWriteRouter"] = None
+    _instance: ReadWriteRouter | None = None
     _lock = threading.Lock()
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "ReadWriteRouter":
+    def __new__(cls, *args: Any, **kwargs: Any) -> ReadWriteRouter:
         # 双重检查锁定，保证单例线程安全
         if cls._instance is None:
             with cls._lock:
@@ -49,7 +54,7 @@ class ReadWriteRouter:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, master_url: Optional[str] = None, replica_url: Optional[str] = None) -> None:
+    def __init__(self, master_url: str | None = None, replica_url: str | None = None) -> None:
         # 单例避免重复初始化（多次构造仅首次生效）
         if getattr(self, "_initialized", False):
             return
@@ -59,8 +64,8 @@ class ReadWriteRouter:
                 return
             self._master_url = master_url
             self._replica_url = replica_url
-            self._master_engine: Optional[Engine] = None
-            self._replica_engine: Optional[Engine] = None
+            self._master_engine: Engine | None = None
+            self._replica_engine: Engine | None = None
             self._replica_available: bool = False
             self._engine_lock = threading.Lock()
             self._initialized = True
@@ -123,17 +128,13 @@ class ReadWriteRouter:
         if not self._replica_available:
             replica_url = self._resolve_replica_url()
             if not replica_url:
-                logger.warning(
-                    "DATABASE_REPLICA_URL 未配置，读操作降级到主库（建议生产环境配置只读从库）"
-                )
+                logger.warning("DATABASE_REPLICA_URL 未配置，读操作降级到主库（建议生产环境配置只读从库）")
                 return self.get_master_engine()
             # 构建从库 engine（单例 + 双重检查锁）
             with self._engine_lock:
                 if self._replica_engine is None:
                     try:
-                        self._replica_engine = create_engine(
-                            replica_url, pool_pre_ping=True, pool_recycle=1800
-                        )
+                        self._replica_engine = create_engine(replica_url, pool_pre_ping=True, pool_recycle=1800)
                         self._replica_available = True
                         logger.info(
                             "从库 engine 已创建: %s",
@@ -155,7 +156,10 @@ class ReadWriteRouter:
     def read_replica(self, func: F) -> F:
         """装饰器：被装饰函数内 db.session 使用从库连接执行读操作。
 
-        基于 Flask-SQLAlchemy 的 session using_bind 实现，函数返回后自动恢复绑定。
+        限制：Flask-SQLAlchemy 3.x 不支持 session.using_bind()，本装饰器当前为
+        占位实现，读请求仍走主库。生产环境需升级到 SQLAlchemy 2.x 显式 bind 或使用
+        ``db.session.execute(text(...), bind_arguments={'bind': read_engine})``。
+
         从库不可用时自动降级到主库，不阻断业务。
         """
 
@@ -167,34 +171,26 @@ class ReadWriteRouter:
         return wrapper  # type: ignore[return-value]
 
     @contextmanager
-    def use_read_replica(self) -> Iterator[Optional[Engine]]:
+    def use_read_replica(self) -> Iterator[Engine | None]:
         """上下文管理器：在 with 块内将 db.session 绑定到从库连接。
+
+        限制：Flask-SQLAlchemy 3.x 不支持 session.using_bind()，本上下文管理器当前
+        为占位实现，yield 的 engine 仅用于调用方参考，读请求仍走主库。生产环境需升级
+        到 SQLAlchemy 2.x 显式 bind 或使用
+        ``db.session.execute(text(...), bind_arguments={'bind': read_engine})``。
 
         用法::
 
-            with router.use_read_replica():
+            with router.use_read_replica() as read_engine:
                 rows = db.session.execute(...).all()
 
         :yield: 从库 engine（降级时为主库 engine）
         """
+        # Flask-SQLAlchemy 3.x 不支持 session.using_bind()，直接 yield 读 engine
+        # 调用方需自行使用 db.session.execute(text(...), bind_arguments={'bind': read_engine})
+        # 显式绑定读 engine，否则读请求仍走主库
         read_engine = self.get_read_engine()
-        bound_session = None
-        try:
-            from extensions import db
-
-            # 使用 db.session 的 using_bind 绑定到从库；旧版本 SQLAlchemy 降级为直接 query
-            try:
-                bound_session = db.session.using_bind(read_engine)
-            except (AttributeError, TypeError):
-                # 兼容 SQLAlchemy 2.x / Flask-SQLAlchemy 3.x：无 using_bind 时跳过绑定
-                bound_session = None
-            yield read_engine
-        finally:
-            if bound_session is not None:
-                try:
-                    bound_session.close()
-                except Exception:
-                    pass
+        yield read_engine
 
     # ------------------------------------------------------------------
     # 健康检查

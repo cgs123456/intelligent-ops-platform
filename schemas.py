@@ -71,7 +71,9 @@ class CreateReturnSchema(Schema):
         required=True, validate=validate.Length(min=1, max=64), metadata={"description": "原销售订单号"}
     )
     product_id = fields.Integer(required=True, metadata={"description": "产品 ID"})
-    qty = fields.Integer(required=True, validate=validate.Range(min=1), metadata={"description": "退货数量（必须为正数）"})
+    qty = fields.Integer(
+        required=True, validate=validate.Range(min=1), metadata={"description": "退货数量（必须为正数）"}
+    )
     reason = fields.String(required=False, validate=validate.Length(max=500), metadata={"description": "退货原因"})
 
 
@@ -87,7 +89,9 @@ class CreateTransferSchema(Schema):
 class ReviewSuggestionSchema(Schema):
     """审核补货建议"""
 
-    action = fields.String(required=True, validate=validate.OneOf(["approve", "reject"]), metadata={"description": "审核动作"})
+    action = fields.String(
+        required=True, validate=validate.OneOf(["approve", "reject"]), metadata={"description": "审核动作"}
+    )
     final_qty = fields.Integer(required=False, validate=validate.Range(min=0), metadata={"description": "最终采购数量"})
     note = fields.String(required=False, validate=validate.Length(max=500), metadata={"description": "审核备注"})
 

@@ -42,8 +42,8 @@ class AgentEvaluator:
 
         :param data_agent: 注入 DataAgent 实例；不传则默认创建（测试中可 monkeypatch _generate_sql）
         :param db_session: 可选，注入数据库 session
-        :param gold_cases_file: 可选，自定义 gold SQL 用例文件路径（默认 tests/fixtures/gold_sql.json）
-        :param reports_dir: 可选，自定义评测报告保存目录（默认 instance/eval_reports/，测试用 tmp_path 隔离）
+        :param gold_cases_file: 可选，自定义 gold SQL 用例文件路径（默认从 config 读取，回退 tests/fixtures/gold_sql.json）
+        :param reports_dir: 可选，自定义评测报告保存目录（默认从 config 读取，回退 instance/eval_reports/，测试用 tmp_path 隔离）
         """
         if data_agent is None:
             from services.data_agent import DataAgent
@@ -51,10 +51,35 @@ class AgentEvaluator:
             data_agent = DataAgent(db_session=db_session)
         self._agent = data_agent
         self.session = self._agent.session
-        # P2-13: gold 用例文件路径可配置，默认用 _GOLD_CASES_FILE
-        self.gold_cases_file = Path(gold_cases_file) if gold_cases_file else _GOLD_CASES_FILE
+        # P2-4: 优先用显式传入参数，其次从 Flask config 读取，最后回退模块默认常量
+        # 避免路径硬编码，便于不同环境（dev/prod/CI）通过环境变量覆盖
+        self.gold_cases_file = (
+            Path(gold_cases_file)
+            if gold_cases_file
+            else self._config_path("EVALUATOR_GOLD_CASES_FILE", _GOLD_CASES_FILE)
+        )
         # P2-21: 报告目录可覆盖，默认用 instance/eval_reports/（Flask instance 目录）
-        self.reports_dir = Path(reports_dir) if reports_dir else _REPORTS_DIR
+        self.reports_dir = (
+            Path(reports_dir) if reports_dir else self._config_path("EVALUATOR_REPORTS_DIR", _REPORTS_DIR)
+        )
+
+    @staticmethod
+    def _config_path(key, default):
+        """从 Flask current_app.config 读取路径，无 app context 时回退默认值。
+
+        :param key: config 键名
+        :param default: 回退默认 Path
+        :return: Path 对象
+        """
+        try:
+            from flask import current_app
+
+            value = current_app.config.get(key)
+            if value:
+                return Path(value)
+        except Exception:
+            pass
+        return default
 
     # ==================== 主入口 ====================
 

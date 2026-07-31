@@ -3,7 +3,7 @@ ODS 贴源 / DWD 明细 / DWS 汇总 / ADS 应用
 + ETL 元数据 + 数据质量日志 + 血缘追踪
 """
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Index, UniqueConstraint
 

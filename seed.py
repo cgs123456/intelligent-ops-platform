@@ -5,7 +5,7 @@ import random
 from datetime import date, datetime, timedelta
 
 from extensions import db
-from models.erp import Product, SaleOrder, StockMove, Supplier, Warehouse
+from models.erp import Product, SaleOrder, Supplier, Warehouse
 from models.external import ExtEcommerceOrder, ExtSupplierQuote
 
 logger = logging.getLogger(__name__)

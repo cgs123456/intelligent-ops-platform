@@ -14,8 +14,8 @@ import pytest
 from extensions import db
 from models.erp import Product
 from services.response import (
-    ErrorCode,
     HTTP_STATUS,
+    ErrorCode,
     error_response,
     paginate_response,
     success_response,
@@ -104,7 +104,11 @@ class TestErrorResponse:
     def test_error_auth_codes_map_to_401(self, app):
         """认证类错误码映射到 401"""
         with app.test_request_context("/"):
-            for code in (ErrorCode.AUTH_INVALID_CREDENTIALS, ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_TOKEN_INVALID):
+            for code in (
+                ErrorCode.AUTH_INVALID_CREDENTIALS,
+                ErrorCode.AUTH_TOKEN_EXPIRED,
+                ErrorCode.AUTH_TOKEN_INVALID,
+            ):
                 _, status = error_response(code, "认证失败")
                 assert status == 401
 

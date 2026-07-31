@@ -5,6 +5,8 @@ from .erp import (
     AccountMove,
     Budget,
     CostCenter,
+    Customer,
+    ExchangeRate,
     Product,
     PurchaseOrder,
     ReorderRule,
@@ -12,6 +14,7 @@ from .erp import (
     SaleOrder,
     StockLot,
     StockMove,
+    StockTake,
     Supplier,
     Warehouse,
 )
@@ -47,6 +50,10 @@ __all__ = [
     "ReorderRule",
     "CostCenter",
     "Budget",
+    # P2-21 / P2-27 ERP 业务模块扩展
+    "ExchangeRate",
+    "StockTake",
+    "Customer",
     # 外部数据源
     "ExtSupplierQuote",
     "ExtEcommerceOrder",

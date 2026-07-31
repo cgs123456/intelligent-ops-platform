@@ -15,7 +15,6 @@
 """
 
 import logging
-import os
 from abc import ABC, abstractmethod
 
 from flask import current_app
@@ -27,8 +26,11 @@ class LLMBackend(ABC):
     """LLM 后端抽象基类"""
 
     @abstractmethod
-    def call(self, messages: list, temperature: float = 0.3):
-        """调用 LLM，返回文本或 None"""
+    def call(self, messages: list, temperature: float = 0.3, timeout: float = 30.0):
+        """调用 LLM，返回文本或 None
+
+        :param timeout: 调用超时秒数（默认 30），防止长时间阻塞
+        """
 
     @abstractmethod
     def available(self) -> bool:
@@ -38,7 +40,7 @@ class LLMBackend(ABC):
 class RuleLLMBackend(LLMBackend):
     """规则引擎后端：无 LLM 调用，永远返回 None（由 AIGCService 走规则兜底）"""
 
-    def call(self, messages, temperature=0.3):
+    def call(self, messages, temperature=0.3, timeout=30.0):
         return None
 
     def available(self) -> bool:
@@ -65,7 +67,7 @@ class OpenAICompatibleBackend(LLMBackend):
     def available(self) -> bool:
         return bool(self.api_key) and bool(self.api_url)
 
-    def call(self, messages, temperature=0.3):
+    def call(self, messages, temperature=0.3, timeout=30.0):
         if not self.available():
             logger.warning("[LLM-%s] api_key 或 api_url 未配置", self.provider_name)
             return None
@@ -81,7 +83,7 @@ class OpenAICompatibleBackend(LLMBackend):
                 "messages": messages,
                 "temperature": temperature,
             }
-            resp = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
+            resp = requests.post(self.api_url, headers=headers, json=payload, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]

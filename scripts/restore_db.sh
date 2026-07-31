@@ -16,7 +16,7 @@ set -euo pipefail
 
 POSTGRES_HOST="${POSTGRES_HOST:-db}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-POSTGRES_USER="${POSTGRES_USER:-ops}"
+POSTGRES_USER="${PGUSER:-${POSTGRES_USER:-ops}}"
 POSTGRES_DB="${POSTGRES_DB:-ops_platform}"
 
 if [ -z "${PGPASSWORD:-}" ]; then
@@ -31,6 +31,19 @@ if [ $# -lt 1 ]; then
 fi
 
 BACKUP_FILE="$1"
+
+# P1-10/P1-13: pg_terminate_backend requires superuser, check permission first
+# P1-13: 当前用户非 superuser 时自动 fallback 到 postgres 用户，不再直接报错退出
+SUPERUSER_CHECK=$(psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres -tAc "SELECT current_setting('is_superuser')" 2>/dev/null || echo "off")
+if [ "${SUPERUSER_CHECK}" != "on" ]; then
+    echo "[WARN] 当前用户 '${POSTGRES_USER}' 非 superuser，自动 fallback 到 'postgres' 用户" >&2
+    POSTGRES_USER="postgres"
+    SUPERUSER_CHECK=$(psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres -tAc "SELECT current_setting('is_superuser')" 2>/dev/null || echo "off")
+    if [ "${SUPERUSER_CHECK}" != "on" ]; then
+        echo "[ERROR] fallback 到 'postgres' 用户仍无 superuser 权限，请以 superuser 身份执行恢复" >&2
+        exit 1
+    fi
+fi
 
 if [ ! -f "${BACKUP_FILE}" ]; then
     echo "[ERROR] 备份文件不存在: ${BACKUP_FILE}" >&2

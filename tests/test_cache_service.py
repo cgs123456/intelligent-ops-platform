@@ -13,7 +13,6 @@ import pytest
 
 from services.cache_service import MultiLevelCache
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -291,3 +290,182 @@ class TestL1Maxsize:
         assert stats == 1  # L2 命中回填
         s = cache.stats()
         assert s["l2_hit"] >= 1
+
+
+class TestNullValueCaching:
+    """P2-25: None 值缓存测试
+
+    None 用 _NULL_SENTINEL 包装后存储，区分"未命中"和"命中但值为空"，
+    避免缓存穿透到 L3。
+    """
+
+    def test_none_value_cached_in_l1(self, cache):
+        """set None 后 get 应命中 L1 返回 None，不调用 loader"""
+        calls = {"n": 0}
+
+        def loader():
+            calls["n"] += 1
+            return "should_not_call"
+
+        cache.set("null_key", None, ttl_l2=60)
+        # 第一次 get 应命中 L1（None 已用哨兵包装）
+        result = cache.get("null_key", loader=loader)
+        assert result is None
+        assert calls["n"] == 0  # loader 未调用
+        stats = cache.stats()
+        assert stats["l1_hit"] == 1
+
+    def test_none_value_cached_in_l2(self, cache, fake_cache):
+        """set None 后清空 L1，get 应命中 L2 返回 None"""
+        cache.set("null_key", None, ttl_l2=60)
+        cache.clear_l1()  # 强制走 L2
+
+        result = cache.get("null_key", loader=lambda: "fallback")
+        assert result is None
+        stats = cache.stats()
+        assert stats["l2_hit"] == 1
+
+    def test_none_value_from_loader_cached(self, cache):
+        """loader 返回 None 时应缓存 None，避免缓存穿透"""
+        calls = {"n": 0}
+
+        def loader():
+            calls["n"] += 1
+            return None  # 模拟 L3 返回空
+
+        # 首次：L1/L2 miss → L3 返回 None → 应缓存
+        result = cache.get("empty_key", loader=loader)
+        assert result is None
+        assert calls["n"] == 1
+        stats = cache.stats()
+        assert stats["l3_hit"] == 1
+
+        # 第二次：应命中 L1（None 已缓存），不再调 loader
+        result = cache.get("empty_key", loader=loader)
+        assert result is None
+        assert calls["n"] == 1  # loader 未再调用
+        stats = cache.stats()
+        assert stats["l1_hit"] == 1
+
+    def test_none_value_invalidate(self, cache):
+        """invalidate None 缓存后，下次 get 应穿透到 L3"""
+        calls = {"n": 0}
+
+        def loader():
+            calls["n"] += 1
+            return None
+
+        cache.set("null_key", None, ttl_l2=60)
+        cache.invalidate("null_key")
+        result = cache.get("null_key", loader=loader)
+        assert result is None
+        assert calls["n"] == 1  # loader 被调用（缓存已失效）
+
+
+class TestInvalidatePattern:
+    """invalidate_pattern 批量清除测试"""
+
+    def test_invalidate_pattern_l1_match(self, fake_cache):
+        """invalidate_pattern 清除 L1 中匹配的 key（使用无 L2 的 cache 避免 L2 回填）"""
+        # 使用无 L2 的 cache，确保 invalidate 后 get 不从 L2 回填
+        cache = MultiLevelCache(cache=None, l1_maxsize=8)
+        cache.set("user:1", "a")
+        cache.set("user:2", "b")
+        cache.set("product:1", "p")  # 不匹配，应保留
+
+        deleted = cache.invalidate_pattern("user:*")
+        # user:1 和 user:2 被清除
+        assert deleted == 2
+        # user:* 已清空，get 应 miss
+        assert cache.get("user:1") is None
+        assert cache.get("user:2") is None
+        # product:1 仍在
+        assert cache.get("product:1") == "p"
+
+    def test_invalidate_pattern_no_match(self, cache):
+        """invalidate_pattern 无匹配时不报错"""
+        cache.set("a", 1)
+        result = cache.invalidate_pattern("nonexistent:*")
+        # 无匹配，返回 0
+        assert result == 0
+        # a 仍在
+        assert cache.get("a") == 1
+
+    def test_invalidate_pattern_no_l2(self, fake_cache):
+        """无 L2 时 invalidate_pattern 仅清 L1"""
+        cache = MultiLevelCache(cache=None, l1_maxsize=8)
+        cache.set("k1", 1)
+        cache.set("k2", 2)
+        deleted = cache.invalidate_pattern("k*")
+        assert deleted == 2
+        assert cache.get("k1") is None
+        assert cache.get("k2") is None
+
+    def test_invalidate_pattern_l2_broken(self, fake_cache):
+        """L2 故障时 invalidate_pattern 不抛异常，仅清 L1"""
+        cache = MultiLevelCache(cache=fake_cache, l1_maxsize=8)
+        cache.set("k1", 1)
+        fake_cache.broken = True
+        # 不应抛异常
+        cache.invalidate_pattern("k*")
+        # L1 已清
+        assert cache.get("k1") is None
+        stats = cache.stats()
+        assert stats["l2_error"] >= 1
+
+    def test_invalidate_pattern_specific_pattern(self, fake_cache):
+        """精确匹配特定模式（使用无 L2 的 cache 避免 L2 回填）"""
+        cache = MultiLevelCache(cache=None, l1_maxsize=8)
+        cache.set("order:100", 1)
+        cache.set("order:200", 2)
+        cache.set("order:abc", 3)
+        cache.set("product:100", 4)
+
+        # 匹配 order:1 开头
+        cache.invalidate_pattern("order:1*")
+        # order:100 被清，order:200 和 order:abc 保留
+        assert cache.get("order:100") is None
+        assert cache.get("order:200") == 2
+        assert cache.get("order:abc") == 3
+        assert cache.get("product:100") == 4
+
+
+class TestCacheSetWithTTL:
+    """set 与 TTL 行为测试"""
+
+    def test_set_overwrites_existing(self, cache):
+        """set 覆盖已有 key 的新值"""
+        cache.set("k", "old", ttl_l2=60)
+        cache.set("k", "new", ttl_l2=60)
+        assert cache.get("k") == "new"
+
+    def test_get_no_loader_returns_none(self, cache):
+        """无 loader 且未命中时返回 None"""
+        result = cache.get("missing_key")
+        assert result is None
+        stats = cache.stats()
+        assert stats["l1_miss"] == 1
+        assert stats["l2_miss"] == 1
+        # l3_hit 不增加（无 loader）
+        assert stats["l3_hit"] == 0
+
+    def test_get_loader_raises(self, cache):
+        """loader 抛异常时 get 重新抛出"""
+
+        def broken_loader():
+            raise RuntimeError("DB 故障")
+
+        with pytest.raises(RuntimeError, match="DB 故障"):
+            cache.get("broken_key", loader=broken_loader)
+
+    def test_l1_l2_both_hit_l1_first(self, cache, fake_cache):
+        """L1 和 L2 都有值时优先命中 L1"""
+        cache.set("k", "v", ttl_l2=60)
+        # 重置 L2 计数器
+        fake_cache.call_count["get"] = 0
+        result = cache.get("k")
+        assert result == "v"
+        # L2 未被访问（L1 命中）
+        assert fake_cache.call_count["get"] == 0
+        stats = cache.stats()
+        assert stats["l1_hit"] == 1

@@ -98,7 +98,7 @@ class TestNotifier:
         monkeypatch.setenv("ALERT_DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/test")
         fresh_notifier._init_from_config()
 
-        with patch("requests.post") as mock_post:
+        with patch.object(fresh_notifier._session, "post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_post.return_value = mock_resp
@@ -117,7 +117,7 @@ class TestNotifier:
         monkeypatch.delenv("ALERT_DINGTALK_WEBHOOK", raising=False)
         fresh_notifier._init_from_config()
 
-        with patch("requests.post") as mock_post:
+        with patch.object(fresh_notifier._session, "post") as mock_post:
             fresh_notifier._send_dingtalk("标题", "内容", "info", {})
             assert not mock_post.called
 
@@ -126,7 +126,7 @@ class TestNotifier:
         monkeypatch.setenv("ALERT_WECOM_WEBHOOK", "https://qyapi.weixin.qq.com/test")
         fresh_notifier._init_from_config()
 
-        with patch("requests.post") as mock_post:
+        with patch.object(fresh_notifier._session, "post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_post.return_value = mock_resp
@@ -174,7 +174,7 @@ class TestNotifier:
         monkeypatch.setenv("ALERT_DINGTALK_WEBHOOK", "https://example.com")
         fresh_notifier._init_from_config()
 
-        with patch("requests.post") as mock_post:
+        with patch.object(fresh_notifier._session, "post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 500
             mock_post.return_value = mock_resp
@@ -188,7 +188,7 @@ class TestNotifier:
         monkeypatch.setenv("ALERT_DINGTALK_WEBHOOK", "https://example.com")
         fresh_notifier._init_from_config()
 
-        with patch("requests.post", side_effect=Exception("network error")):
+        with patch.object(fresh_notifier._session, "post", side_effect=Exception("network error")):
             # 不应抛异常
             fresh_notifier._send_dingtalk("标题", "内容", "info", {})
 

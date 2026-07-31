@@ -148,3 +148,393 @@ class TestClosedLoop:
 
             # 下次 run_id 应递增
             assert ClosedLoop.get_current_run_id() == run_id + 1
+
+
+@pytest.mark.usefixtures("db_session")
+class TestStep3RpaOrder:
+    """_step3_rpa_order 下单 + 重试逻辑测试"""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_loop_state(self, app):
+        """每个测试前清理 LoopState 和 Suggestion 表"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from models.system import LoopState
+
+        with app.app_context():
+            LoopState.query.delete()
+            Suggestion.query.delete()
+            db.session.commit()
+        yield
+
+    def test_step3_no_approved_suggestions(self, app):
+        """无已审核建议时返回跳过信息"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "无已审核建议" in result
+            assert "跳过下单" in result
+
+    def test_step3_order_success(self, app, monkeypatch):
+        """已审核建议下单成功：suggestion 状态升级为 ordered"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from services.closed_loop import ClosedLoop
+
+        # 避免 time.sleep 阻塞测试
+        monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+
+        with app.app_context():
+            # 创建已审核建议
+            sug = Suggestion(
+                product_id=1,
+                product_name="测试商品",
+                suggested_qty=10,
+                status="approved",
+            )
+            db.session.add(sug)
+            db.session.commit()
+            sug_id = sug.id
+
+            # mock RPAService
+            class FakeRPA:
+                def place_supplier_order(self, suggestion):
+                    return {
+                        "status": "ok",
+                        "supplier": "测试供应商",
+                        "ext_order_no": "EXT-001",
+                    }
+
+            # mock _services 返回 FakeRPA
+            # ClosedLoop._services will be patched below
+
+            @staticmethod
+            def fake_services():
+                return (None, FakeRPA, None, None)
+
+            monkeypatch.setattr(ClosedLoop, "_services", fake_services)
+
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "下单" in result
+            assert "测试商品" in result
+            assert "测试供应商" in result
+            # suggestion 状态升级为 ordered
+            sug_db = db.session.get(Suggestion, sug_id)
+            assert sug_db.status == "ordered"
+
+    def test_step3_order_retry_on_fail(self, app, monkeypatch):
+        """下单失败时重试 3 次：前 2 次失败，第 3 次成功"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from services.closed_loop import ClosedLoop
+
+        monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+
+        with app.app_context():
+            sug = Suggestion(
+                product_id=1,
+                product_name="重试商品",
+                suggested_qty=5,
+                status="approved",
+            )
+            db.session.add(sug)
+            db.session.commit()
+
+            call_count = [0]
+
+            class FakeRPA:
+                def place_supplier_order(self, suggestion):
+                    call_count[0] += 1
+                    if call_count[0] < 3:
+                        return {"status": "fail", "reason": "供应商系统繁忙"}
+                    return {"status": "ok", "supplier": "备选供应商", "ext_order_no": "EXT-002"}
+
+            @staticmethod
+            def fake_services():
+                return (None, FakeRPA, None, None)
+
+            monkeypatch.setattr(ClosedLoop, "_services", fake_services)
+
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "备选供应商" in result
+            assert call_count[0] == 3  # 重试 3 次后成功
+
+    def test_step3_order_all_retries_failed(self, app, monkeypatch):
+        """下单 3 次均失败：返回失败信息"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from services.closed_loop import ClosedLoop
+
+        monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+
+        with app.app_context():
+            sug = Suggestion(
+                product_id=1,
+                product_name="失败商品",
+                suggested_qty=5,
+                status="approved",
+            )
+            db.session.add(sug)
+            db.session.commit()
+
+            call_count = [0]
+
+            class FakeRPA:
+                def place_supplier_order(self, suggestion):
+                    call_count[0] += 1
+                    return {"status": "fail", "reason": "供应商拒绝"}
+
+            @staticmethod
+            def fake_services():
+                return (None, FakeRPA, None, None)
+
+            monkeypatch.setattr(ClosedLoop, "_services", fake_services)
+
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "失败" in result
+            assert call_count[0] == 3  # 共尝试 3 次
+
+    def test_step3_order_exception_retry(self, app, monkeypatch):
+        """下单抛异常时重试 3 次"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from services.closed_loop import ClosedLoop
+
+        monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+
+        with app.app_context():
+            sug = Suggestion(
+                product_id=1,
+                product_name="异常商品",
+                suggested_qty=5,
+                status="approved",
+            )
+            db.session.add(sug)
+            db.session.commit()
+
+            call_count = [0]
+
+            class FakeRPA:
+                def place_supplier_order(self, suggestion):
+                    call_count[0] += 1
+                    raise RuntimeError("网络异常")
+
+            @staticmethod
+            def fake_services():
+                return (None, FakeRPA, None, None)
+
+            monkeypatch.setattr(ClosedLoop, "_services", fake_services)
+
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "异常" in result
+            assert call_count[0] == 3
+
+    def test_step3_order_exception_then_success(self, app, monkeypatch):
+        """下单前 2 次抛异常，第 3 次成功"""
+        from extensions import db
+        from models.aigc import Suggestion
+        from services.closed_loop import ClosedLoop
+
+        monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+
+        with app.app_context():
+            sug = Suggestion(
+                product_id=1,
+                product_name="恢复商品",
+                suggested_qty=8,
+                status="approved",
+            )
+            db.session.add(sug)
+            db.session.commit()
+
+            call_count = [0]
+
+            class FakeRPA:
+                def place_supplier_order(self, suggestion):
+                    call_count[0] += 1
+                    if call_count[0] < 3:
+                        raise RuntimeError("暂时故障")
+                    return {"status": "ok", "supplier": "恢复供应商", "ext_order_no": "EXT-003"}
+
+            @staticmethod
+            def fake_services():
+                return (None, FakeRPA, None, None)
+
+            monkeypatch.setattr(ClosedLoop, "_services", fake_services)
+
+            result = ClosedLoop._step3_rpa_order(actor="tester")
+            assert "恢复供应商" in result
+            assert call_count[0] == 3
+
+
+@pytest.mark.usefixtures("db_session")
+class TestCheckAutoTrigger:
+    """check_auto_trigger 自动触发逻辑测试"""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_loop_state(self, app):
+        from extensions import db
+        from models.system import LoopState
+
+        with app.app_context():
+            LoopState.query.delete()
+            db.session.commit()
+        yield
+
+    def test_check_auto_trigger_disabled(self, app):
+        """LOOP_AUTO_TRIGGER 未启用时返回 triggered=False"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            app.config["LOOP_AUTO_TRIGGER"] = False
+            result = ClosedLoop.check_auto_trigger()
+            assert result["triggered"] is False
+            assert "未启用" in result["reason"]
+
+    def test_check_auto_trigger_loop_not_finished(self, app):
+        """LOOP_AUTO_TRIGGER 启用但当前轮次未完成时返回 triggered=False"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            app.config["LOOP_AUTO_TRIGGER"] = True
+            # 默认状态：所有步骤 pending，current_step=1，未完成
+            result = ClosedLoop.check_auto_trigger()
+            assert result["triggered"] is False
+            assert "未完成" in result["reason"]
+
+    def test_check_auto_trigger_no_low_stock(self, app, monkeypatch):
+        """当前轮次已完成但无低库存时返回 triggered=False
+
+        注：get_current_run_id 在所有步骤 done 时会自动递增到新轮次，
+        所以需要 mock get_status 返回"所有步骤 done"的状态来测试低库存检查分支。
+        临时调整所有低库存产品的 stock_qty 以确保无低库存。
+        """
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            app.config["LOOP_AUTO_TRIGGER"] = True
+
+            # mock get_status 返回所有步骤 done 的状态
+            done_steps = [
+                {"step": i, "name": f"步骤{i}", "owner": "X", "status": "done", "detail": "", "time": "-"}
+                for i in range(1, 6)
+            ]
+            monkeypatch.setattr(
+                ClosedLoop,
+                "get_status",
+                staticmethod(lambda: {"run_id": 1, "current_step": 5, "steps": done_steps}),
+            )
+
+            # 临时调整所有低库存产品的 stock_qty，确保无低库存
+            from extensions import db
+            from models.erp import Product
+
+            low_products = Product.query.filter(Product.stock_qty < Product.safety_stock).all()
+            original_qtys = [(p, p.stock_qty) for p in low_products]
+            for p in low_products:
+                p.stock_qty = p.safety_stock  # 临时提升到安全库存
+            db.session.commit()
+
+            try:
+                result = ClosedLoop.check_auto_trigger()
+                assert result["triggered"] is False
+                assert "无低库存" in result["reason"]
+            finally:
+                # 恢复原始 stock_qty
+                for p, original_qty in original_qtys:
+                    p.stock_qty = original_qty
+                db.session.commit()
+
+    def test_check_auto_trigger_with_low_stock(self, app, monkeypatch):
+        """当前轮次已完成且存在低库存时返回 triggered=True
+
+        注：同上，需要 mock get_status 返回"所有步骤 done"的状态。
+        """
+        from extensions import db
+        from models.erp import Product
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            app.config["LOOP_AUTO_TRIGGER"] = True
+
+            # mock get_status 返回所有步骤 done 的状态
+            done_steps = [
+                {"step": i, "name": f"步骤{i}", "owner": "X", "status": "done", "detail": "", "time": "-"}
+                for i in range(1, 6)
+            ]
+            monkeypatch.setattr(
+                ClosedLoop,
+                "get_status",
+                staticmethod(lambda: {"run_id": 1, "current_step": 5, "steps": done_steps}),
+            )
+
+            # 创建低库存产品（stock_qty < safety_stock）
+            low_product = Product(
+                sku="TEST-LOWSTOCK-001",
+                name="低库存品",
+                cost_price=10,
+                sale_price=20,
+                stock_qty=5,
+                safety_stock=50,
+                avg_cost=10,
+            )
+            db.session.add(low_product)
+            db.session.commit()
+
+            try:
+                result = ClosedLoop.check_auto_trigger()
+                assert result["triggered"] is True
+                assert "低库存" in result["reason"]
+                assert result["low_count"] >= 1
+            finally:
+                # 清理测试数据
+                db.session.delete(low_product)
+                db.session.commit()
+
+
+@pytest.mark.usefixtures("db_session")
+class TestRouteAfterStep3:
+    """_route_after_step3 路由逻辑测试"""
+
+    def test_route_after_step3_retry(self, app):
+        """有错误且重试次数 < 2 时返回 retry"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            state = {"errors": ["下单失败"], "retry_count": 0}
+            assert ClosedLoop._route_after_step3(state) == "retry"
+
+            state = {"errors": ["下单失败"], "retry_count": 1}
+            assert ClosedLoop._route_after_step3(state) == "retry"
+
+    def test_route_after_step3_continue_no_errors(self, app):
+        """无错误时返回 continue"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            state = {"errors": [], "retry_count": 0}
+            assert ClosedLoop._route_after_step3(state) == "continue"
+
+    def test_route_after_step3_continue_max_retry(self, app):
+        """重试次数达上限时返回 continue"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            state = {"errors": ["仍失败"], "retry_count": 2}
+            assert ClosedLoop._route_after_step3(state) == "continue"
+
+
+@pytest.mark.usefixtures("db_session")
+class TestClosedLoopNodeFanOut:
+    """_node_fan_out 并行分发节点测试"""
+
+    def test_node_fan_out_returns_state(self, app):
+        """_node_fan_out 直接返回 state（不执行业务逻辑）"""
+        from services.closed_loop import ClosedLoop
+
+        with app.app_context():
+            state = {"run_id": 1, "current_step": 3, "test": "value"}
+            result = ClosedLoop._node_fan_out(state)
+            assert result == state
+            assert result["test"] == "value"

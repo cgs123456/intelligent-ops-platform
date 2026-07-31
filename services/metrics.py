@@ -14,8 +14,6 @@
 import logging
 import time
 
-from flask import current_app
-
 logger = logging.getLogger(__name__)
 
 # 慢查询阈值（毫秒）
@@ -68,6 +66,16 @@ def _init_prometheus_metrics():
             "LLM 调用耗时（秒）",
             ["provider", "status"],
             buckets=(0.5, 1, 2, 5, 10, 30),
+        )
+        # P1-6: SQLAlchemy 连接池指标（对应 alerts.yml: DBConnectionPoolExhaustion）
+        # 告警规则使用 sqlalchemy_pool_checkedout / sqlalchemy_pool_size
+        _metrics["sqlalchemy_pool_checkedout"] = Gauge(
+            "sqlalchemy_pool_checkedout",
+            "SQLAlchemy 连接池当前已检出（in-use）连接数",
+        )
+        _metrics["sqlalchemy_pool_size"] = Gauge(
+            "sqlalchemy_pool_size",
+            "SQLAlchemy 连接池总大小",
         )
         logger.info("Prometheus 业务指标已注册")
     except ImportError:
@@ -128,8 +136,9 @@ def init_metrics(app):
 
     # 注册慢查询监控
     try:
-        from extensions import db
         from sqlalchemy import event
+
+        from extensions import db
 
         # 用字典存储每个连接的查询开始时间
         _query_timings = {}
@@ -171,3 +180,34 @@ def init_metrics(app):
         logger.info("慢查询监控已启用，阈值=%dms", SLOW_QUERY_THRESHOLD_MS)
     except Exception as e:
         logger.warning("慢查询监控初始化失败：%s", e)
+
+    # P1-6: 周期性采集 SQLAlchemy 连接池指标（每 15s 一次，与 Prometheus scrape_interval 对齐）
+    try:
+        from extensions import db
+
+        def _update_pool_metrics():
+            """采集连接池 checkedout / size 并更新 Gauge"""
+            try:
+                engine = db.engine
+                pool = engine.pool
+                if hasattr(pool, "checkedout"):
+                    _metrics["sqlalchemy_pool_checkedout"].set(pool.checkedout())
+                if hasattr(pool, "size"):
+                    _metrics["sqlalchemy_pool_size"].set(pool.size())
+            except Exception as e:
+                logger.debug("连接池指标采集失败：%s", e)
+
+        # 使用 background 线程周期性更新
+        import threading
+
+        _pool_metrics_stop = threading.Event()
+
+        def _pool_metrics_loop():
+            while not _pool_metrics_stop.wait(15.0):
+                _update_pool_metrics()
+
+        t = threading.Thread(target=_pool_metrics_loop, daemon=True, name="pool-metrics")
+        t.start()
+        logger.info("SQLAlchemy 连接池指标监控已启用（15s 间隔）")
+    except Exception as e:
+        logger.warning("连接池指标监控初始化失败：%s", e)

@@ -64,6 +64,7 @@ ignore = [
 "migrations/*" = ["E", "W", "F"]  # 迁移文件不检查
 "seed.py" = ["E501"]  # 种子数据允许长行
 "models/__init__.py" = ["F401", "F403", "F405"]  # models 有意 re-export
+"services/warehouse_service.py" = ["F401", "F403", "F405"]  # from models.warehouse import * (ODS/DWD/DWS/ADS 全部模型)
 
 # ==================== Black 配置 ====================
 [tool.black]

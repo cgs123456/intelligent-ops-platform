@@ -1,4 +1,8 @@
 {{- /* Ingress：仅当 ingress.enabled=true 时创建 */ -}}
+{{- /* P1-5: 生产环境 TLS 必填校验 —— ingress 启用时必须配置 tls，明文 HTTP 不得对外暴露 */ -}}
+{{- if and .Values.ingress.enabled (eq (len .Values.ingress.tls) 0) -}}
+{{- fail "ingress.tls 为空：生产环境必须配置 TLS。请在 values.yaml 中设置 ingress.tls（secretName + hosts），或设置 ingress.enabled=false 关闭 Ingress。" -}}
+{{- end -}}
 {{- if .Values.ingress.enabled -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress

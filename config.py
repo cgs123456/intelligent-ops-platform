@@ -26,6 +26,10 @@ class Config:
 
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+    # P1-10: JWT 签名算法，默认 HS256（对称密钥）。
+    # 生产环境应迁移到 RS256（非对称密钥）：设置 JWT_ALGORITHM=RS256，
+    # 并配置 RSA 公私钥对（私钥签名，公钥验签），实现密钥轮换与安全分发。
+    JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
     JSON_AS_ASCII = False  # 中文不转义
 
     # AIGC：LLM 配置（可选，不配则用规则引擎）
@@ -58,7 +62,8 @@ class Config:
     RBAC_ENABLED = os.getenv("RBAC_ENABLED", "1") == "1"
 
     # CORS 跨域配置（生产环境: https://ops.example.com,https://admin.example.com）
-    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
+    # P1-4: 默认不再为 "*"，改为本地开发常用源，DevConfig/ProdConfig 均校验不为 "*"
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5000")
 
     # API 限流配置（生产用 redis://redis:6379/1）
     # 注意：Flask-Limiter 读取 RATELIMIT_STORAGE_URI（不是 URL），这里同时设两份以兼容老 env
@@ -73,6 +78,14 @@ class Config:
     # API 文档（flask-smorest，P0-3: 默认开启）
     API_DOCS_ENABLED = os.getenv("API_DOCS_ENABLED", "1") == "1"
 
+    # P2-4: Agent 评测框架路径配置（可由环境变量覆盖，避免硬编码）
+    # gold SQL 用例文件路径（默认 tests/fixtures/gold_sql.json）
+    EVALUATOR_GOLD_CASES_FILE = os.getenv(
+        "EVALUATOR_GOLD_CASES_FILE", str(BASE_DIR / "tests" / "fixtures" / "gold_sql.json")
+    )
+    # 评测报告保存目录（默认 instance/eval_reports/，Flask instance 目录）
+    EVALUATOR_REPORTS_DIR = os.getenv("EVALUATOR_REPORTS_DIR", str(BASE_DIR / "instance" / "eval_reports"))
+
 
 class DevConfig(Config):
     DEBUG = True
@@ -80,6 +93,28 @@ class DevConfig(Config):
     # P2-14: 读写分离从库 URL（dev 默认空，降级主库）+ L1 缓存容量
     DATABASE_REPLICA_URL = os.getenv("DATABASE_REPLICA_URL", "")
     CACHE_L1_MAXSIZE = int(os.getenv("CACHE_L1_MAXSIZE", "1024"))
+
+    def __init__(self):
+        super().__init__()
+        # P1-5: SECRET_KEY 仍为默认值时自动生成随机密钥并记录 warning
+        if self.SECRET_KEY == "dev-secret-key-change-in-production":
+            import logging
+            import secrets
+
+            self.SECRET_KEY = secrets.token_hex(32)
+            logging.getLogger(__name__).warning(
+                "DevConfig SECRET_KEY 仍为默认值，已自动生成随机密钥。"
+                "生产环境请通过 SECRET_KEY 环境变量显式指定。"
+            )
+        # P1-4: DevConfig 也校验 CORS_ORIGINS 不为 "*"，避免开发环境误开放跨域
+        if self.CORS_ORIGINS == "*":
+            import logging
+
+            logging.getLogger(__name__).warning(
+                'DevConfig CORS_ORIGINS 为 "*"，已降级为 localhost 本地源。'
+                "请通过 CORS_ORIGINS 环境变量显式指定允许的源。"
+            )
+            self.CORS_ORIGINS = "http://localhost:3000,http://localhost:5000"
 
 
 class ProdConfig(Config):
@@ -99,12 +134,18 @@ class ProdConfig(Config):
 
     def __init__(self):
         super().__init__()
+        # P2-4: 生产环境不允许 TESTING=True，防止测试模式跳过认证/RBAC 误投产
+        if os.getenv("TESTING", "0") == "1":
+            raise RuntimeError("生产环境不允许 TESTING=True")
         # P0-1: 生产环境必须设置 SECRET_KEY
         if not os.getenv("SECRET_KEY"):
             raise RuntimeError(
                 "生产环境必须设置 SECRET_KEY 环境变量！"
                 '生成方式: python -c "import secrets; print(secrets.token_hex(32))"'
             )
+        # P1-11: SECRET_KEY 强度校验 —— 至少 32 字符，防止弱密钥
+        if len(os.getenv("SECRET_KEY", "")) < 32:
+            raise RuntimeError("SECRET_KEY 至少 32 字符，请使用强随机密钥")
         self.SECRET_KEY = os.getenv("SECRET_KEY")
 
         # P0-6: 生产环境必须使用 PostgreSQL/MySQL
@@ -130,7 +171,15 @@ class ProdConfig(Config):
         if self.CORS_ORIGINS == "*":
             raise RuntimeError("生产环境必须指定 CORS_ORIGINS（不可为 *）")
 
+        # P0-1: 生产环境必须设置 FIELD_ENCRYPTION_KEY（字段级加密密钥，不可降级用 SECRET_KEY 派生）
+        if not os.getenv("FIELD_ENCRYPTION_KEY"):
+            raise RuntimeError(
+                "生产环境必须设置 FIELD_ENCRYPTION_KEY 环境变量！"
+                '生成方式: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+            )
+
 
 # 按环境变量选择
 _config_map = {"development": DevConfig, "production": ProdConfig}
-config = _config_map.get(os.getenv("FLASK_ENV", "development"), DevConfig)
+# P1-4/P1-5: 实例化配置类以触发 __init__ 中的安全校验（CORS_ORIGINS / SECRET_KEY 等）
+config = _config_map.get(os.getenv("FLASK_ENV", "development"), DevConfig)()

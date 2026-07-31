@@ -53,8 +53,8 @@ jobs:
         env:
           FLASK_ENV: development
           TESTING: '1'
-        # P1: 强制 coverage 门槛 40%，未达标 CI 失败
-        run: pytest --cov=. --cov-report=xml --cov-report=term-missing --cov-fail-under=40 -v
+        # P1-4: coverage 门槛提升至 60%（硬约束要求），未达标 CI 失败
+        run: pytest --cov=. --cov-report=xml --cov-report=term-missing --cov-fail-under=60 -v
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4
@@ -79,11 +79,10 @@ jobs:
         # P1-20: HIGH 级别安全漏洞阻断 CI，MEDIUM 仅告警（-lll = 只报 HIGH）
         run: bandit -r . -x tests,.venv,migrations -lll
       - name: Run pip-audit for dependency CVE scan
-        # P2-5: 依赖 CVE 扫描，允许失败（新 CVE 不阻断 CI，需人工审查）
-        continue-on-error: true
+        # P1-5: 依赖 CVE 扫描，HIGH/CRITICAL 阻断 CI（硬约束：CI must include pip-audit for CVE scanning）
         run: |
           pip install pip-audit
-          pip-audit -r requirements.txt
+          pip-audit -r requirements.txt --strict --vulnerability-service osv
 
   build:
     name: Docker Build & Scan

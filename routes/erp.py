@@ -44,7 +44,7 @@ def warehouses():
 
 
 @bp.route("/returns", methods=["POST"])
-@require_permission("erp:write")
+@require_permission("return:write")
 @idempotent()
 def create_return():
     data = request.get_json(force=True, silent=True) or {}
@@ -69,7 +69,7 @@ def create_return():
 
 
 @bp.route("/transfers", methods=["POST"])
-@require_permission("erp:write")
+@require_permission("transfer:write")
 @idempotent()
 def create_transfer():
     from schemas import CreateTransferSchema
@@ -200,3 +200,227 @@ def cost_centers():
             for c in rows
         ]
     )
+
+
+# ==================== 采购单 / 销售单（P0-fix: 补齐核心业务 HTTP 入口） ====================
+
+
+@bp.route("/purchase-orders", methods=["POST"])
+@require_permission("purchase:write")
+@idempotent()
+def create_purchase_order():
+    """创建采购单（对应 Odoo purchase.order 创建，状态 draft）"""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        order = ERPService().create_purchase_order(
+            supplier_id=data["supplier_id"],
+            product_id=data["product_id"],
+            qty=data["qty"],
+            unit_price=data["unit_price"],
+            warehouse_id=data.get("warehouse_id"),
+            ext_order_no=data.get("ext_order_no"),
+            currency_code=data.get("currency_code", "CNY"),
+            tax_rate=data.get("tax_rate", 0.13),
+        )
+        return jsonify({"order_no": order.order_no, "id": order.id}), 201
+    except (KeyError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/purchase-orders/<order_no>/confirm", methods=["POST"])
+@require_permission("purchase:write")
+@idempotent()
+def confirm_purchase_order(order_no):
+    """确认采购单：draft -> confirmed，生成应付凭证"""
+    from models.erp import PurchaseOrder
+
+    order = PurchaseOrder.query.filter_by(order_no=order_no).first()
+    if not order:
+        return jsonify({"error": f"采购单不存在: {order_no}"}), 404
+    try:
+        order = ERPService().confirm_purchase_order(order.id)
+        return jsonify({"order_no": order.order_no, "status": order.status}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/purchase-orders/<order_no>/receive", methods=["POST"])
+@require_permission("purchase:write")
+@idempotent()
+def receive_purchase_order(order_no):
+    """到货入库：confirmed -> received，更新库存 + 移动加权平均成本 + 入库流水"""
+    from models.erp import PurchaseOrder
+
+    order = PurchaseOrder.query.filter_by(order_no=order_no).first()
+    if not order:
+        return jsonify({"error": f"采购单不存在: {order_no}"}), 404
+    try:
+        order = ERPService().receive_purchase_order(order.id)
+        return jsonify({"order_no": order.order_no, "status": order.status}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/purchase-orders/<order_no>/cancel", methods=["POST"])
+@require_permission("purchase:write")
+@idempotent()
+def cancel_purchase_order(order_no):
+    """取消采购单：置 cancelled 状态"""
+    from models.erp import PurchaseOrder
+
+    order = PurchaseOrder.query.filter_by(order_no=order_no).first()
+    if not order:
+        return jsonify({"error": f"采购单不存在: {order_no}"}), 404
+    try:
+        order = ERPService().cancel_purchase_order(order.id)
+        return jsonify({"order_no": order.order_no, "status": order.status}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/sale-orders", methods=["POST"])
+@require_permission("sale:write")
+@idempotent()
+def create_sale_order():
+    """创建销售单：扣减库存 + 出库流水 + 应收凭证 + 按 avg_cost 结转成本"""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        order = ERPService().create_sale_order(
+            product_id=data["product_id"],
+            qty=data["qty"],
+            unit_price=data["unit_price"],
+            customer=data.get("customer", ""),
+            warehouse_id=data.get("warehouse_id"),
+            currency_code=data.get("currency_code", "CNY"),
+            tax_rate=data.get("tax_rate", 0.13),
+        )
+        return jsonify({"order_no": order.order_no, "id": order.id}), 201
+    except (KeyError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ==================== P2-20 / P2-27 业务扩展端点 ====================
+
+
+@bp.route("/budgets/<int:budget_id>/refresh", methods=["POST"])
+@require_permission("erp:write")
+@idempotent()
+def refresh_budget(budget_id: int):
+    """刷新预算实际发生额（对应 Odoo account.budget cron 汇总）
+
+    按 cost_center_id + period 聚合 AccountMove 金额，回填 Budget.actual_amount。
+    """
+    try:
+        actual = ERPService().refresh_budget_actual(budget_id)
+        return jsonify({"status": "ok", "budget_id": budget_id, "actual_amount": float(actual)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/purchase-orders/<order_no>/return", methods=["POST"])
+@require_permission("purchase:write")
+@idempotent()
+def return_purchase_order(order_no: str):
+    """采购退货：减少库存 + 红字应付凭证 + 状态置 returned
+
+    Body:
+        - qty: 退货数量（正数，必填）
+        - reason: 退货原因（可选）
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    qty = data.get("qty")
+    if qty is None:
+        return jsonify({"error": "qty 不能为空"}), 400
+    if not isinstance(qty, (int, float)) or qty <= 0:
+        return jsonify({"error": "qty 必须为正数"}), 400
+    try:
+        order = ERPService().create_purchase_return(
+            order_no=order_no,
+            qty=int(qty),
+            reason=data.get("reason", ""),
+        )
+        return jsonify({"order_no": order.order_no, "status": order.status}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ==================== 库存盘点（P1: cycle count）====================
+
+
+@bp.route("/stock-takes", methods=["POST"])
+@require_permission("erp:write")
+@idempotent()
+def create_stock_take():
+    """创建盘点单（对应 Odoo stock.inventory 创建）
+
+    Body:
+        - product_id: 盘点产品 ID（必填）
+        - warehouse_id: 盘点仓库 ID（可选，None 表示总库存盘点）
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    product_id = data.get("product_id")
+    if product_id is None:
+        return jsonify({"error": "product_id 不能为空"}), 400
+    if not isinstance(product_id, int) or product_id <= 0:
+        return jsonify({"error": "product_id 必须为正整数"}), 400
+    try:
+        take = ERPService().create_stock_take(
+            product_id=product_id,
+            warehouse_id=data.get("warehouse_id"),
+        )
+        return jsonify({"id": take.id, "status": take.status, "system_qty": take.system_qty}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/stock-takes", methods=["GET"])
+@require_permission("erp:read")
+def list_stock_takes():
+    """查询盘点单列表（对应 Odoo stock.inventory 列表）
+
+    查询参数：
+        - product_id: 按产品过滤（可选）
+        - status: 按状态过滤（draft/confirmed，可选）
+        - limit: 返回条数上限（默认 50，最大 200）
+    """
+    product_id = request.args.get("product_id", type=int)
+    status = request.args.get("status", type=str)
+    limit = request.args.get("limit", 50, type=int)
+    try:
+        rows = ERPService().list_stock_takes(product_id=product_id, status=status, limit=limit)
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/stock-takes/<int:take_id>/confirm", methods=["POST"])
+@require_permission("erp:write")
+@idempotent()
+def confirm_stock_take(take_id: int):
+    """确认盘点单：计算差异并调整库存（对应 Odoo stock.inventory.action_done）
+
+    Body:
+        - actual_qty: 实际盘点数量（非负整数，必填）
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    actual_qty = data.get("actual_qty")
+    if actual_qty is None:
+        return jsonify({"error": "actual_qty 不能为空"}), 400
+    # 允许 JSON 传入整数，拒绝浮点/字符串
+    if isinstance(actual_qty, bool) or not isinstance(actual_qty, int) or actual_qty < 0:
+        return jsonify({"error": "actual_qty 必须为非负整数"}), 400
+    try:
+        take = ERPService().confirm_stock_take(take_id=take_id, actual_qty=actual_qty)
+        return jsonify(
+            {
+                "id": take.id,
+                "status": take.status,
+                "system_qty": take.system_qty,
+                "actual_qty": take.actual_qty,
+                "diff": take.diff,
+            }
+        ), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400

@@ -4,10 +4,18 @@ import hashlib
 import json
 from datetime import datetime
 
-from sqlalchemy import Index
+from sqlalchemy import Index, PrimaryKeyConstraint
 from sqlalchemy.event import listens_for
+from sqlalchemy.ext.hybrid import hybrid_property
 
 from extensions import db
+
+
+def _get_field_crypto():
+    """延迟导入字段加密器（避免循环依赖）"""
+    from services.crypto import field_crypto
+
+    return field_crypto
 
 
 class LoopState(db.Model):
@@ -35,8 +43,15 @@ class AuditLog(db.Model):
 
     __tablename__ = "audit_log"
     # P1-13: (actor, action, created_at) 复合索引优化审计日志高频查询
-    __table_args__ = (Index("idx_audit_actor_action_created", "actor", "action", "created_at"),)
-    id = db.Column(db.Integer, primary_key=True)
+    # P1-8: 显式声明复合主键 (id, created_at)，与分区迁移后的 DB schema 一致
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "created_at"),
+        Index("idx_audit_actor_action_created", "actor", "action", "created_at"),
+    )
+    # P1-8: id 为整数列，复合主键 (id, created_at) 由 __table_args__ 中的
+    # PrimaryKeyConstraint 显式声明。SQLite 下由 before_insert 钩子手动计算 MAX(id)+1
+    # 兜底自增；PostgreSQL 下由迁移设置的序列/IDENTITY 自动生成。
+    id = db.Column(db.Integer)
     actor = db.Column(db.String(64), default="system", index=True)  # 操作人
     action = db.Column(db.String(32), nullable=False, index=True)  # create/review/order/receive/etl/...
     target_type = db.Column(db.String(32))  # 操作对象类型
@@ -88,8 +103,15 @@ class AuditLog(db.Model):
         for idx, rec in enumerate(records):
             expected_prev = "" if idx == 0 else prev_hash
             expected_hash = cls._compute_hash(
-                expected_prev, rec.actor, rec.action, rec.target_type,
-                rec.target_id, rec.detail, rec.ip, rec.request_id, rec.created_at
+                expected_prev,
+                rec.actor,
+                rec.action,
+                rec.target_type,
+                rec.target_id,
+                rec.detail,
+                rec.ip,
+                rec.request_id,
+                rec.created_at,
             )
             if rec.hash != expected_hash or (idx > 0 and rec.prev_hash != expected_prev):
                 return rec.id
@@ -101,15 +123,46 @@ class AuditLog(db.Model):
 def _audit_log_set_hash(mapper, connection, target):
     """before_insert 钩子：自动计算 prev_hash 和 hash。
 
-    取上一条记录的 hash 作为 prev_hash，保证链式完整。
+    P1-7: 使用 PostgreSQL advisory lock 串行化 hash chain 计算，避免并发插入时
+    多个事务读到相同 prev_hash 导致链断裂。SQLite 下跳过（单写者无并发问题）。
+    P1-8: 复合主键 (id, created_at) 下 SQLite 无 INTEGER PRIMARY KEY 自增，
+    手动用 MAX(id)+1 兜底；PostgreSQL 由迁移设置的序列/IDENTITY 自动生成。
     """
-    last = AuditLog.query.order_by(AuditLog.id.desc()).first()
+    from sqlalchemy import text
+
+    # P0-5 fix: fill request_id BEFORE hash computation
+    if target.request_id is None:
+        try:
+            from flask import g, has_request_context
+
+            if has_request_context():
+                target.request_id = getattr(g, "request_id", None)
+        except Exception:
+            pass
+
+    # P1-7: PostgreSQL 事务级 advisory lock 串行化 hash chain 计算
+    if connection.dialect.name == "postgresql":
+        connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('audit_log_chain'))"))
+
+    # P1-8: SQLite 复合主键无自增，手动计算 MAX(id)+1 作为 id 兜底
+    if connection.dialect.name == "sqlite" and target.id is None:
+        target.id = connection.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM audit_log")).scalar()
+
+    # P2-8: 仅取 hash 列（with_entities）避免全表扫描加载整行；order_by id desc + limit 1
+    # 走 id 索引，配合 LIMIT 1 仅读取最新一条的 hash 列，消除原 .first() 的全行物化开销。
+    last = AuditLog.query.with_entities(AuditLog.hash).order_by(AuditLog.id.desc()).limit(1).first()
     prev = last.hash if last and last.hash else ""
     target.prev_hash = prev
     target.hash = AuditLog._compute_hash(
-        prev, target.actor, target.action, target.target_type,
-        target.target_id, target.detail, target.ip, target.request_id,
-        target.created_at or datetime.now()
+        prev,
+        target.actor,
+        target.action,
+        target.target_type,
+        target.target_id,
+        target.detail,
+        target.ip,
+        target.request_id,
+        target.created_at or datetime.now(),
     )
 
 
@@ -135,13 +188,25 @@ class User(db.Model):
     # P0-1: token_version 用于改密后使所有旧 token 失效（签发时写入，校验时比对，改密时递增）
     token_version = db.Column(db.Integer, default=0, nullable=False)
     # P0-8: MFA TOTP 双因素认证
-    mfa_secret = db.Column(db.String(64), nullable=True)  # TOTP secret（加密存储）
+    # P0-fix: mfa_secret 加密存储（通过 _mfa_secret 密文列 + hybrid property 明文访问）
+    _mfa_secret = db.Column("mfa_secret", db.String(256), nullable=True)  # TOTP secret（加密密文）
     mfa_enabled = db.Column(db.Boolean, default=False, nullable=False)  # 是否已启用 MFA
     mfa_backup_codes = db.Column(db.Text, nullable=True)  # 备用恢复码（JSON 数组，哈希存储）
     # P0-8: 密码历史（JSON 数组，最近 N 条密码哈希，防止重用）
     password_history = db.Column(db.Text, nullable=True)
     roles = db.relationship("Role", secondary=user_roles, backref="users")
     created_at = db.Column(db.DateTime, default=datetime.now)
+
+    @hybrid_property
+    def mfa_secret(self):
+        """TOTP secret（明文读取，密文存储）"""
+        if not self._mfa_secret:
+            return None
+        return _get_field_crypto().decrypt(self._mfa_secret)
+
+    @mfa_secret.setter
+    def mfa_secret(self, value):
+        self._mfa_secret = _get_field_crypto().encrypt(value) if value else None
 
 
 class TokenBlacklist(db.Model):
@@ -185,15 +250,4 @@ class Role(db.Model):
     description = db.Column(db.String(128))
 
 
-# P1-17: AuditLog 写入时自动从请求上下文填充 request_id（零侵入，业务代码无需改动）
-@db.event.listens_for(AuditLog, "before_insert")
-def _auditlog_fill_request_id(mapper, connection, target):
-    """自动填充 request_id：有请求上下文时从 g.request_id 取，否则保持 None（后台任务）"""
-    if target.request_id is None:
-        try:
-            from flask import g, has_request_context
-
-            if has_request_context():
-                target.request_id = getattr(g, "request_id", None)
-        except Exception:
-            pass
+# P0-5 fix: _auditlog_fill_request_id merged into _audit_log_set_hash

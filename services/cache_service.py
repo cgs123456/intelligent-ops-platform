@@ -18,7 +18,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class _FallbackTTLCache:
     def __init__(self, maxsize: int, ttl: float) -> None:
         self.maxsize = maxsize
         self.ttl = ttl
-        self._data: "OrderedDict[Any, tuple]" = OrderedDict()  # key -> (value, expire_at)
+        self._data: OrderedDict[Any, tuple] = OrderedDict()  # key -> (value, expire_at)
         self._lock = threading.RLock()
 
     def _expired(self, expire_at: float) -> bool:
@@ -60,7 +61,7 @@ class _FallbackTTLCache:
             self._data.move_to_end(key)
             return value
 
-    def set(self, key: Any, value: Any, ttl: Optional[float] = None) -> None:
+    def set(self, key: Any, value: Any, ttl: float | None = None) -> None:
         with self._lock:
             # 容量淘汰：超出 maxsize 删除最旧
             while len(self._data) >= self.maxsize:
@@ -91,6 +92,8 @@ class _FallbackTTLCache:
 
 
 _SENTINEL = object()
+# P2-25: None 哨兵值，用于包装 None 缓存值，区分"未命中"和"命中但值为空"
+_NULL_SENTINEL = object()
 
 
 def _make_l1_cache(maxsize: int, ttl: float):
@@ -111,7 +114,7 @@ class MultiLevelCache:
 
     def __init__(
         self,
-        cache: Optional[Any] = None,
+        cache: Any | None = None,
         l1_maxsize: int = 1024,
         l1_ttl: float = 300.0,
         l2_default_ttl: float = 300.0,
@@ -123,7 +126,7 @@ class MultiLevelCache:
         self._l2_default_ttl = l2_default_ttl
 
         # 命中计数器（线程安全用 GIL 即可，但显式加锁更稳妥）
-        self._stats: Dict[str, int] = {
+        self._stats: dict[str, int] = {
             "l1_hit": 0,
             "l1_miss": 0,
             "l2_hit": 0,
@@ -196,7 +199,7 @@ class MultiLevelCache:
     def get(
         self,
         key: str,
-        loader: Optional[Callable[[], Any]] = None,
+        loader: Callable[[], Any] | None = None,
         ttl_l1: float = 60.0,
         ttl_l2: float = 300.0,
     ) -> Any:
@@ -207,23 +210,28 @@ class MultiLevelCache:
         :param ttl_l1: 回填 L1 的 TTL（秒），默认 60。
         :param ttl_l2: 回填 L2 的 TTL（秒），默认 300。
         :return: 缓存值；未命中且无 loader 返回 None。
+
+        P2-25: None 值用 _NULL_SENTINEL 包装后存储，命中哨兵时返回 None，
+              区分"未命中"（返回 None 不缓存）和"命中但值为空"（缓存并返回 None）。
         """
         # ---------- L1 ----------
         with self._l1_lock:
             value = self._l1.get(key, _SENTINEL)
         if value is not _SENTINEL:
             self._incr("l1_hit")
-            return value
+            # P2-25: 命中哨兵说明缓存值为 None
+            return None if value is _NULL_SENTINEL else value
         self._incr("l1_miss")
 
         # ---------- L2 ----------
         value = self._l2_get(key)
         if value is not None and value is not _SENTINEL:
             self._incr("l2_hit")
-            # 回填 L1
+            # 回填 L1（存储原始值，可能是 _NULL_SENTINEL）
             with self._l1_lock:
                 self._l1.set(key, value, ttl=ttl_l1)
-            return value
+            # P2-25: 命中哨兵说明缓存值为 None
+            return None if value is _NULL_SENTINEL else value
         self._incr("l2_miss")
 
         # ---------- L3 ----------
@@ -236,14 +244,14 @@ class MultiLevelCache:
             raise
         self._incr("l3_hit")
 
-        if value is None:
-            return None
+        # P2-25: None 用哨兵包装后回填，区分"未命中"和"命中但值为空"
+        stored_value = _NULL_SENTINEL if value is None else value
 
         # 回填 L2（先填 L2，避免 L2 故障时丢失）
-        self._l2_set(key, value, ttl_l2)
+        self._l2_set(key, stored_value, ttl_l2)
         # 回填 L1
         with self._l1_lock:
-            self._l1.set(key, value, ttl=ttl_l1)
+            self._l1.set(key, stored_value, ttl=ttl_l1)
         return value
 
     def set(self, key: str, value: Any, ttl_l2: float = 300.0) -> None:
@@ -252,12 +260,16 @@ class MultiLevelCache:
         :param key: 缓存键。
         :param value: 缓存值。
         :param ttl_l2: L2 的 TTL（秒），默认 300。L1 使用构造时默认 TTL。
+
+        P2-25: None 值用 _NULL_SENTINEL 包装后存储，区分"未命中"和"命中但值为空"。
         """
+        # P2-25: None 用哨兵包装，避免与未命中混淆
+        stored_value = _NULL_SENTINEL if value is None else value
         # 写 L1
         with self._l1_lock:
-            self._l1.set(key, value)
+            self._l1.set(key, stored_value)
         # 写 L2（Redis 不可用时降级，仅 L1 生效）
-        self._l2_set(key, value, ttl_l2)
+        self._l2_set(key, stored_value, ttl_l2)
 
     def invalidate(self, key: str) -> None:
         """使缓存失效：同时清除 L1 和 L2 中对应 key。"""
@@ -272,12 +284,22 @@ class MultiLevelCache:
 
         :param pattern: key 匹配模式（支持 ``*`` 通配符，如 ``user:*``）。
         :return: 清除的 key 数量（L2 删除数；L1 始终清空匹配项）。
+
+        P2-24: 不直接访问 self._l1._data 私有属性，改用 keys() 方法遍历，
+              兼容 cachetools.TTLCache（dict 子类，原生支持 keys）与
+              _FallbackTTLCache（降级时回退到 _data.keys()）。
         """
         import fnmatch
 
         # ---------- L1：遍历匹配并删除 ----------
         with self._l1_lock:
-            keys_to_del = [k for k in list(self._l1._data.keys()) if fnmatch.fnmatch(str(k), pattern)]  # type: ignore[attr-defined]
+            # P2-24: 优先使用公开的 keys() 接口，避免直接访问私有属性 _data
+            if hasattr(self._l1, "keys"):
+                all_keys = list(self._l1.keys())
+            else:
+                # 降级：仅当实现未提供 keys() 时回退到内部存储（如旧版 cachetools）
+                all_keys = list(getattr(self._l1, "_data", {}).keys())
+            keys_to_del = [k for k in all_keys if fnmatch.fnmatch(str(k), pattern)]
             for k in keys_to_del:
                 self._l1.pop(k, None)
 
@@ -300,7 +322,6 @@ class MultiLevelCache:
             return 0
         redis_pattern = pattern.replace("*", "*")  # 保持通配符语义
         deleted = 0
-        pipe = getattr(client, "pipeline", None)
         # SCAN 迭代匹配 key
         scan_iter = getattr(client, "scan_iter", None)
         if scan_iter is not None:
@@ -321,7 +342,7 @@ class MultiLevelCache:
                     deleted = self._l2_delete_many(keys)
         return deleted
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """返回各级缓存命中统计。
 
         :return: 包含 hit/miss 计数与命中率的字典。

@@ -1,0 +1,75 @@
+# ====================================================================
+# Prometheus 主配置（P0-4 阻断项修复）
+# --------------------------------------------------------------------
+# 加载同目录 alerts.yml 告警规则，抓取应用/Redis/PostgreSQL/Node 指标。
+# Alertmanager 地址：monitoring/alertmanager/alertmanager.yml 配置的服务。
+#
+# 与 docker-compose.monitoring.yml 中的 prometheus 服务配合使用：
+#   挂载本文件到 /etc/prometheus/prometheus.yml
+#   挂载 alerts.yml 到 /etc/prometheus/alerts.yml
+# ====================================================================
+
+global:
+  scrape_interval: 15s        # 默认抓取间隔
+  evaluation_interval: 15s    # 告警规则评估间隔
+  scrape_timeout: 10s         # 单次抓取超时
+
+# 告警规则文件（与 prometheus.yml 同目录）
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Alertmanager 配置（告警推送目标）
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# 抓取目标配置
+scrape_configs:
+  # ============== 1. 应用自身指标 ==============
+  # prometheus_flask_exporter 暴露 /metrics，含 http_requests_total、duration histogram
+  # 对应 alerts.yml: High5xxErrorRate / HighP95Latency / DBConnectionPoolExhaustion
+  - job_name: 'ops-platform'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['web:5000']
+        labels:
+          service: ops-platform
+    # 应用启动可能较慢，抓取失败不立即告警
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: ops-platform:5000
+
+  # ============== 2. Redis 指标 ==============
+  # 使用 redis_exporter（需在 compose 中单独部署，此处预留抓取配置）
+  # 对应 alerts.yml: RedisDown
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: redis
+
+  # ============== 3. PostgreSQL 指标 ==============
+  # 使用 postgres_exporter（需在 compose 中单独部署，此处预留抓取配置）
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: postgres
+
+  # ============== 4. 节点指标（磁盘空间等） ==============
+  # 使用 node_exporter（需在 compose 中单独部署或宿主机运行）
+  # 对应 alerts.yml: DiskSpaceLow
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: infra
+
+  # ============== 5. Prometheus 自身指标 ==============
+  # 用于监控 Prometheus 自身健康
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

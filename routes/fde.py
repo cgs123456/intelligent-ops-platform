@@ -87,7 +87,7 @@ def anomalies():
         date: 可选，检测日期（YYYY-MM-DD，默认今天）
         trigger: 可选，是否自动触发闭环补货（true/false，默认 false）
     """
-    from datetime import date, datetime
+    from datetime import datetime
 
     from services.anomaly_detector import AnomalyDetector
 

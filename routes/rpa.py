@@ -1,6 +1,6 @@
 """RPA 路由 Blueprint"""
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify
 
 from services.rbac import require_permission
 from services.rpa_service import RPAService

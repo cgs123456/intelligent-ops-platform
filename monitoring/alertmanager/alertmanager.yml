@@ -45,35 +45,39 @@ route:
       continue: false
 
 # --------------------------------------------------------------------
-# 接收器：使用 webhook 占位
-# 生产环境应替换为：
-#   - 邮件：email_configs
-#   - 钉钉：webhook_configs 指向钉钉机器人
-#   - 企业微信：webhook_configs 指向企业微信机器人
+# 接收器（P1-1: 通过环境变量注入真实 webhook URL，未配置则用占位 + 启动告警）
+# 生产环境部署前必须设置以下环境变量（在 docker-compose 中通过 environment 注入）：
+#   ALERTMANAGER_CRITICAL_WEBHOOK  critical 告警通知 URL（钉钉/企业微信/邮件网关）
+#   ALERTMANAGER_WARNING_WEBHOOK   warning 告警通知 URL
+#   ALERTMANAGER_DEFAULT_WEBHOOK   兜底通知 URL
+# Alertmanager 原生不支持环境变量插值，需在部署时用 envsubst 渲染，或直接编辑本文件。
 # --------------------------------------------------------------------
 receivers:
   - name: 'default-webhook'
     webhook_configs:
-      - url: 'http://127.0.0.1:5001/alertmanager/default'  # 占位，生产替换
+      # 生产环境：通过 ALERTMANAGER_DEFAULT_WEBHOOK 环境变量注入真实 URL
+      # 钉钉: https://oapi.dingtalk.com/robot/send?access_token=XXX
+      # 企业微信: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=XXX
+      # 未配置时指向本地 5001 端口的告警转发服务（需另部署）
+      - url: '${ALERTMANAGER_DEFAULT_WEBHOOK:http://127.0.0.1:5001/alertmanager/default}'
         send_resolved: true
 
   - name: 'critical-webhook'
     webhook_configs:
-      # 生产建议同时配置邮件 / 钉钉 / 电话通知
-      - url: 'http://127.0.0.1:5001/alertmanager/critical'
+      # P1-1: critical 告警必须配置真实多渠道通知（电话+短信+邮件+IM）
+      # 通过 ALERTMANAGER_CRITICAL_WEBHOOK 环境变量注入（部署时用 alertmanager-entrypoint.sh 渲染）
+      - url: '${ALERTMANAGER_CRITICAL_WEBHOOK:http://127.0.0.1:5001/alertmanager/critical}'
         send_resolved: true
+    # 生产环境邮件接收器（取消注释并配置 SMTP 后启用，配合上方 global.smtp_* 配置）
+    # email_configs:
+    #   - to: 'ops-oncall@example.com'
+    #     headers:
+    #       Subject: '【CRITICAL】{{ .CommonLabels.alertname }} - {{ .CommonLabels.service }}'
 
   - name: 'warning-webhook'
     webhook_configs:
-      - url: 'http://127.0.0.1:5001/alertmanager/warning'
+      - url: '${ALERTMANAGER_WARNING_WEBHOOK:http://127.0.0.1:5001/alertmanager/warning}'
         send_resolved: true
-
-  # 生产环境邮件接收器示例（取消注释并配置后启用）
-  # - name: 'email-ops'
-  #   email_configs:
-  #     - to: 'ops-team@example.com'
-  #       headers:
-  #         Subject: '【告警】{{ .CommonLabels.alertname }}'
 
 # --------------------------------------------------------------------
 # 抑制规则：critical 触发时抑制同服务的 warning，避免重复告警
