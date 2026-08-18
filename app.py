@@ -53,10 +53,10 @@ def setup_logging(app):
         # P0-4: 文本格式带 request_id，便于全链路排查
         fmt = "%(asctime)s [%(levelname)s] %(name)s [req=%(request_id)s] [%(filename)s:%(lineno)d]: %(message)s"
 
-    formatter = fmt if isinstance(fmt, str) else fmt
+    formatter = fmt if isinstance(fmt, logging.Formatter) else logging.Formatter(fmt)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-    handlers = [stream_handler]
+    handlers: list[logging.Handler] = [stream_handler]
 
     # 文件轮转：每个文件最大 10MB，保留 10 个
     try:
@@ -89,7 +89,7 @@ def create_app(config_class=None):
     # P0: ProxyFix — 反向代理后还原真实客户端 IP，让限流按真实 IP 生效
     from werkzeug.middleware.proxy_fix import ProxyFix
 
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)  # type: ignore[method-assign]
 
     # P1-3: 日志配置
     setup_logging(app)
@@ -217,7 +217,7 @@ def create_app(config_class=None):
     @app.route("/health")
     def health():
         """深度健康检查：检查数据库 + Redis 连通性。不暴露内部异常详情，仅返回 ok/fail。"""
-        checks = {"status": "ok"}
+        checks: dict = {"status": "ok"}
         # 数据库检查
         try:
             db.session.execute(db.text("SELECT 1"))
@@ -312,7 +312,7 @@ def create_app(config_class=None):
 
     # 初始化数据库 + 种子数据
     with app.app_context():
-        # P1-10: ENV=development TESTING=False 
+        # P1-10: 仅 ENV=development 且非 TESTING 时自动建表，生产走 alembic 迁移
         if app.config.get("ENV") == "development" and not app.config.get("TESTING"):
             db.create_all()
         else:
@@ -362,7 +362,7 @@ def create_app(config_class=None):
         signal.signal(signal.SIGINT, graceful_shutdown)
         if os.name == "nt":
             # Windows 下 SIGTERM 不可靠，注册 SIGBREAK（Ctrl+Break）
-            signal.signal(signal.SIGBREAK, graceful_shutdown)
+            signal.signal(signal.SIGBREAK, graceful_shutdown)  # type: ignore[attr-defined]
         else:
             signal.signal(signal.SIGTERM, graceful_shutdown)
         atexit.register(graceful_shutdown, None, None)

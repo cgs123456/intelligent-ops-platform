@@ -25,7 +25,7 @@ services:
   # 加载 alerts.yml 告警规则，抓取 web/redis/postgres/node 指标
   # 告警触发后推送至 alertmanager:9093
   prometheus:
-    image: prom/prometheus:v0.27.0
+    image: prom/prometheus:latest
     container_name: ops-prometheus
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -126,7 +126,7 @@ services:
   # 接收 Prometheus 推送的告警，按 severity 分组后通过 webhook 发送
   # 生产环境应将 webhook 替换为邮件 / 钉钉 / 企业微信
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:latest
     container_name: ops-alertmanager
     ports:
       # P2-2: 仅监听本地回环，避免 Alertmanager HTTP API/UI 对外暴露（未授权访问可静默告警）

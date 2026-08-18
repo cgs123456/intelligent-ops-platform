@@ -120,6 +120,10 @@ disallow_untyped_defs = true
 module = "services.metrics"
 disallow_untyped_defs = false  # 允许，逐步补齐
 
+[[tool.mypy.overrides]]
+module = "models.*"
+disable_error_code = ["name-defined", "no-redef"]  # db.Model 动态基类 stub 缺口；hybrid_property+setter 的 no-redef 误报（CI 经 services 间接检查 models）
+
 # ==================== Pytest 配置 ====================
 [tool.pytest.ini_options]
 minversion = "7.0"

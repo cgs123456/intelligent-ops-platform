@@ -103,8 +103,7 @@ class DevConfig(Config):
 
             self.SECRET_KEY = secrets.token_hex(32)
             logging.getLogger(__name__).warning(
-                "DevConfig SECRET_KEY 仍为默认值，已自动生成随机密钥。"
-                "生产环境请通过 SECRET_KEY 环境变量显式指定。"
+                "DevConfig SECRET_KEY 仍为默认值，已自动生成随机密钥。生产环境请通过 SECRET_KEY 环境变量显式指定。"
             )
         # P1-4: DevConfig 也校验 CORS_ORIGINS 不为 "*"，避免开发环境误开放跨域
         if self.CORS_ORIGINS == "*":

@@ -413,14 +413,17 @@ def confirm_stock_take(take_id: int):
         return jsonify({"error": "actual_qty 必须为非负整数"}), 400
     try:
         take = ERPService().confirm_stock_take(take_id=take_id, actual_qty=actual_qty)
-        return jsonify(
-            {
-                "id": take.id,
-                "status": take.status,
-                "system_qty": take.system_qty,
-                "actual_qty": take.actual_qty,
-                "diff": take.diff,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "id": take.id,
+                    "status": take.status,
+                    "system_qty": take.system_qty,
+                    "actual_qty": take.actual_qty,
+                    "diff": take.diff,
+                }
+            ),
+            200,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

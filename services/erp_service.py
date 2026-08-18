@@ -944,7 +944,7 @@ class ERPService:
         try:
             # 预取所有启用的补货规则，建 product_id -> rule map
             rules = self.db.query(ReorderRule).filter(ReorderRule.is_active.is_(True)).all()
-            rule_map = {}
+            rule_map: dict = {}
             for r in rules:
                 # 同一 product 取 min_qty 最大的规则（更严格的阈值优先）
                 if r.product_id not in rule_map or r.min_qty > rule_map[r.product_id].min_qty:
@@ -1101,12 +1101,7 @@ class ERPService:
 
             # P1-5: 加行锁 SELECT FOR UPDATE，防止并发退货库存错乱
             # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
-            product = (
-                self.db.query(Product)
-                .filter_by(id=order.product_id)
-                .with_for_update()
-                .first()
-            )
+            product = self.db.query(Product).filter_by(id=order.product_id).with_for_update().first()
             if not product:
                 raise ValueError(f"产品不存在: {order.product_id}")
             if product.stock_qty < qty:
@@ -1248,9 +1243,7 @@ class ERPService:
                 raise ValueError(f"盘点单状态非 draft，不可确认: 当前={take.status}")
 
             # P1-5: 加行锁防止并发调整库存
-            product = (
-                self.db.query(Product).filter_by(id=take.product_id).with_for_update().first()
-            )
+            product = self.db.query(Product).filter_by(id=take.product_id).with_for_update().first()
             if not product:
                 raise ValueError(f"产品不存在: {take.product_id}")
 

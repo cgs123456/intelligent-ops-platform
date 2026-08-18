@@ -753,7 +753,7 @@ class AIGCService:
                 # 避免 LLM 上下文窗口溢出（glm-4-flash 上下文 128K，但应保守截断）
                 MAX_MSG_CHARS = 500  # 单条消息最多保留 500 字
                 MAX_TOTAL_CHARS = 2000  # 历史总长度上限 2000 字
-                truncated = []
+                truncated: list[str] = []
                 total = 0
                 for m in reversed(recent):  # 从最近的开始
                     content = (m.content or "")[:MAX_MSG_CHARS]
@@ -916,7 +916,7 @@ class AIGCService:
             .all()
         )
         reason_kws = ("价格", "库存", "质量", "周期", "时效", "冗余", "其他")
-        reasons = Counter()
+        reasons: Counter = Counter()
         for (n,) in reject_notes:
             matched = False
             for kw in reason_kws:

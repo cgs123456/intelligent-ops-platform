@@ -124,7 +124,7 @@ class Notifier:
         # 避免在 _send_sync 中重复 create_app()（开销巨大且可能死锁递归）
         # 若无 app context（如纯脚本调用），降级为仅记日志
         try:
-            app_ref = current_app._get_current_object()
+            app_ref = current_app._get_current_object()  # type: ignore[attr-defined]
         except RuntimeError:
             app_ref = None
 

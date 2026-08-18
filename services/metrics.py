@@ -22,7 +22,7 @@ SLOW_QUERY_THRESHOLD_MS = 100
 # ==================== Prometheus 指标定义 ====================
 
 # 延迟到 metrics 初始化时创建，避免无 prometheus_client 时报错
-_metrics = {}
+_metrics: dict = {}
 
 
 def _init_prometheus_metrics():

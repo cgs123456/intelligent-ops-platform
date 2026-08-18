@@ -170,13 +170,15 @@ intelligent-ops-platform/
 │
 ├── routes/                      # Blueprint 路由
 │   ├── __init__.py              # 注册 Blueprint + 旧路径 308 重定向
-│   ├── auth.py                  # 登录/刷新/登出/me/改密
+│   ├── auth.py                  # 登录/刷新/登出/me/改密/MFA
 │   ├── erp.py                   # 库存/订单/财务/退货/调拨
 │   ├── rpa.py                   # 报价采集/订单同步/调度
 │   ├── fde.py                   # ETL/分层统计/ADS/血缘/数据质量
 │   ├── aigc.py                  # 建议/审核/日报/查询/SSE 流式
 │   ├── loop.py                  # 闭环状态/执行/回滚/异步任务/SSE
-│   └── audit.py                 # 审计日志查询/统计
+│   ├── audit.py                 # 审计日志查询/统计/hash chain
+│   ├── finance.py               # 财务对账批次管理
+│   └── mrp.py                   # MRP/BOM 物料需求计划
 │
 ├── services/                    # 业务服务层
 │   ├── auth.py                  # JWT 签发/验证/黑名单/锁定
@@ -192,7 +194,13 @@ intelligent-ops-platform/
 │   ├── evaluator.py             # Agent 评测框架(gold SQL 回归测试 + 退化检测)
 │   ├── notifier.py              # 多渠道告警(钉钉/微信/邮件)
 │   ├── idempotency.py           # Idempotency-Key 幂等装饰器
-│   └── password_policy.py       # 密码强度校验
+│   ├── password_policy.py       # 密码强度校验
+│   ├── crypto_service.py        # 字段级加密(Fernet, hybrid_property)
+│   ├── mfa_service.py           # TOTP MFA 生成/验证/备用码
+│   ├── finance_recon_service.py # 财务对账(容忍度匹配/差异分析)
+│   ├── mrp_service.py           # MRP 多层 BOM 展开/净需求计算
+│   ├── cache_service.py         # L1/L2 多级缓存(进程内 + Redis)
+│   └── db_router.py             # 读写分离路由(占位,逐步启用)
 │
 ├── migrations/                  # Alembic 数据库迁移
 │   ├── alembic.ini
@@ -350,8 +358,10 @@ flask db upgrade
 | POST | /api/v1/auth/login | - | 登录,返回 access + refresh token |
 | POST | /api/v1/auth/refresh | - | 刷新 token(旋转 + 旧 token 拉黑) |
 | POST | /api/v1/auth/logout | - | 登出,吊销 token |
-| GET | /api/v1/auth/me | erp:read | 当前用户信息 |
+| GET | /api/v1/auth/me | - | 当前用户信息(仅 JWT 认证) |
 | POST | /api/v1/auth/change-password | - | 修改密码(走 password_policy 校验) |
+| POST | /api/v1/auth/mfa/setup | auth:mfa:setup | 启用 TOTP MFA |
+| POST | /api/v1/auth/mfa/disable | auth:mfa:disable | 禁用 MFA |
 
 ### ERP(erp)
 
@@ -361,8 +371,8 @@ flask db upgrade
 | GET | /api/v1/erp/orders | erp:read | 近期单据(limit 上限 100) |
 | GET | /api/v1/erp/account | erp:read | 财务概览 |
 | GET | /api/v1/erp/warehouses | erp:read | 仓库列表 |
-| POST | /api/v1/erp/returns | erp:write | 创建退货(@idempotent) |
-| POST | /api/v1/erp/transfers | erp:write | 创建调拨(@idempotent) |
+| POST | /api/v1/erp/returns | return:write | 创建退货(@idempotent) |
+| POST | /api/v1/erp/transfers | transfer:write | 创建调拨(@idempotent) |
 | GET | /api/v1/erp/reorder-rules | erp:read | 补货预警规则列表 |
 | GET | /api/v1/erp/reorder-check | erp:read | 触发库存预警检查 |
 | GET | /api/v1/erp/budgets | erp:read | 预算列表 |
@@ -397,6 +407,8 @@ flask db upgrade
 | GET | /api/v1/fde/lineage | fde:read | 数据血缘 |
 | GET | /api/v1/fde/data-quality | fde:read | 数据质量报告 |
 | GET | /api/v1/fde/anomalies | fde:read | 改进9:时序异常检测(支持 date/trigger 参数,trigger=true 触发闭环+告警) |
+| POST | /api/v1/fde/run-dq | fde:run | 执行数据质量校验 |
+| POST | /api/v1/fde/backfill | fde:run | 重跑 ETL 指定日期范围[DWS+ADS] |
 
 ### AIGC(aigc)
 
@@ -415,6 +427,27 @@ flask db upgrade
 | GET | /api/v1/aigc/chat-history/<session_id> | aigc:read | 对话历史 |
 | GET | /api/v1/aigc/feedback-stats | aigc:read | 反馈统计 |
 
+### MRP(mrp)
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST | /api/v1/mrp/boms | mrp:write | 创建 BOM（物料清单）(@idempotent) |
+| GET | /api/v1/mrp/boms | mrp:read | 查询 BOM 列表 |
+| POST | /api/v1/mrp/plans | mrp:write | 创建 MRP 计划(@idempotent) |
+| POST | /api/v1/mrp/plans/<id>/calculate | mrp:write | 执行净需求计算 |
+| POST | /api/v1/mrp/plans/<id>/release | mrp:write | 下达计划：转为草稿采购单(@idempotent) |
+
+### Finance(finance)
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST | /api/v1/finance/reconciliation/batches | recon:create | 创建对账批次(@idempotent) |
+| GET | /api/v1/finance/reconciliation/batches | finance:read | 对账批次列表(支持 period/status 过滤) |
+| POST | /api/v1/finance/reconciliation/batches/<id>/import | recon:import | 导入外部流水明细(@idempotent) |
+| POST | /api/v1/finance/reconciliation/batches/<id>/auto-match | recon:match | 自动匹配(按 reference_no + amount) |
+| GET | /api/v1/finance/reconciliation/batches/<id>/report | finance:read | 对账报告(含未匹配明细) |
+| POST | /api/v1/finance/reconciliation/batches/<id>/close | recon:close | 关闭对账批次(要求无未匹配) |
+
 ### 闭环(loop)
 
 | 方法 | 路径 | 权限 | 说明 |
@@ -424,6 +457,8 @@ flask db upgrade
 | POST | /api/v1/loop/run-step-async | loop:run | 异步执行(需 Celery) |
 | GET | /api/v1/loop/task/<task_id> | loop:read | 查询异步任务状态 |
 | POST | /api/v1/loop/rollback | loop:rollback | 回滚指定步骤 |
+| POST | /api/v1/loop/reset | loop:reset | 重置闭环状态(仅 admin) |
+| GET | /api/v1/loop/auto-trigger-check | loop:read | 触发自动检测闭环状态 |
 | GET | /api/v1/loop/stream | loop:read | SSE 实时进度推送 |
 
 ### 审计(audit)
@@ -432,6 +467,7 @@ flask db upgrade
 |---|---|---|---|
 | GET | /api/v1/audit/logs | audit:read | 分页查询审计日志(支持 actor/action/target_type/日期过滤) |
 | GET | /api/v1/audit/stats | audit:read | 最近 30 天按 action 聚合 |
+| GET | /api/v1/audit/verify-chain | audit:read | 校验审计日志 hash chain 完整性 |
 
 ### 系统
 
@@ -440,6 +476,7 @@ flask db upgrade
 | GET | /health | 深度健康检查(数据库 + Redis + 磁盘) |
 | GET | /health/live | 存活探针(轻量) |
 | GET | /health/ready | 就绪探针(依赖检查) |
+| GET | /api/dashboard | erp:read | 仪表盘汇总(TOP KPI) |
 | GET | /metrics | Prometheus 指标(METRICS_ENABLED=1 时) |
 | GET | /docs/swagger | API 文档(API_DOCS_ENABLED=1 时) |
 

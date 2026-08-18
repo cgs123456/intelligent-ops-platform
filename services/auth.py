@@ -59,8 +59,8 @@ class AuthService:
 
     # P0-5: 缓存改为 Redis 优先（多 worker 共享），进程内 dict 作为 fallback
     # 原 P1 进程内缓存在多 worker 下改密后 30s 窗口内旧 token 仍有效，迁 Redis 后窗口降到 0
-    _token_cache = {}  # fallback: {jti: (expires_at, is_blacklisted)}
-    _user_cache = {}  # fallback: {user_id: (expires_at, token_version)}
+    _token_cache: dict = {}  # fallback: {jti: (expires_at, is_blacklisted)}
+    _user_cache: dict = {}  # fallback: {user_id: (expires_at, token_version)}
     _CACHE_TTL = 30.0
     _CACHE_MAXSIZE = 10000
     # P2-6: token 黑名单内存降级集合 —— Redis 不可用时兜底，记录已吊销 jti。

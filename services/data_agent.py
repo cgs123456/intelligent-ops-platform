@@ -56,7 +56,7 @@ class DataAgent:
     # 多线程安全：用 threading.Lock 保护 dict 读写；超 1000 条时清空过期项，仍超则清空最旧项
     _HISTORY_CACHE_TTL = 60.0
     _HISTORY_CACHE_MAXSIZE = 1000
-    _history_cache = {}  # {session_id: (timestamp, history_str)}
+    _history_cache: dict = {}  # {session_id: (timestamp, history_str)}
     _history_cache_lock = threading.Lock()
 
     def __init__(self, aigc_service=None, db_session=None):
@@ -430,7 +430,7 @@ class DataAgent:
             # 截断单条消息 + 总长度
             MAX_MSG = 500
             MAX_TOTAL = 2000
-            truncated = []
+            truncated: list[str] = []
             total = 0
             for m in reversed(recent):
                 content = (m.content or "")[:MAX_MSG]

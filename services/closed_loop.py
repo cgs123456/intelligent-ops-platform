@@ -93,7 +93,7 @@ def _try_acquire_file_lock(f):
             return False
     if _HAS_MSVCRT:
         try:
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             return True
         except OSError:
             return False
@@ -125,7 +125,7 @@ def _acquire_lock(run_id, step):
                     fcntl.flock(f, fcntl.LOCK_UN)
                 elif _HAS_MSVCRT:
                     try:
-                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                     except OSError:
                         pass
             except Exception:
@@ -163,11 +163,11 @@ def with_timeout(seconds):
         def wrapper(*args, **kwargs):
             from flask import current_app
 
-            app = current_app._get_current_object()
+            app = current_app._get_current_object()  # type: ignore[attr-defined]
 
             cancel_event = threading.Event()
-            result_box = [None]
-            error_box = [None]
+            result_box: list = [None]
+            error_box: list = [None]
             done_event = threading.Event()
 
             def target_thread():
@@ -232,7 +232,7 @@ if _HAS_LANGGRAPH:
 
 else:
     # langgraph 不可用时占位
-    ClosedLoopState = None
+    ClosedLoopState = None  # type: ignore[misc]
 
 
 class ClosedLoop:
@@ -707,9 +707,9 @@ class ClosedLoop:
         current_step = 1
         for s in steps:
             if s["status"] == "done":
-                current_step = s["step"] + 1
+                current_step = int(s["step"]) + 1
             elif s["status"] in ("running", "failed"):
-                current_step = s["step"]
+                current_step = int(s["step"])
                 break
         if current_step > 5:
             current_step = 5

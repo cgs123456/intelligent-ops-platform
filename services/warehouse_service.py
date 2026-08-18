@@ -124,7 +124,7 @@ class WarehouseService:
             # ---- not_null ----
             for col in nn_cols:
                 col_obj = getattr(model, col)
-                failures = self.session.query(func.count(model.id)).filter(col_obj.is_(None)).scalar() or 0
+                failures = self.session.query(func.count(model.id)).filter(col_obj.is_(None)).scalar() or 0  # type: ignore[attr-defined]
                 status = "pass" if failures == 0 else "fail"
                 table_result[f"not_null:{col}"] = status
                 self._log_dq(table, f"not_null:{col}", col, status, failures)
@@ -142,7 +142,7 @@ class WarehouseService:
             # ---- range（range_fail 即"失败条件"，直接统计命中行数）----
             if range_fail:
                 col_name = range_fail.split()[0]
-                fail_count = self.session.query(func.count(model.id)).filter(text(range_fail)).scalar() or 0
+                fail_count = self.session.query(func.count(model.id)).filter(text(range_fail)).scalar() or 0  # type: ignore[attr-defined]
                 status = "pass" if fail_count == 0 else "fail"
                 table_result["range"] = status
                 self._log_dq(table, "range", col_name, status, fail_count)
@@ -175,7 +175,7 @@ class WarehouseService:
             dates.append(d)
             d += timedelta(days=1)
 
-        results = {"dates": [str(x) for x in dates], "dws": None, "ads": []}
+        results: dict = {"dates": [str(x) for x in dates], "dws": None, "ads": []}
         try:
             results["dws"] = self._etl_dws(target_dates=dates)
             for d in dates:
@@ -268,7 +268,7 @@ class WarehouseService:
             key = (r.table_name, r.test_name)
             if key not in latest:
                 latest[key] = r
-        report = {}
+        report: dict = {}
         for (table, test_name), r in latest.items():
             report.setdefault(table, {})[test_name] = {
                 "status": r.status,
@@ -407,9 +407,9 @@ class WarehouseService:
 
             # ---- 销售事实表（按 order_no 去重）----
             # P1-7: NOT EXISTS 子查询在 DB 层去重，避免将整张 DWD 目标表加载到内存
-            exists_sale_subq = self.session.query(DwdSalesFact).filter(
-                DwdSalesFact.order_no == OdsSaleOrder.order_no
-            ).exists()
+            exists_sale_subq = (
+                self.session.query(DwdSalesFact).filter(DwdSalesFact.order_no == OdsSaleOrder.order_no).exists()
+            )
             n = 0
             for ods in self.session.query(OdsSaleOrder).filter(~exists_sale_subq).all():
                 self.session.add(
@@ -570,7 +570,7 @@ class WarehouseService:
             try:
                 from services.rpa_service import RPAService
             except Exception:
-                RPAService = None
+                RPAService = None  # type: ignore[misc]
 
             products = self.session.query(Product).all()
             rep_n = 0

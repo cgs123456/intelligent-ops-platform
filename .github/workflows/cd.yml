@@ -81,12 +81,12 @@ jobs:
       - name: Record deployment (记录当前版本用于回滚)
         run: |
           mkdir -p .deploy
-          # 保存当前部署的 image tag 和时间
-          echo "{\"tag\":\"${{ needs.build.outputs.image_tag }}\",\"digest\":\"${{ needs.build.outputs.image_digest }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"commit\":\"${{ github.sha }}\"}" > .deploy/current.json
-          # 如果存在 current.json，备份为 previous.json（用于回滚）
+          # 先把旧的 current 备份为 previous（确保 rollback 能拿到上一版本）
           if [ -f .deploy/current.json ]; then
-            cp .deploy/current.json .deploy/previous.json 2>/dev/null || true
+            cp .deploy/current.json .deploy/previous.json
           fi
+          # 再写入新版本为 current
+          echo "{\"tag\":\"${{ needs.build.outputs.image_tag }}\",\"digest\":\"${{ needs.build.outputs.image_digest }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"commit\":\"${{ github.sha }}\"}" > .deploy/current.json
 
       - name: Deploy via SSH (蓝绿切换)
         uses: appleboy/ssh-action@v1.0.3
@@ -98,8 +98,8 @@ jobs:
             cd /opt/ops-platform
             # 拉取最新镜像
             docker-compose -f docker-compose.prod.yml pull
-            # 蓝绿：先启动新实例，健康检查通过后切换 nginx upstream
-            docker-compose -f docker-compose.prod.yml up -d --no-deps --scale ops_backend=2
+            # 启动新 web 实例（compose 服务名为 web，非 ops_backend）
+            docker-compose -f docker-compose.prod.yml up -d --no-deps web
             # 等待新实例就绪
             sleep 10
             # 健康检查
@@ -110,8 +110,8 @@ jobs:
               fi
               sleep 5
             done
-            # 重载 nginx
-            docker exec ops_nginx nginx -s reload
+            # 重载 nginx（compose 服务名为 nginx，非 ops_nginx）
+            docker exec nginx nginx -s reload
             echo "Deployed ${{ needs.build.outputs.image_tag }}"
 
   # ==================== 回滚 ====================
@@ -143,14 +143,15 @@ jobs:
             cd /opt/ops-platform
             # 拉取上一个版本镜像
             docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.prev.outputs.tag }}
-            # 回滚部署
-            docker-compose -f docker-compose.prod.yml up -d --no-deps
+            # 回滚到 previous tag（写入 .deploy/.env 让 compose 使用旧 tag）
+            echo "IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.prev.outputs.tag }}" > .deploy/.env
+            docker-compose -f docker-compose.prod.yml --env-file .deploy/.env up -d --no-deps web
             sleep 10
             # 健康检查
             for i in {1..5}; do
               if curl -sf http://localhost:5000/health/ready; then
                 echo "Rollback successful"
-                docker exec ops_nginx nginx -s reload
+                docker exec nginx nginx -s reload
                 exit 0
               fi
               sleep 5

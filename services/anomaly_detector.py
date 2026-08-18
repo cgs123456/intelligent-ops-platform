@@ -61,7 +61,7 @@ class AnomalyDetector:
         }
         """
         target_date = target_date or date.today()
-        anomalies = []
+        anomalies: list[dict] = []
 
         # 1. 拉取近 30 天销售数据
         sales_data = self._load_recent_sales(target_date)

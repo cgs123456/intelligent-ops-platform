@@ -186,10 +186,16 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 function switchTab(target) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+    });
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     const tabEl = document.querySelector(`.tab[data-tab="${target}"]`);
-    if (tabEl) tabEl.classList.add('active');
+    if (tabEl) {
+        tabEl.classList.add('active');
+        tabEl.setAttribute('aria-selected', 'true');
+    }
     const panel = document.getElementById('tab-' + target);
     if (panel) panel.classList.add('active');
     if (target === 'dashboard') { loadDashboard(); loadOrders(); loadReport(); }

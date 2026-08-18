@@ -348,7 +348,7 @@ class MultiLevelCache:
         :return: 包含 hit/miss 计数与命中率的字典。
         """
         with self._stats_lock:
-            stats = dict(self._stats)
+            stats: dict = dict(self._stats)
         # 计算命中率
         l1_total = stats["l1_hit"] + stats["l1_miss"]
         l2_total = stats["l2_hit"] + stats["l2_miss"]

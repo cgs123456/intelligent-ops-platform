@@ -34,7 +34,9 @@ services:
         max-file: "5"
 
   web:
-    build: .
+    # P2-19: 使用 IMAGE_TAG 环境变量指定镜像 tag，支持蓝绿部署回滚
+    # 默认值 latest，部署时由 cd.yml 覆盖为具体 sha/tag
+    image: ${IMAGE_TAG:-latest}
     expose:
       - "5000"
     environment:

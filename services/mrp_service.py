@@ -173,7 +173,7 @@ class MRPService:
         bom_quantity = self._to_decimal(sub_bom.quantity) or Decimal(1)
         sub_items = self.db.query(BOMItem).filter_by(bom_id=sub_bom.id).order_by(BOMItem.sequence, BOMItem.id).all()
 
-        result = {}
+        result: dict = {}
         for sub_item in sub_items:
             scrap_rate = self._to_decimal(sub_item.scrap_rate)
             child_qty = (
@@ -224,7 +224,7 @@ class MRPService:
 
             # P1-13: 多层 BOM 递归展开——将每行子件毛需求沿下层 BOM 展开到叶子节点，
             # 同一叶子在多分支出现时累加毛需求，再统一扣减库存计算净需求
-            gross_map = {}  # {component_id: 毛需求量}
+            gross_map: dict = {}  # {component_id: 毛需求量}
             for item in items:
                 scrap_rate = self._to_decimal(item.scrap_rate)
                 # 顶层毛需求 = 单位用量 * (1 + 损耗率) * 缩放系数
