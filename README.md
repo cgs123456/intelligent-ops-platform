@@ -166,7 +166,9 @@ intelligent-ops-platform/
 │   ├── external.py              # ExtSupplierQuote/ExtEcommerceOrder
 │   ├── warehouse.py             # ODS/DWD/DWS/ADS 四层数仓模型
 │   ├── aigc.py                  # Suggestion/DailyReport/ChatHistory/Feedback
-│   └── system.py                # User/Role/AuditLog/LoopState/TokenBlacklist
+│   ├── system.py                # User/Role/AuditLog/LoopState/TokenBlacklist
+│   ├── bom.py                   # BOM/MRPPlan/MRPRequirement
+│   └── finance.py               # ReconciliationBatch/ReconciliationEntry
 │
 ├── routes/                      # Blueprint 路由
 │   ├── __init__.py              # 注册 Blueprint + 旧路径 308 重定向
@@ -195,8 +197,8 @@ intelligent-ops-platform/
 │   ├── notifier.py              # 多渠道告警(钉钉/微信/邮件)
 │   ├── idempotency.py           # Idempotency-Key 幂等装饰器
 │   ├── password_policy.py       # 密码强度校验
-│   ├── crypto_service.py        # 字段级加密(Fernet, hybrid_property)
-│   ├── mfa_service.py           # TOTP MFA 生成/验证/备用码
+│   ├── crypto.py                # 字段级加密(Fernet, hybrid_property)
+│   ├── mfa.py                   # TOTP MFA 生成/验证/备用码
 │   ├── finance_recon_service.py # 财务对账(容忍度匹配/差异分析)
 │   ├── mrp_service.py           # MRP 多层 BOM 展开/净需求计算
 │   ├── cache_service.py         # L1/L2 多级缓存(进程内 + Redis)
@@ -207,7 +209,16 @@ intelligent-ops-platform/
 │   ├── env.py
 │   ├── script.py.mako
 │   └── versions/
-│       └── 4e06934ab2d0_initial_schema.py
+│       ├── 4e06934ab2d0_initial_schema.py
+│       ├── a1b2c3d4e5f6_add_token_version.py
+│       ├── a7b8c9d0e1f2_add_finance_and_bom.py
+│       ├── b2c3d4e5f6a7_p1_data_model_hardening.py
+│       ├── c0d1e2f3a4b5_recon_tolerance_match.py
+│       ├── c3d4e5f6a7b8_add_audit_hash_chain.py
+│       ├── d4e5f6a7b8c9_add_mfa_and_password_history.py
+│       ├── e5f6a7b8c9d0_add_business_modules.py
+│       ├── f6a7b8c9d0e1_add_table_partitioning.py
+│       └── g7h8i9j0k1l2_add_erp_missing_tables.py
 │
 ├── static/                      # 前端静态资源
 │   ├── css/style.css
@@ -280,6 +291,8 @@ intelligent-ops-platform/
 ### 数据模型
 
 - **[models/system.py](models/system.py)**:User/Role(多对多)/AuditLog/LoopState/TokenBlacklist
+- **[models/bom.py](models/bom.py)**:BOM(物料清单)/BOMItem/MRPPlan/MRPRequirement
+- **[models/finance.py](models/finance.py)**:ReconciliationBatch/ReconciliationEntry(对账批次+明细)
 - **[models/erp.py](models/erp.py)**:Product/Supplier/Warehouse/PurchaseOrder/SaleOrder/StockMove/AccountMove/ReturnOrder
 - **[models/warehouse.py](models/warehouse.py)**:ODS(贴源)/ DWD(明细)/ DWS(汇总)/ ADS(应用)四层,含 EtlMeta/DataQualityLog/DataLineage
 - **[models/aigc.py](models/aigc.py)**:Suggestion/DailyReport/ChatHistory/SuggestionFeedback
@@ -490,8 +503,8 @@ flask db upgrade
 |---|---|
 | **lint** | ruff check + black --check + mypy 类型检查 |
 | **test** | Python 3.10/3.11/3.12 矩阵运行 pytest + coverage,3.11 上传 Codecov |
-| **security** | bandit 安全扫描 |
-| **build** | Docker 镜像构建(lint + test 通过后触发) |
+| **security** | bandit 安全扫描 + pip-audit CVE 扫描(HIGH/CRITICAL 阻断) |
+| **build** | Docker 镜像构建(lint + test + security 通过后触发) + Trivy 漏洞扫描(HIGH/CRITICAL 阻断) |
 
 push/PR 到 main 自动触发。
 
@@ -508,9 +521,10 @@ pytest                              # 或 make test
 pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
 ```
 
-测试套件覆盖 20+ 模块 470+ 用例(coverage >= 60%):
+测试套件覆盖 30+ 模块 470+ 用例(coverage >= 60%):
 - `test_health.py`:健康检查端点
 - `test_auth.py`:登录/认证流程
+- `test_auth_extended.py`:认证扩展用例
 - `test_data_agent.py`:改进8 SQL sqlglot AST 安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT/列名含关键字/嵌套 CTE)
 - `test_anomaly_detector.py`:改进9 异常检测算法(正常/3σ/2σ/数据不足/空数据库)
 - `test_multiagent.py`:改进7 多 Agent 评分(价格权重/空列表/单供应商/min-max 归一化)
@@ -525,6 +539,17 @@ pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
 - `test_mfa_service.py`:MFA 双因素认证(TOTP 生成/验证/备用码)
 - `test_migrations.py`:数据库迁移(单 head / 无合并冲突)
 - `test_coverage_boost.py`:覆盖率补充(边界条件/异常路径)
+- `test_aigc_service.py`:AIGC 补货建议/置信度算法/Text2SQL/语义检索
+- `test_closed_loop.py`:五步闭环状态机(LangGraph + 文件锁 + 回滚)
+- `test_cache_service.py`:L1/L2 多级缓存
+- `test_idempotency.py`:幂等写接口(@idempotent)
+- `test_notifier.py`:多渠道告警通知
+- `test_response.py`:响应格式封装
+- `test_middleware.py`:request_id 注入与日志过滤
+- `test_rpa_service.py`:RPA 报价采集/订单同步
+- `test_warehouse_service.py`:ETL 流水线/数据质量/血缘
+- `test_security.py`:安全头/限流/CORS
+- `test_routes_integration.py`:路由集成测试
 
 [tests/conftest.py](tests/conftest.py) 提供公共 fixtures:
 - `app`:会话级 Flask app(临时 SQLite,`db.create_all()`)
