@@ -12,7 +12,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.aigc_service import AIGCService
 from services.idempotency import idempotent
-from services.rbac import require_permission, verify_sse_auth
+from services.rbac import get_actor_name, require_permission, verify_sse_auth
 
 bp = Blueprint("aigc", __name__, url_prefix="/api/v1/aigc")
 
@@ -39,19 +39,24 @@ def review():
     支持可选 final_qty：审核时修改最终采购数量（P1-3）。
     """
     data = request.get_json(force=True, silent=True) or {}
+    sid = data.get("id")
+    action = data.get("action")
+    # P0-11/M8 修复：缺参返回 400（此前 KeyError 直接 500），操作人取认证身份防伪造
+    if sid is None or not action:
+        return jsonify({"error": "缺少必填参数 id / action"}), 400
     try:
         AIGCService().review_suggestion(
-            data["id"],
-            data["action"],
+            sid,
+            action,
             data.get("note", ""),
-            data.get("reviewer", "system"),
+            get_actor_name(data.get("reviewer")),
             final_qty=data.get("final_qty"),
         )
         return jsonify(
             {
                 "status": "ok",
-                "suggestion_id": data["id"],
-                "new_status": data["action"],
+                "suggestion_id": sid,
+                "new_status": action,
                 "final_qty": data.get("final_qty"),
             }
         )
@@ -65,13 +70,23 @@ def batch_review():
     data = request.get_json(force=True, silent=True) or {}
     ids = data.get("ids", [])
     action = data.get("action", "approve")
+    # M8 修复：ids 必须为整数列表（此前传字符串会按字符迭代产生诡异行为）
+    if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+        return jsonify({"error": "ids 必须为整数数组"}), 400
+    reviewer = get_actor_name(data.get("reviewer"))
     results = []
+    from extensions import db
+
+    # P1-3: 单事务批量审核 —— 每条用 SAVEPOINT 隔离校验失败，整批一次 commit（原为 2N 次）
     for sid in ids:
         try:
-            AIGCService().review_suggestion(sid, action, reviewer=data.get("reviewer", "system"))
+            nested = db.session.begin_nested()
+            AIGCService().review_suggestion(sid, action, reviewer=reviewer, auto_commit=False)
+            nested.commit()
             results.append({"id": sid, "status": "ok", "new_status": action})
         except ValueError as e:
             results.append({"id": sid, "status": "fail", "error": str(e)})
+    db.session.commit()
     return jsonify({"results": results})
 
 

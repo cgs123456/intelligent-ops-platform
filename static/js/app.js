@@ -110,6 +110,8 @@ async function doLogin() {
         document.getElementById('loginPage').style.display = 'none';
         document.getElementById('app').style.display = '';
         loadDashboard(); loadOrders(); loadReport();
+        // H4 修复：登录成功后启动闭环 SSE（原实现只有 cookie 复用登录路径才启动）
+        startLoopStream();
         // P1-4: 登录后必须改密提示
         if (r.must_change_password) {
             showToast('管理员首次登录，请尽快修改密码', 'warn', 6000);
@@ -319,12 +321,19 @@ class TableState {
             pager = document.createElement('div');
             pager.id = this.id + '-pager';
             pager.className = 'table-pager';
+            // P0-7 修复：分页按钮用事件委托（CSP script-src 'self' 会拦截内联 onclick 属性，
+            // 原实现注入 onclick="tableGoPage(...)" 在生产环境点击无响应）
+            pager.addEventListener('click', (e) => {
+                const btn = e.target.closest('button[data-delta]');
+                if (!btn || btn.disabled) return;
+                tableGoPage(this.id, parseInt(btn.dataset.delta, 10));
+            });
             document.querySelector(`#${this.id}`).after(pager);
         }
         if (pages <= 1) { pager.innerHTML = `共 ${total} 条`; return; }
         pager.innerHTML = `共 ${total} 条 · 第 ${this.page}/${pages} 页 ` +
-            `<button class="btn btn-sm" onclick="tableGoPage('${this.id}',-1)" ${this.page===1?'disabled':''}>上一页</button>` +
-            `<button class="btn btn-sm" onclick="tableGoPage('${this.id}',1)" ${this.page===pages?'disabled':''}>下一页</button>`;
+            `<button class="btn btn-sm" data-delta="-1" ${this.page===1?'disabled':''}>上一页</button>` +
+            `<button class="btn btn-sm" data-delta="1" ${this.page===pages?'disabled':''}>下一页</button>`;
     }
 }
 const _tableStates = {};
@@ -489,7 +498,7 @@ async function loadSuggestions() {
   const html = list.map(s => `
     <div class="suggestion-item" data-id="${s.id}">
       <div class="sug-head">
-        <label class="sug-check"><input type="checkbox" onchange="toggleSelect(${s.id}, this.checked)"></label>
+        <label class="sug-check"><input type="checkbox" data-sug-id="${s.id}"></label>
         <span class="sug-product">${esc(s.product_name)}</span>
         <span class="sug-amount">${fmt(s.amount)}</span>
         <span class="sug-conf">置信度 ${(s.confidence*100).toFixed(0)}%</span>
@@ -499,9 +508,9 @@ async function loadSuggestions() {
         ${esc(s.reason)}
       </div>
       <div class="sug-actions">
-        <button class="btn btn-sm btn-approve" onclick="reviewSuggestion(${s.id},'approve')">批准</button>
-        <button class="btn btn-sm" onclick="editQty(${s.id}, ${s.suggested_qty})">修改数量</button>
-        <button class="btn btn-sm btn-reject" onclick="reviewSuggestion(${s.id},'reject')">拒绝</button>
+        <button class="btn btn-sm btn-approve" data-act="approve" data-id="${s.id}">批准</button>
+        <button class="btn btn-sm" data-act="edit-qty" data-id="${s.id}" data-qty="${s.suggested_qty}">修改数量</button>
+        <button class="btn btn-sm btn-reject" data-act="reject" data-id="${s.id}">拒绝</button>
       </div>
     </div>`).join('');
   document.getElementById('suggestionList').innerHTML = html;
@@ -673,7 +682,7 @@ async function loadLoopStatus() {
       <div class="step-owner">${st.owner}</div>
       <div class="step-status">${statusText}</div>
       <div class="step-detail">${st.detail ? esc(st.detail) : ''}</div>
-      ${st.status === 'done' ? `<button class="btn btn-sm btn-ghost" onclick="rollbackStep(${st.step})" style="margin-top:6px">回滚</button>` : ''}
+      ${st.status === 'done' ? `<button class="btn btn-sm btn-ghost" data-rollback="${st.step}" style="margin-top:6px">回滚</button>` : ''}
     </div>`;
   }).join('');
   document.getElementById('loopSteps').innerHTML = html;
@@ -735,15 +744,15 @@ async function runCurrentStep() {
 }
 
 // P1-1: SSE 实时进度（监听闭环状态变化）
-// P0-3: EventSource 不支持自定义 Header，通过 query 参数传 token；P1-12: 同时启用 withCredentials 携带 cookie
+// P0-7/H6 修复：认证完全依赖 HttpOnly cookie（withCredentials），不再把 access token
+// 拼进 URL —— 原 ?token= 会进入 nginx/代理访问日志与浏览器历史，30 分钟内可重放。
 let _loopEventSource = null;
+let _loopSseRetry = 0;
 function startLoopStream() {
     if (_loopEventSource) _loopEventSource.close();
     try {
-        // P0-3: 通过 query 参数传递 token（EventSource 无法设置 Authorization Header）
-        // P1-12: withCredentials=true 让浏览器自动携带 HttpOnly cookie（后端 cookie 优先，query fallback）
-        const streamUrl = accessToken ? `/api/v1/loop/stream?token=${encodeURIComponent(accessToken)}` : '/api/v1/loop/stream';
-        _loopEventSource = new EventSource(streamUrl, { withCredentials: true });
+        _loopEventSource = new EventSource('/api/v1/loop/stream', { withCredentials: true });
+        _loopEventSource.onopen = () => { _loopSseRetry = 0; };
         _loopEventSource.onmessage = (e) => {
             try {
                 const data = JSON.parse(e.data);
@@ -754,7 +763,15 @@ function startLoopStream() {
                 }
             } catch (err) {}
         };
-        _loopEventSource.onerror = () => { _loopEventSource.close(); };
+        // H3 修复：不再直接 close() —— 服务端 120s 主动结束流或网络闪断时，
+        // 浏览器对 readyState=CONNECTING 会自动重连；只有永久失败（CLOSED）
+        // 才用指数退避手动重启。原实现关闭后前端状态静默"假死"。
+        _loopEventSource.onerror = () => {
+            if (_loopEventSource && _loopEventSource.readyState === EventSource.CLOSED) {
+                _loopSseRetry = Math.min(_loopSseRetry + 1, 5);
+                setTimeout(startLoopStream, 1000 * 2 ** _loopSseRetry);
+            }
+        };
     } catch (e) {}
 }
 
@@ -810,16 +827,33 @@ function closeGuide() {
 }
 
 // ---- P2: CSV 导出 ----
+// M4 修复：从 TableState 的全量数据导出（应用当前搜索/排序），原实现读 DOM 中当前页
+// 的 8-10 行，导出结果严重失真；单元格做 CSV 公式注入防护（OWASP：=+-@ 前缀转义）。
+function _csvCell(v) {
+    let t = String(v ?? '').replace(/[\n\r]/g, ' ').trim();
+    if (/^[=+\-@]/.test(t)) t = "'" + t;
+    return `"${t.replace(/"/g, '""')}"`;
+}
 function exportTable(tableId, filename) {
-    const table = document.getElementById(tableId);
-    if (!table) return;
-    const rows = [...table.querySelectorAll('tr')];
-    const csv = rows.map(tr =>
-        [...tr.querySelectorAll('th,td')].map(td => {
-            const t = td.innerText.replace(/[\n\r,]/g, ' ').trim();
-            return `"${t}"`;
-        }).join(',')
-    ).join('\n');
+    const state = _tableStates[tableId];
+    if (!state) return;
+    let rows = state.allData || [];
+    // 与 render() 相同的过滤/排序逻辑
+    if (state.search) {
+        const q = state.search.toLowerCase();
+        rows = rows.filter(r => state.cols.some(c => String(r[c.key] ?? '').toLowerCase().includes(q)));
+    }
+    if (state.sortKey) {
+        rows = [...rows].sort((a, b) => {
+            const av = a[state.sortKey], bv = b[state.sortKey];
+            if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * state.sortDir;
+            return String(av).localeCompare(String(bv)) * state.sortDir;
+        });
+    }
+    const csv = [
+        state.cols.map(c => _csvCell(c.label)).join(','),
+        ...rows.map(r => state.cols.map(c => _csvCell(r[c.key])).join(',')),
+    ].join('\n');
     // BOM 头让 Excel 正确识别 UTF-8
     const blob = new Blob(['\ufeff' + csv], {type: 'text/csv;charset=utf-8'});
     const url = URL.createObjectURL(blob);
@@ -828,7 +862,7 @@ function exportTable(tableId, filename) {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('已导出 ' + filename, 'success');
+    showToast(`已导出 ${filename}（共 ${rows.length} 条）`, 'success');
 }
 
 // ---- P0-12: 事件绑定（替代所有内联 onclick/oninput/onkeydown）----
@@ -886,6 +920,26 @@ function bindEvents() {
 
     // 引导浮层
     document.getElementById('closeGuideBtn')?.addEventListener('click', closeGuide);
+
+    // P0-7 修复：动态渲染区域的事件委托 —— CSP script-src 'self' 拦截内联
+    // onclick/onchange 属性，审核/回滚/选择等由 innerHTML 注入的交互此前全部失效
+    const sugList = document.getElementById('suggestionList');
+    sugList?.addEventListener('change', (e) => {
+        const cb = e.target.closest('input[type="checkbox"][data-sug-id]');
+        if (cb) toggleSelect(parseInt(cb.dataset.sugId, 10), cb.checked);
+    });
+    sugList?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (!btn) return;
+        const id = parseInt(btn.dataset.id, 10);
+        if (btn.dataset.act === 'approve') reviewSuggestion(id, 'approve');
+        else if (btn.dataset.act === 'reject') reviewSuggestion(id, 'reject');
+        else if (btn.dataset.act === 'edit-qty') editQty(id, parseInt(btn.dataset.qty, 10));
+    });
+    document.getElementById('loopSteps')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-rollback]');
+        if (btn) rollbackStep(parseInt(btn.dataset.rollback, 10));
+    });
 }
 
 // ---- 初始化 ----

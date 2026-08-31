@@ -62,6 +62,11 @@ class AuthService:
     _token_cache: dict = {}  # fallback: {jti: (expires_at, is_blacklisted)}
     _user_cache: dict = {}  # fallback: {user_id: (expires_at, token_version)}
     _CACHE_TTL = 30.0
+    # P0/H5: 缓存 TTL 分层 —— 每请求 2-4 次回源查询是认证链热点。
+    # "已吊销"命中必须快速传播（短 TTL 由 revoke 主动写入保证实时性）；
+    # "未吊销"负缓存可以较长（吊销时会以同 key 覆盖写 "1"，不存在脏读窗口）。
+    _REVOKED_TTL = 3600  # 已吊销标记缓存 1h（覆盖 access 2h 寿命的大部分，DB 仍是真实来源）
+    _NEG_TTL = 300  # 未吊销负缓存 5min，token_version 缓存同理（改密时主动 set 新值）
     _CACHE_MAXSIZE = 10000
     # P2-6: token 黑名单内存降级集合 —— Redis 不可用时兜底，记录已吊销 jti。
     # 注意：仅单 worker 进程内有效，多 worker 下存在不一致窗口，故 Redis 不可用时会记录 warning。
@@ -129,7 +134,9 @@ class AuthService:
             from extensions import cache
 
             if current_app.config.get("CACHE_TYPE") == "redis":
-                cache.set(f"tok_bl:{jti}", "1", timeout=int(AuthService._CACHE_TTL))
+                # P0/H5: 已吊销标记用长 TTL（同 key 会覆盖负缓存 "0"），实时性由
+                # "吊销即写缓存"保证，DB 仍是跨 worker 真实来源
+                cache.set(f"tok_bl:{jti}", "1", timeout=int(AuthService._REVOKED_TTL))
                 return True
         except Exception as e:
             logger.warning("Redis 不可用，token 黑名单降级为内存 set：%s", e)
@@ -154,6 +161,16 @@ class AuthService:
                 val = cache.get(f"tok_bl:{jti}")
                 if val is not None:
                     return val in ("1", 1, b"1")
+                # P0/H5: Redis miss 时回源 DB 并写负缓存 —— 此前未吊销 token 每请求
+                # 都穿透到 TokenBlacklist 查询，黑名单表成为每请求热点。
+                # 负缓存 "0" 在吊销时会被 revoke_token 以同 key 覆盖写 "1"，无脏读窗口。
+                revoked = bool(TokenBlacklist.query.filter_by(jti=jti).first())
+                cache.set(
+                    f"tok_bl:{jti}",
+                    "1" if revoked else "0",
+                    timeout=int(AuthService._REVOKED_TTL if revoked else AuthService._NEG_TTL),
+                )
+                return revoked
         except Exception as e:
             logger.warning("Redis 不可用，token 黑名单降级为内存 set + DB 查询：%s", e)
         # 2. 进程内内存 set（Redis 未配置或降级时兜底）
@@ -380,10 +397,11 @@ class AuthService:
                         if not user or not user.is_active:
                             return None
                         user_ver = user.token_version
-                        # 写 Redis + 进程内
-                        AuthService._redis_set(redis_ukey, str(user_ver))
+                        # 写 Redis + 进程内（P0/H5: TTL 300s —— 改密路径会主动 set 新值，
+                        # 不存在旧版本缓存窗口）
+                        AuthService._redis_set(redis_ukey, str(user_ver), ttl=AuthService._NEG_TTL)
                         AuthService._prune_cache(AuthService._user_cache)
-                        AuthService._user_cache[uid] = (now + AuthService._CACHE_TTL, user_ver)
+                        AuthService._user_cache[uid] = (now + AuthService._NEG_TTL, user_ver)
                 if payload.get("token_ver", 0) != user_ver:
                     return None  # 旧 token 已因改密失效
             return payload

@@ -30,6 +30,21 @@ def get_current_user():
     return user
 
 
+def get_actor_name(fallback=None):
+    """P0-11: 获取真实操作人，用于审计留痕（actor/reviewer/created_by）。
+
+    审计链的价值在于操作人不可抵赖：请求通过真实 JWT 认证（payload.sub 非空）时，
+    操作人一律取认证身份，忽略请求体传入值，防止客户端伪造 actor 把操作嫁祸他人。
+    仅在无真实认证（dev 放行模式 sub=0 / 测试）时回退到请求体传入值。
+    """
+    payload = getattr(g, "current_user", None)
+    if payload and payload.get("sub"):
+        username = payload.get("username")
+        if username:
+            return str(username)
+    return fallback or "system"
+
+
 def require_permission(permission):
     """权限校验装饰器：JWT 认证 + RBAC 权限检查。
 

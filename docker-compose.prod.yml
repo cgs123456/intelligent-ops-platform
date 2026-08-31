@@ -39,6 +39,9 @@ services:
     image: ${IMAGE_TAG:-latest}
     expose:
       - "5000"
+    # P0/M10: 与 gunicorn graceful_timeout=30 匹配 —— compose 默认 10s 就 SIGKILL，
+    # 进行中的请求/SSE 会被硬切，配合 acks_late 还会放大重复执行
+    stop_grace_period: 40s
     environment:
       - FLASK_ENV=production
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY 必须设置}
@@ -120,8 +123,8 @@ services:
       - PGPASSWORD=${DB_PASSWORD:?DB_PASSWORD 必须设置}
       - BACKUP_DIR=/backups
       - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
-      # 默认每天 02:00 备份，可通过 .env 覆盖
-      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+      # 默认每天 03:30 备份（错峰 ETL 02:00 全量刷新），可通过 .env 覆盖
+      - BACKUP_CRON=${BACKUP_CRON:-30 3 * * *}
       - TZ=Asia/Shanghai
     volumes:
       - db_backups:/backups
@@ -144,13 +147,22 @@ services:
     image: redis:7-alpine
     expose:
       - "6379"
+    environment:
+      # P0/M5: healthcheck 需要密码 —— 此前 redis-cli ping 无 -a，开启 requirepass 后
+      # healthcheck 永远 NOAUTH 失败，连锁卡住依赖 service_healthy 的 web/celery
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD 必须设置}
+    volumes:
+      # P0/M6: broker 持久化 —— 此前无卷无 AOF，Redis 重启丢掉队列中的 Celery 任务
+      # 与限流/幂等状态
+      - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    command: redis-server --maxmemory 512mb --maxmemory-policy volatile-lru --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD 必须设置}
+    command:
+      redis-server --maxmemory 512mb --maxmemory-policy volatile-lru --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD 必须设置} --appendonly yes --appendfsync everysec
     deploy:
       resources:
         limits:
@@ -164,7 +176,9 @@ services:
   # ====== Celery Worker（异步任务执行）P1-2 ======
   # 执行 ETL / 日报 / RPA 同步 / 异常检测 / TokenBlacklist 清理等异步任务
   celery-worker:
-    build: .
+    # P0/H7: 与 web 统一使用 IMAGE_TAG —— 此前 build: . 导致发布后 worker/beat 仍跑旧代码，
+    # 与 web 的序列化/幂等逻辑不一致
+    image: ${IMAGE_TAG:-latest}
     command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2
     environment:
       - FLASK_ENV=production
@@ -179,6 +193,8 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - RBAC_ENABLED=1
       - FIELD_ENCRYPTION_KEY=${FIELD_ENCRYPTION_KEY:?FIELD_ENCRYPTION_KEY 必须设置}
+    # P0/M10: ETL 等长任务需要更长的优雅停止窗口
+    stop_grace_period: 60s
     depends_on:
       db:
         condition: service_healthy
@@ -199,7 +215,8 @@ services:
   # ====== Celery Beat（定时任务调度）P1-2 ======
   # 调度 beat_schedule 中定义的定时任务（ETL 02:00 / 日报 02:30 / RPA 30min / TokenBlacklist 03:00 等）
   celery-beat:
-    build: .
+    # P0/H7: 与 web 统一使用 IMAGE_TAG
+    image: ${IMAGE_TAG:-latest}
     command: celery -A tasks.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     environment:
       - FLASK_ENV=production
@@ -214,6 +231,8 @@ services:
       - FIELD_ENCRYPTION_KEY=${FIELD_ENCRYPTION_KEY:?FIELD_ENCRYPTION_KEY must be set}
       - RATELIMIT_STORAGE_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/1
       - CACHE_REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
+    # P0/M10: 优雅停止窗口
+    stop_grace_period: 30s
     depends_on:
       redis:
         condition: service_healthy
@@ -234,3 +253,4 @@ volumes:
   db_backups:
   nginx_logs:
   certbot_data:
+  redisdata:

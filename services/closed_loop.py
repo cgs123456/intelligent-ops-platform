@@ -59,23 +59,28 @@ def _file_lock(run_id, step):
     else:
         default_dir = "/tmp"
     lock_dir = os.getenv("LOOP_LOCK_DIR", default_dir)
+    lock_path = os.path.join(lock_dir, f"loop_{run_id}_{step}.lock")
     try:
         os.makedirs(lock_dir, exist_ok=True)
-        lock_path = os.path.join(lock_dir, f"loop_{run_id}_{step}.lock")
-        # P0-3: 用 os.open + O_NOFOLLOW 防 symlink 劫持，权限 0o600 防其他用户读写
+        # P0-2: 用 os.open + O_NOFOLLOW 防 symlink 劫持，权限 0o600 防其他用户读写
         # O_EXCL 确保是我们创建的文件而非符号链接
+        # P0 修复：Windows 的 os 没有 O_NOFOLLOW 常量，此前直接引用会抛 AttributeError
+        # 并被下方 except 静默吞掉，导致 Windows 下文件锁从未创建、跨进程互斥失效
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL | nofollow, 0o600)
         except FileExistsError:
             # 文件已存在（上次未清理），重新以 O_WRONLY 打开（不跟随符号链接）
-            fd = os.open(lock_path, os.O_WRONLY | os.O_NOFOLLOW)
+            fd = os.open(lock_path, os.O_WRONLY | nofollow)
         f = os.fdopen(fd, "w")
         # msvcrt.locking 要求文件至少有 1 字节内容
         if _HAS_MSVCRT and not _HAS_FCNTL:
             f.write("L")
             f.flush()
         return f, lock_path
-    except Exception:
+    except Exception as e:
+        # P0 修复：锁创建失败必须留痕（此前静默降级，排障无据可查）
+        logger.warning("创建闭环文件锁失败 path=%s err=%s", lock_path, e)
         return None, None
 
 
@@ -469,7 +474,7 @@ class ClosedLoop:
                     # P0-2 fix: check cancel_event before and after step execution
                     if cancel_event is not None and cancel_event.is_set():
                         raise TimeoutError("Step cancelled before execution")
-                    detail = step_func(actor)
+                    detail = step_func(actor, cancel_event)
                     # P0-2 fix: if cancelled during execution, rollback instead of commit
                     if cancel_event is not None and cancel_event.is_set():
                         db.session.rollback()
@@ -569,7 +574,10 @@ class ClosedLoop:
         执行后根据建议数量更新状态，供条件路由 _route_after_step1 判断。
         """
         result = ClosedLoop._execute_node(
-            state, 1, "AIGC生成建议", lambda actor: ClosedLoop._step1_generate_suggestions()
+            state,
+            1,
+            "AIGC生成建议",
+            lambda actor, cancel_event=None: ClosedLoop._step1_generate_suggestions(cancel_event=cancel_event),
         )
         # 补充状态字段供 LangGraph 路由使用
         if result.get("status") == "done":
@@ -648,7 +656,12 @@ class ClosedLoop:
 
         执行后根据结果更新 errors 和 retry_count，供条件路由 _route_after_step3 判断。
         """
-        result = ClosedLoop._execute_node(state, 3, "RPA自动下单", lambda actor: ClosedLoop._step3_rpa_order(actor))
+        result = ClosedLoop._execute_node(
+            state,
+            3,
+            "RPA自动下单",
+            lambda actor, cancel_event=None: ClosedLoop._step3_rpa_order(actor, cancel_event=cancel_event),
+        )
         # 补充状态字段供 LangGraph 路由使用
         if result.get("error"):
             result["errors"] = [result["error"]]
@@ -661,14 +674,24 @@ class ClosedLoop:
     @staticmethod
     def _node_step4(state):
         """LangGraph 节点：步骤4 ERP记账入库（与 step5 可并行）"""
-        result = ClosedLoop._execute_node(state, 4, "ERP记账入库", lambda actor: ClosedLoop._step4_erp_receive(actor))
+        result = ClosedLoop._execute_node(
+            state,
+            4,
+            "ERP记账入库",
+            lambda actor, cancel_event=None: ClosedLoop._step4_erp_receive(actor, cancel_event=cancel_event),
+        )
         result["current_step"] = 4
         return result
 
     @staticmethod
     def _node_step5(state):
         """LangGraph 节点：步骤5 FDE刷新指标（与 step4 可并行）"""
-        result = ClosedLoop._execute_node(state, 5, "FDE刷新指标", lambda actor: ClosedLoop._step5_fde_refresh(actor))
+        result = ClosedLoop._execute_node(
+            state,
+            5,
+            "FDE刷新指标",
+            lambda actor, cancel_event=None: ClosedLoop._step5_fde_refresh(actor, cancel_event=cancel_event),
+        )
         result["current_step"] = 5
         return result
 
@@ -785,13 +808,13 @@ class ClosedLoop:
                     if cancel_event is not None and cancel_event.is_set():
                         raise TimeoutError("Step cancelled before execution")
                     if step_no == 1:
-                        detail = ClosedLoop._step1_generate_suggestions()
+                        detail = ClosedLoop._step1_generate_suggestions(cancel_event=cancel_event)
                     elif step_no == 3:
-                        detail = ClosedLoop._step3_rpa_order(actor)
+                        detail = ClosedLoop._step3_rpa_order(actor, cancel_event=cancel_event)
                     elif step_no == 4:
-                        detail = ClosedLoop._step4_erp_receive(actor)
+                        detail = ClosedLoop._step4_erp_receive(actor, cancel_event=cancel_event)
                     elif step_no == 5:
-                        detail = ClosedLoop._step5_fde_refresh(actor)
+                        detail = ClosedLoop._step5_fde_refresh(actor, cancel_event=cancel_event)
                     else:
                         detail = None
                     # P0-2 fix: if cancelled during execution, rollback instead of commit
@@ -1087,10 +1110,15 @@ class ClosedLoop:
     # ==================== 各步骤实现 ====================
 
     @staticmethod
-    def _step1_generate_suggestions():
+    def _step1_generate_suggestions(cancel_event=None):
+        """P0-6: 接收 cancel_event，长耗时 ETL/LLM 循环可在超时后立即中止，避免僵尸线程迟到写入。"""
         AIGCService, _, _, WarehouseService = ClosedLoop._services()
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("步骤1已超时取消")
         WarehouseService().run_full_pipeline()
-        results = AIGCService().generate_suggestions()
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("步骤1已超时取消")
+        results = AIGCService().generate_suggestions(cancel_event=cancel_event)
         if results:
             parts = []
             for s in results:
@@ -1101,7 +1129,7 @@ class ClosedLoop:
         return "当前无需补货（所有SKU库存充足）"
 
     @staticmethod
-    def _step3_rpa_order(actor="system"):
+    def _step3_rpa_order(actor="system", cancel_event=None):
         from models.aigc import Suggestion
 
         _, RPAService, _, _ = ClosedLoop._services()
@@ -1114,9 +1142,15 @@ class ClosedLoop:
         rpa = RPAService()
         results = []
         for sug in approved:
+            # P0-6: 超时取消后立刻停止下单 —— place_supplier_order 内部是独立事务，
+            # 不中止的话僵尸线程会在步骤标记 failed 后继续产生新的采购单
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("步骤3已超时取消，停止继续下单")
             success = False
             # P1-4: 每条下单最多重试 2 次（共 3 次尝试），间隔 1 秒
             for attempt in range(3):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TimeoutError("步骤3已超时取消，停止继续下单")
                 try:
                     result = rpa.place_supplier_order(
                         {"id": sug.id, "product_id": sug.product_id, "suggested_qty": sug.suggested_qty}
@@ -1143,7 +1177,7 @@ class ClosedLoop:
         return "下单 " + "；".join(results)
 
     @staticmethod
-    def _step4_erp_receive(actor="system"):
+    def _step4_erp_receive(actor="system", cancel_event=None):
         from extensions import db as _db
         from models.erp import Product, PurchaseOrder
 
@@ -1154,13 +1188,16 @@ class ClosedLoop:
         erp = ERPService()
         results = []
         for po in confirmed_pos:
+            # P0-6: 每笔入库前检查取消信号，超时后不再继续入库
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("步骤4已超时取消，停止继续入库")
             erp.receive_purchase_order(po.id)
             prod = _db.session.get(Product, po.product_id)
             results.append(f'{prod.name if prod else "未知"}入库{po.qty}件')
         return "入库 " + "；".join(results)
 
     @staticmethod
-    def _step5_fde_refresh(actor="system"):
+    def _step5_fde_refresh(actor="system", cancel_event=None):
         """P0-5: 执行 FDE 刷新，并记录本次写入的 ADS 记录 ID 到审计日志，供回滚按 ID 精确删除。"""
         from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
 
@@ -1170,6 +1207,9 @@ class ClosedLoop:
         pre_max_rpt = db.session.query(db.func.max(AdsDailyOpsReport.id)).scalar() or 0
 
         stats = WarehouseService().run_full_pipeline()
+        # P0-6: ETL 与日报之间检查取消信号，超时后不再生成日报/写审计
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("步骤5已超时取消")
         AIGCService().generate_daily_report()
 
         # 查询本次 step5 新增的 ADS 记录 ID，回滚时按 ID 精确删除（避免误删当日历史数据）

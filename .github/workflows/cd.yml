@@ -64,12 +64,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Save image tag for deployment
-        run: |
-          echo "IMAGE_TAG=${{ steps.meta.outputs.version }}" >> $GITHUB_ENV
-          echo "IMAGE_DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
-
-  # ==================== 部署（蓝绿） ====================
+  # ==================== 部署 ====================
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -78,41 +73,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Record deployment (记录当前版本用于回滚)
-        run: |
-          mkdir -p .deploy
-          # 先把旧的 current 备份为 previous（确保 rollback 能拿到上一版本）
-          if [ -f .deploy/current.json ]; then
-            cp .deploy/current.json .deploy/previous.json
-          fi
-          # 再写入新版本为 current
-          echo "{\"tag\":\"${{ needs.build.outputs.image_tag }}\",\"digest\":\"${{ needs.build.outputs.image_digest }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"commit\":\"${{ github.sha }}\"}" > .deploy/current.json
-
-      - name: Deploy via SSH (蓝绿切换)
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
+            set -e
             cd /opt/ops-platform
+            IMAGE=$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')
+            NEW_TAG="${IMAGE}:${{ needs.build.outputs.image_tag }}"
+            # 更新 .env 中的 IMAGE_TAG（web/celery-worker/celery-beat 统一使用，保证版本一致）
+            grep -v '^IMAGE_TAG=' .env > .env.tmp || true
+            echo "IMAGE_TAG=${NEW_TAG}" >> .env.tmp
+            mv .env.tmp .env
             # 拉取最新镜像
             docker-compose -f docker-compose.prod.yml pull
-            # 启动新 web 实例（compose 服务名为 web，非 ops_backend）
-            docker-compose -f docker-compose.prod.yml up -d --no-deps web
-            # 等待新实例就绪
+            # 数据库迁移：切流前用新镜像执行，避免新代码 + 旧 schema 启动 500
+            docker-compose -f docker-compose.prod.yml run --rm web flask db upgrade
+            # 启动新 web + 同步更新 Celery（此前只更新 web，worker/beat 一直跑旧代码）
+            docker-compose -f docker-compose.prod.yml up -d --no-deps web celery-worker celery-beat
             sleep 10
-            # 健康检查
-            for i in {1..5}; do
-              if curl -sf http://localhost:5000/health/ready; then
-                echo "New instance healthy"
+            # 健康检查：失败必须中止并 exit 1（此前失败仍继续 reload nginx 且任务退出码为 0，
+            # 坏版本会被判定为部署成功）
+            HEALTHY=0
+            for i in {1..12}; do
+              if curl -sf http://localhost:5000/health/ready > /dev/null; then
+                HEALTHY=1
                 break
               fi
               sleep 5
             done
+            if [ "$HEALTHY" != "1" ]; then
+              echo "Health check failed after deploy!"
+              docker-compose -f docker-compose.prod.yml ps
+              docker-compose -f docker-compose.prod.yml logs --tail=50 web
+              exit 1
+            fi
+            # 部署状态持久化在部署机（runner 工作区跨 job 不共享，
+            # 原实现把 current.json 写在 runner 上，回滚永远找不到 previous）
+            mkdir -p .deploy
+            if [ -f .deploy/current.json ]; then
+              cp .deploy/current.json .deploy/previous.json
+            fi
+            echo "{\"tag\":\"${NEW_TAG}\",\"digest\":\"${{ needs.build.outputs.image_digest }}\",\"deployed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"commit\":\"${{ github.sha }}\"}" > .deploy/current.json
             # 重载 nginx（compose 服务名为 nginx，非 ops_nginx）
             docker exec nginx nginx -s reload
-            echo "Deployed ${{ needs.build.outputs.image_tag }}"
+            echo "Deployed ${NEW_TAG}"
 
   # ==================== 回滚 ====================
   rollback:
@@ -120,19 +128,6 @@ jobs:
     if: github.event.inputs.action == 'rollback'
     environment: production
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Read previous deployment
-        id: prev
-        run: |
-          if [ -f .deploy/previous.json ]; then
-            echo "tag=$(jq -r .tag .deploy/previous.json)" >> $GITHUB_OUTPUT
-            echo "Found previous tag: $(jq -r .tag .deploy/previous.json)"
-          else
-            echo "No previous deployment found for rollback"
-            exit 1
-          fi
-
       - name: Rollback via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -140,21 +135,42 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
+            set -e
             cd /opt/ops-platform
-            # 拉取上一个版本镜像
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.prev.outputs.tag }}
-            # 回滚到 previous tag（写入 .deploy/.env 让 compose 使用旧 tag）
-            echo "IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.prev.outputs.tag }}" > .deploy/.env
-            docker-compose -f docker-compose.prod.yml --env-file .deploy/.env up -d --no-deps web
+            # 从部署机读取上一版本（原实现在 runner checkout 里找 previous.json，永远找不到）
+            if [ ! -f .deploy/previous.json ]; then
+              echo "No previous deployment found for rollback"
+              exit 1
+            fi
+            PREV_TAG=$(jq -r .tag .deploy/previous.json)
+            if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "null" ]; then
+              echo "Invalid previous tag"
+              exit 1
+            fi
+            echo "Rolling back to: ${PREV_TAG}"
+            docker pull "${PREV_TAG}"
+            # 回滚 env：复制完整 .env 再覆盖 IMAGE_TAG（原 .deploy/.env 只含 IMAGE_TAG，
+            # 会触发 SECRET_KEY 等必填校验报错，回滚必然失败）
+            grep -v '^IMAGE_TAG=' .env > .env.tmp || true
+            echo "IMAGE_TAG=${PREV_TAG}" >> .env.tmp
+            mv .env.tmp .env
+            docker-compose -f docker-compose.prod.yml up -d --no-deps web celery-worker celery-beat
             sleep 10
-            # 健康检查
-            for i in {1..5}; do
-              if curl -sf http://localhost:5000/health/ready; then
-                echo "Rollback successful"
-                docker exec nginx nginx -s reload
-                exit 0
+            HEALTHY=0
+            for i in {1..12}; do
+              if curl -sf http://localhost:5000/health/ready > /dev/null; then
+                HEALTHY=1
+                break
               fi
               sleep 5
             done
-            echo "Rollback health check failed!"
-            exit 1
+            if [ "$HEALTHY" != "1" ]; then
+              echo "Rollback health check failed!"
+              exit 1
+            fi
+            # 回滚成功后交换 current/previous
+            if [ -f .deploy/current.json ]; then
+              cp .deploy/current.json .deploy/rollback-done.json
+            fi
+            docker exec nginx nginx -s reload
+            echo "Rollback successful"

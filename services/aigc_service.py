@@ -173,11 +173,14 @@ class AIGCService:
 
     # ==================== 补货建议生成 ====================
 
-    def generate_suggestions(self):
+    def generate_suggestions(self, cancel_event=None):
         """
         读 ADS 层 ads_replenishment_suggest，对 suggested_qty>0 的产品生成 Suggestion。
         - 置信度 confidence 基于库存缺口比例计算。
         - reason 可选用 LLM 润色，并把历史反馈统计作为 few-shot。
+        - cancel_event: 闭环超时取消信号（P0-6）。循环内每条建议生成前检查，
+          超时后立刻抛 TimeoutError —— 因为 commit 在循环结束后统一执行，
+          中止不会留下部分数据，避免僵尸线程在超时标记 failed 后仍"迟到写入"。
         """
         rows = self.session.query(AdsReplenishmentSuggest).filter(AdsReplenishmentSuggest.suggested_qty > 0).all()
         if not rows:
@@ -200,6 +203,9 @@ class AIGCService:
         created = []
         try:
             for r in rows:
+                # P0-6: 超时取消后立刻中止，未 commit 的建议全部回滚
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TimeoutError("补货建议生成已超时取消")
                 confidence = self._calc_confidence(r.recent_7d_sales, r.current_stock, r.in_transit)
                 reason = r.reason or ""
 
@@ -870,8 +876,11 @@ class AIGCService:
 
     # ==================== 审核反馈学习 ====================
 
-    def record_feedback(self, suggestion_id, action, original_qty, final_qty, note=""):
-        """记录审核反馈 SuggestionFeedback，自动计算 qty_delta"""
+    def record_feedback(self, suggestion_id, action, original_qty, final_qty, note="", auto_commit=True):
+        """记录审核反馈 SuggestionFeedback，自动计算 qty_delta
+
+        P1-3: auto_commit=False 时仅写入不提交，供批量审核在单事务内完成（避免 2N 次 commit）。
+        """
         delta = (final_qty or 0) - (original_qty or 0)
         fb = SuggestionFeedback(
             suggestion_id=suggestion_id,
@@ -883,7 +892,8 @@ class AIGCService:
         )
         try:
             self.session.add(fb)
-            self.session.commit()
+            if auto_commit:
+                self.session.commit()
             return fb
         except Exception as e:
             self.session.rollback()
@@ -964,13 +974,15 @@ class AIGCService:
             for s in rows
         ]
 
-    def review_suggestion(self, id, action, note="", reviewer="system", final_qty=None):
+    def review_suggestion(self, id, action, note="", reviewer="system", final_qty=None, auto_commit=True):
         """审核补货建议：action 为 approve/reject 或 approved/rejected。
         review 时自动调 record_feedback 记录反馈。
 
         :param final_qty: 可选，审核时修改最终采购数量（P1-3 前端数量修改）
                           approve 时若提供则覆盖 suggested_qty
                           reject 时强制为 0
+        :param auto_commit: P1-3，False 时仅变更不提交，由调用方（批量审核）统一提交，
+                            避免 2N 次独立 commit
         """
         s = self.session.query(Suggestion).filter(Suggestion.id == id).first()
         if not s:
@@ -1006,7 +1018,8 @@ class AIGCService:
             if action == "approved" and final_qty != s.suggested_qty:
                 extra = f"[数量调整 {s.suggested_qty}→{final_qty}] "
                 s.review_note = extra + (note or "")
-            self.session.commit()
+            if auto_commit:
+                self.session.commit()
         except Exception as e:
             self.session.rollback()
             logger.error("审核建议失败 id=%s: %s", id, e)
@@ -1019,6 +1032,7 @@ class AIGCService:
             original_qty=s.original_qty,
             final_qty=final_qty,
             note=note,
+            auto_commit=auto_commit,
         )
         return s
 

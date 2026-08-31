@@ -47,6 +47,7 @@ class AuditLog(db.Model):
     __table_args__ = (
         PrimaryKeyConstraint("id", "created_at"),
         Index("idx_audit_actor_action_created", "actor", "action", "created_at"),
+        Index("idx_audit_target_type", "target_type"),  # P1-5: 按 target_type 过滤有索引可用
     )
     # P1-8: id 为整数列，复合主键 (id, created_at) 由 __table_args__ 中的
     # PrimaryKeyConstraint 显式声明。SQLite 下由 before_insert 钩子手动计算 MAX(id)+1
@@ -92,16 +93,24 @@ class AuditLog(db.Model):
         :param start_id: 起始记录 id（默认从第一条）
         :param end_id: 结束记录 id（默认到最后一条）
         :return: 被篡改的记录 id，或 None 表示完整
+
+        P0 修复：
+        - yield_per(1000) 流式读取，避免审计表持续增长后全表加载进内存（OOM 风险）
+        - 窗口起点（idx==0）信任该记录自身的 prev_hash：按范围校验时，首条记录的
+          prev_hash 本来就指向窗口外的上一条，此前固定期待空串会让范围校验永远"首条即篡改"
         """
         query = cls.query.order_by(cls.id)
         if start_id:
             query = query.filter(cls.id >= start_id)
         if end_id:
             query = query.filter(cls.id <= end_id)
-        records = query.all()
-        prev_hash = ""
+        records = query.yield_per(1000)
+        prev_hash = None
         for idx, rec in enumerate(records):
-            expected_prev = "" if idx == 0 else prev_hash
+            if idx == 0:
+                expected_prev = rec.prev_hash or ""
+            else:
+                expected_prev = prev_hash or ""
             expected_hash = cls._compute_hash(
                 expected_prev,
                 rec.actor,
@@ -148,10 +157,16 @@ def _audit_log_set_hash(mapper, connection, target):
     if connection.dialect.name == "sqlite" and target.id is None:
         target.id = connection.execute(text("SELECT COALESCE(MAX(id), 0) + 1 FROM audit_log")).scalar()
 
-    # P2-8: 仅取 hash 列（with_entities）避免全表扫描加载整行；order_by id desc + limit 1
-    # 走 id 索引，配合 LIMIT 1 仅读取最新一条的 hash 列，消除原 .first() 的全行物化开销。
-    last = AuditLog.query.with_entities(AuditLog.hash).order_by(AuditLog.id.desc()).limit(1).first()
-    prev = last.hash if last and last.hash else ""
+    # P0 修复：created_at 列默认值在 INSERT 编译期才求值（晚于本事件），
+    # 事件内读到的是 None。必须在这里显式赋值并让它参与哈希，否则哈希用的
+    # now() 与实际落库的 created_at 相差微秒，verify_chain 会对所有记录误报篡改。
+    if target.created_at is None:
+        target.created_at = datetime.now()
+
+    # P0 修复：事件内不使用 AuditLog.query（绑定 session，与本事务的 connection 脱节），
+    # 改为直接在传入的 connection 上读取最新 hash，与 advisory lock 的事务边界一致。
+    last = connection.execute(text("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")).scalar()
+    prev = last if last else ""
     target.prev_hash = prev
     target.hash = AuditLog._compute_hash(
         prev,
@@ -162,7 +177,7 @@ def _audit_log_set_hash(mapper, connection, target):
         target.detail,
         target.ip,
         target.request_id,
-        target.created_at or datetime.now(),
+        target.created_at,
     )
 
 

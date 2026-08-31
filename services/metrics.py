@@ -12,12 +12,13 @@
 """
 
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
 
-# 慢查询阈值（毫秒）
-SLOW_QUERY_THRESHOLD_MS = 100
+# 慢查询阈值（毫秒）——默认200ms，生产环境可通过 env 覆盖
+SLOW_QUERY_THRESHOLD_MS = int(os.getenv("SLOW_QUERY_THRESHOLD_MS", "200"))
 
 # ==================== Prometheus 指标定义 ====================
 
@@ -84,11 +85,17 @@ def _init_prometheus_metrics():
         logger.warning("Prometheus 指标注册失败：%s", e)
 
 
-def record_slow_query(table, operation, duration_ms):
+def record_slow_query(table, operation, query_hash, duration_ms):
     """记录慢查询"""
     if "slow_query_total" in _metrics:
         _metrics["slow_query_total"].labels(table=table, operation=operation).inc()
-    logger.warning("慢查询 table=%s op=%s duration=%dms", table, operation, duration_ms)
+    logger.warning(
+        "慢查询 table=%s op=%s hash=%s duration=%dms",
+        table,
+        operation,
+        query_hash,
+        duration_ms,
+    )
 
 
 def record_loop_step(step, status, duration_seconds):
@@ -156,6 +163,10 @@ def init_metrics(app):
             if duration_ms > SLOW_QUERY_THRESHOLD_MS:
                 # 提取表名和操作类型
                 stmt_lower = statement.lower().strip()
+                # P1-10: 计算 query hash 便于按 SQL 聚合
+                import hashlib
+
+                query_hash = hashlib.sha256(statement.encode()).hexdigest()[:16]
                 operation = "unknown"
                 if stmt_lower.startswith("select"):
                     operation = "select"
@@ -175,7 +186,7 @@ def init_metrics(app):
                             table = parts[1].strip().split()[0].strip('"').strip("'").strip("`")
                             break
 
-                record_slow_query(table, operation, int(duration_ms))
+                record_slow_query(table, operation, query_hash, int(duration_ms))
 
         logger.info("慢查询监控已启用，阈值=%dms", SLOW_QUERY_THRESHOLD_MS)
     except Exception as e:

@@ -196,6 +196,8 @@ class StockLot(db.Model):
     """
 
     __tablename__ = "erp_stock_lot"
+    # P1-5: FEFO 出库高频查询（product_id + status + expiry_date）复合索引
+    __table_args__ = (db.Index("idx_stock_lot_product_status_expiry", "product_id", "status", "expiry_date"),)
     id = db.Column(db.Integer, primary_key=True)
     lot_no = db.Column(db.String(32), unique=True, nullable=False, index=True)  # 批次号
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
@@ -216,6 +218,8 @@ class ReorderRule(db.Model):
     """
 
     __tablename__ = "erp_reorder_rule"
+    # P1-5: (product_id, warehouse_id) 唯一 —— 同品同仓一条规则，防止预警重复触发
+    __table_args__ = (db.Index("ux_reorder_rule_product_wh", "product_id", "warehouse_id", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=True)
@@ -249,6 +253,9 @@ class Budget(db.Model):
     """
 
     __tablename__ = "erp_budget"
+    # P1-5: (cost_center_id, period, category) 唯一 —— 防止同期同成本中心重复预算，
+    # refresh_budget_actual 的聚合口径才会唯一
+    __table_args__ = (db.Index("ux_budget_cc_period_cat", "cost_center_id", "period", "category", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     cost_center_id = db.Column(db.Integer, db.ForeignKey("erp_cost_center.id"), nullable=False, index=True)
     period = db.Column(db.String(7), nullable=False, index=True)  # YYYY-MM
@@ -268,6 +275,8 @@ class ExchangeRate(db.Model):
     """
 
     __tablename__ = "erp_exchange_rate"
+    # P1-5: (from, to, date) 唯一 —— 同日同币对一条汇率（此前迁移里有复合索引但模型缺失）
+    __table_args__ = (db.Index("ux_exchange_rate_pair_date", "from_currency", "to_currency", "date", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     from_currency = db.Column(db.String(3), nullable=False, index=True)  # ISO 4217 三字母代码
     to_currency = db.Column(db.String(3), nullable=False, index=True)  # 通常为 CNY

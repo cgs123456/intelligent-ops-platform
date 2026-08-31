@@ -12,7 +12,7 @@
 """
 
 import logging
-import random
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
@@ -54,8 +54,12 @@ class ReconciliationService:
 
     @staticmethod
     def _gen_batch_no() -> str:
-        """生成对账批次号：REC-YYYYMMDDHHMMSS-NNNN"""
-        return f'REC-{datetime.now().strftime("%Y%m%d%H%M%S")}-{random.randint(1000, 9999)}'
+        """生成对账批次号：REC-YYYYMMDDHHMMSS-XXXXXXXX
+
+        P0/L2: 改用 uuid4 后缀 —— 原 random.randint(1000, 9999) 与 batch_no 的唯一约束
+        冲突时直接 500（erp_service 的单号已改 uuid，此处对齐）。
+        """
+        return f'REC-{datetime.now().strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:8]}'
 
     @staticmethod
     def _to_decimal(value) -> Decimal:

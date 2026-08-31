@@ -48,6 +48,7 @@ class TestMigrations:
         """P1-3: 迁移链单一 head（无分叉）
 
         head = 所有 revision 中不出现在任何 down_revision 中的 revision
+        （支持 alembic merge 迁移的元组 down_revision，如 h9i0j1k2l3m4）
         """
         revisions = {}
         down_revisions = set()
@@ -61,7 +62,10 @@ class TestMigrations:
                 if rev:
                     revisions[rev] = filepath.name
                 if down:
-                    down_revisions.add(down)
+                    if isinstance(down, (tuple, list)):
+                        down_revisions.update(down)
+                    else:
+                        down_revisions.add(down)
             except Exception as e:
                 pytest.fail(f"迁移文件解析失败 {filepath.name}: {e}")
 
@@ -87,21 +91,34 @@ class TestMigrations:
             except Exception:
                 continue
 
-        # 找 head
+        # 找 head（元组 down_revision 展开为成员）
         all_revs = set(revisions.keys())
-        all_downs = {d for d in revisions.values() if d}
+        all_downs = set()
+        for d in revisions.values():
+            if not d:
+                continue
+            if isinstance(d, (tuple, list)):
+                all_downs.update(d)
+            else:
+                all_downs.add(d)
         heads = all_revs - all_downs
         if not heads:
             pytest.skip("无法确定 head，跳过链路检查")
 
         head = next(iter(heads))
-        # 从 head 回溯到 None
+        # 从 head 回溯到 None（merge 迁移的元组 down_revision 展开为多个父节点，用栈遍历）
         visited = set()
-        current = head
-        while current is not None:
-            assert current not in visited, f"检测到迁移链循环: {current}"
+        stack = [head]
+        while stack:
+            current = stack.pop()
+            if current is None or current in visited:
+                continue
             visited.add(current)
-            current = revisions.get(current)
+            down = revisions.get(current)
+            if isinstance(down, (tuple, list)):
+                stack.extend(down)
+            else:
+                stack.append(down)
 
         # 所有 revision 应在回溯路径上（无游离迁移）
         assert visited == all_revs, f"存在游离迁移（不在 head 链路上）: {all_revs - visited}"

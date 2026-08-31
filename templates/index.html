@@ -8,7 +8,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'">
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v=static_version) }}">
 </head>
 <body>
 <!-- P1-12: 无障碍跳转链接，键盘用户可跳过导航直达主内容 -->
@@ -194,7 +194,7 @@
         </div>
     </main>
 </div>
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js', v=static_version) }}"></script>
 <!-- 操作引导浮层 -->
 <div id="guideOverlay" class="guide-overlay" style="display:none">
     <div class="guide-card">

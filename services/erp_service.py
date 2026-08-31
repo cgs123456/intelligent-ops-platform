@@ -86,6 +86,27 @@ class ERPService:
 
     # ==================== 采购管理 ====================
 
+    @staticmethod
+    def _validate_qty_price(qty, unit_price):
+        """P0-4: 数量/单价合法性校验（采购单/销售单共用）。
+
+        负数 qty 会反向"卖入库存"（stock_qty -= qty 库存凭空增加）并生成负应收/应付凭证；
+        非正数单价会污染移动加权平均成本核算。qty 列为 Integer，这里拒绝小数与字符串数字
+        以外的输入；unit_price 允许 int/float/str/Decimal，但必须 > 0。
+        """
+        try:
+            qty_val = int(qty)
+        except (TypeError, ValueError):
+            raise ValueError(f"数量必须为整数: {qty!r}")
+        if qty_val != qty or qty_val <= 0:
+            raise ValueError(f"数量必须为正整数: {qty!r}")
+        try:
+            price_val = ERPService._to_decimal(unit_price)
+        except Exception:
+            raise ValueError(f"单价必须为数字: {unit_price!r}")
+        if price_val <= 0:
+            raise ValueError(f"单价必须大于 0: {unit_price!r}")
+
     def create_purchase_order(
         self,
         supplier_id,
@@ -105,6 +126,8 @@ class ERPService:
         P1-9: 支持 currency_code/tax_rate 参数，未传时回退到 Product 默认值。
         """
         try:
+            # P0-4: 数量/单价合法性校验（负数会凭空增库存/污染成本核算）
+            self._validate_qty_price(qty, unit_price)
             # P1-9: 未显式传入币种/税率时，从 Product 取默认值（保证向后兼容）
             if currency_code is None or tax_rate is None:
                 product = self.db.get(Product, product_id)
@@ -405,6 +428,8 @@ class ERPService:
               应收凭证写入 currency_code 与 tax_amount。
         """
         try:
+            # P0-4: 数量/单价合法性校验（负数 qty 会反向"卖入库存"，生成负应收凭证）
+            self._validate_qty_price(qty, unit_price)
             # P0-1: 加行锁 SELECT FOR UPDATE，防止高并发超卖
             # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
             product = self.db.query(Product).filter_by(id=product_id).with_for_update().first()

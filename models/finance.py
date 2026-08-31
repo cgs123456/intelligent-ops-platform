@@ -15,6 +15,8 @@
 from datetime import datetime
 from decimal import Decimal
 
+from sqlalchemy import Index
+
 from extensions import db
 
 
@@ -59,6 +61,8 @@ class ReconciliationEntry(db.Model):
     """
 
     __tablename__ = "finance_reconciliation_entry"
+    # P1-5: auto_match/close_batch 高频过滤 (batch_id, source, matched) 复合索引
+    __table_args__ = (Index("idx_recon_entry_batch_source_matched", "batch_id", "source", "matched"),)
     id = db.Column(db.Integer, primary_key=True)
     batch_id = db.Column(db.Integer, db.ForeignKey("finance_reconciliation_batch.id"), nullable=False, index=True)
     source = db.Column(db.String(16), nullable=False, index=True)  # erp/bank/manual

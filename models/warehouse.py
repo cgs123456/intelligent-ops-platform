@@ -14,6 +14,8 @@ from extensions import db
 
 class OdsSaleOrder(db.Model):
     __tablename__ = "ods_sale_order"
+    # P1-5: order_no 唯一索引 —— 防止 ETL 重复抽取重复入库（与迁移 h9i0j1k2l3m4 对齐）
+    __table_args__ = (Index("ux_ods_sale_order_no", "order_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     product_id = db.Column(db.Integer, index=True)
@@ -28,6 +30,8 @@ class OdsSaleOrder(db.Model):
 
 class OdsPurchaseOrder(db.Model):
     __tablename__ = "ods_purchase_order"
+    # P1-5: order_no 唯一索引（与迁移 h9i0j1k2l3m4 对齐）
+    __table_args__ = (Index("ux_ods_purchase_order_no", "order_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     supplier_id = db.Column(db.Integer)
@@ -104,6 +108,8 @@ class DwsInventoryDaily(db.Model):
     """库存日快照"""
 
     __tablename__ = "dws_inventory_snapshot_daily"
+    # P1-5: (product_id, dt) 唯一 —— 防止重复 ETL 导致库存快照翻倍（对齐 dws_sales_sku_daily）
+    __table_args__ = (Index("ux_dws_inventory_product_dt", "product_id", "dt", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -154,6 +160,8 @@ class EtlMeta(db.Model):
     """ETL 执行元数据（增量拉取的水位线）"""
 
     __tablename__ = "etl_meta"
+    # P1-5: (layer, table_name) 唯一 —— 水位线每表一行，防止双行导致增量口径漂移
+    __table_args__ = (Index("ux_etl_meta_layer_table", "layer", "table_name", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     layer = db.Column(db.String(8), nullable=False, index=True)  # ODS/DWD/DWS/ADS
     table_name = db.Column(db.String(64), nullable=False, index=True)

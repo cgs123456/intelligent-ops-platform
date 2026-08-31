@@ -16,6 +16,9 @@ from services.rbac import require_permission
 
 bp = Blueprint("audit", __name__, url_prefix="/api/v1/audit")
 
+# H4: verify-chain 未显式指定范围时默认校验的记录数上限
+VERIFY_CHAIN_DEFAULT_SPAN = 5000
+
 
 def _parse_date(s, end_of_day=False):
     """解析 YYYY-MM-DD 为 datetime，end_of_day=True 时返回当日 23:59:59"""
@@ -131,14 +134,25 @@ def verify_chain():
     返回：
       - { "tampered_id": null, "ok": true }  表示完整
       - { "tampered_id": 123, "ok": false }  表示 id=123 的记录被篡改
+
+    H4 修复：不传范围时默认只校验最近 VERIFY_CHAIN_DEFAULT_SPAN 条 —— 审计表持续增长，
+    全表流式校验仍是长事务 + 高耗时操作，接口层兜底防止无意识全表扫描。
     """
     start_id = request.args.get("start_id", type=int)
     end_id = request.args.get("end_id", type=int)
+    if start_id is None and end_id is None:
+        from sqlalchemy import func
+
+        max_id = db.session.query(func.max(AuditLog.id)).scalar()
+        if max_id:
+            start_id = max(1, int(max_id) - VERIFY_CHAIN_DEFAULT_SPAN + 1)
     tampered_id = AuditLog.verify_chain(start_id=start_id, end_id=end_id)
     return jsonify(
         {
             "ok": tampered_id is None,
             "tampered_id": tampered_id,
+            "start_id": start_id,
+            "end_id": end_id,
             "message": "审计日志完整" if tampered_id is None else f"记录 id={tampered_id} 被篡改或断链",
         }
     )

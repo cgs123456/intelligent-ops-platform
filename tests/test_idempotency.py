@@ -124,6 +124,13 @@ class TestIdempotencyRedisCache:
         def set(self, key, value, timeout=None):
             self._store[key] = value
 
+        def add(self, key, value, timeout=None):
+            """P0 修复对齐：cache.add() 即原子 SET NX —— 仅当 key 不存在时写入并返回 True"""
+            if key in self._store:
+                return False
+            self._store[key] = value
+            return True
+
         def delete(self, key):
             self._store.pop(key, None)
 

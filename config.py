@@ -15,14 +15,25 @@ class Config:
     # 数据库：默认 SQLite，生产环境用 DATABASE_URL 切 PostgreSQL
     db_path = BASE_DIR / "ops_platform.db"
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", f"sqlite:///{db_path}")
+    # P0-1: Production REQUIRE PostgreSQL/MySQL
+    # SQLite is for development only — production must set DATABASE_URL
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {
+    SQLALCHEMY_ENGINE_OPTIONS: dict = {
         "pool_pre_ping": True,  # 连接前检查，避免用断连
-        "pool_recycle": 1800,  # 30 分钟回收连接（比 3600 更积极）
-        "pool_size": 10,  # 连接池大小
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "300")),  # 30分钟回收 - 通过环境变量配置
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),  # 连接池大小 - 通过环境变量配置
         "max_overflow": 20,  # 最大溢出
-        "pool_timeout": 30,  # 获取连接超时 30 秒
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),  # 连接超时 - 通过环境变量配置
     }
+
+    # P0/M1: PostgreSQL 下启用语句级超时 —— DataAgent/Text2SQL 会执行用户触发的 SQL，
+    # `SELECT pg_sleep(120)` 或大笛卡尔积能通过 sqlglot AST 校验并占死 worker。
+    # SQLite（开发默认）不支持 options 参数，仅 PG 生效。
+    if SQLALCHEMY_DATABASE_URI.startswith("postgresql"):
+        SQLALCHEMY_ENGINE_OPTIONS = {
+            **SQLALCHEMY_ENGINE_OPTIONS,
+            "connect_args": {"options": "-c statement_timeout=5000"},
+        }
 
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
@@ -66,8 +77,9 @@ class Config:
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5000")
 
     # API 限流配置（生产用 redis://redis:6379/1）
-    # 注意：Flask-Limiter 读取 RATELIMIT_STORAGE_URI（不是 URL），这里同时设两份以兼容老 env
-    RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URL", "memory://")
+    # P0-3: Flask-Limiter 读取 RATELIMIT_STORAGE_URI（不是 URL），同时设两份以兼容老 env
+    # 生产环境推荐显式配置: redis://redis:6379/1（P1-9: 生产环境限流存储不可用 memory://）
+    RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("RATELIMIT_STORAGE_URL") or "memory://"
     RATELIMIT_STORAGE_URL = RATELIMIT_STORAGE_URI  # 兼容字段
     RATELIMIT_DEFAULT = "200/hour"  # 全局默认：每小时200次
     RATELIMIT_AUTH = "10/minute"  # 登录接口：每分钟10次
@@ -162,9 +174,11 @@ class ProdConfig(Config):
             raise RuntimeError("生产环境必须配置 CELERY_BROKER_URL（不可用 memory://）")
         self.CELERY_BROKER_URL = celery_broker
 
-        # P1-9: 生产环境限流存储不可用 memory://
+        # P0-3/P1-9: 生产环境限流存储不可用 memory://（需显式配置 RATELIMIT_STORAGE_URI/URL）
         if self.RATELIMIT_STORAGE_URI == "memory://":
-            raise RuntimeError("生产环境必须配置 RATELIMIT_STORAGE_URL（不可用 memory://）")
+            raise RuntimeError(
+                "生产环境必须配置 RATELIMIT_STORAGE_URI（不可用 memory://） - 使用 Redis 或 PostgreSQL 后端"
+            )
 
         # P2-8: 生产环境 CORS 不可为 *
         if self.CORS_ORIGINS == "*":

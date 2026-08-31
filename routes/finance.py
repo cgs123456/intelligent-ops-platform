@@ -17,7 +17,7 @@ from extensions import db
 from models.finance import ReconciliationBatch, ReconciliationEntry
 from services.finance_recon_service import ReconciliationService
 from services.idempotency import idempotent
-from services.rbac import require_permission
+from services.rbac import get_actor_name, require_permission
 from services.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,8 @@ def create_batch():
         return error_response("ERR_SYS_002", "period 不能为空")
     try:
         svc = ReconciliationService()
-        batch = svc.create_batch(period=period, created_by=data.get("created_by") or "system")
+        # P0-11: 创建人以认证身份为准，body 传入值仅作无认证场景兜底（防伪造审计）
+        batch = svc.create_batch(period=period, created_by=get_actor_name(data.get("created_by")))
         if data.get("notes"):
             batch.notes = data.get("notes")
             db.session.commit()

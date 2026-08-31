@@ -13,6 +13,7 @@
 
 import json
 import logging
+import os
 from functools import wraps
 
 from flask import current_app, jsonify, request
@@ -26,6 +27,9 @@ _KEY_PREFIX = "idem:"
 _TTL_SECONDS = 24 * 3600  # 24 小时
 # P1-2: SETNX 占位标记，区分"正在处理"与"已完成缓存"
 _PROCESSING_MARKER = "__idem_processing__"
+# P0 修复：占位锁独立短 TTL —— 业务执行中进程被杀时锁可自行过期恢复，
+# 否则 24h 内所有重试都会 409。成功响应会以完整 TTL 覆盖写。
+_PROCESSING_TTL = int(os.getenv("IDEMPOTENCY_PROCESSING_TTL", "300"))
 
 
 def _anon_namespace():
@@ -117,17 +121,16 @@ def idempotent(ttl_seconds=_TTL_SECONDS):
 
             cache_key = _cache_key(idem_key)
 
-            # P1-2: SETNX 占位锁防 TOCTOU —— 并发请求只有一个能执行业务
-            # 尝试原子占位；若后端不支持 nx 参数（SimpleCache/测试 FakeRedis），降级为原 get+set 逻辑
+            # P1-2: SETNX 占位锁防 TOCTOU —— 并发请求只有一个能执行业务。
+            # P0 修复：原实现 cache.set(..., nx=True)，但 flask-caching 的 set() 签名
+            # 只有 (key, value, timeout)，必抛 TypeError 静默降级，锁从未生效。
+            # cache.add() 在 Redis 后端就是原子 SET NX EX，SimpleCache 等也支持。
+            # 占位锁用短 TTL（默认 300s ≈ 业务最大执行时长）：业务执行中 worker 崩溃时
+            # 占位锁可自行过期，客户端重试不会永远 409；成功响应会以完整 TTL 覆盖。
             has_placeholder = False
-            nx_supported = True
             try:
-                acquired = cache.set(cache_key, _PROCESSING_MARKER, timeout=ttl_seconds, nx=True)
+                acquired = cache.add(cache_key, _PROCESSING_MARKER, timeout=_PROCESSING_TTL)
                 has_placeholder = bool(acquired)
-            except TypeError:
-                # cache 后端不支持 nx 参数，降级为原 get+set 逻辑（dev/测试模式可接受）
-                nx_supported = False
-                acquired = None
             except Exception as e:
                 logger.warning(
                     "Redis 不可用，跳过幂等检查 key=%s err=%s",
@@ -136,8 +139,8 @@ def idempotent(ttl_seconds=_TTL_SECONDS):
                 )
                 return f(*args, **kwargs)
 
-            if nx_supported and not acquired:
-                # ===== SETNX 路径：key 已存在，可能是并发 processing 或已完成结果 =====
+            if not has_placeholder:
+                # ===== key 已存在：可能是并发 processing 或已完成结果 =====
                 try:
                     cached = cache.get(cache_key)
                 except Exception as e:
@@ -159,27 +162,7 @@ def idempotent(ttl_seconds=_TTL_SECONDS):
                         return jsonify(payload.get("body")), payload.get("status", 200)
                     except (json.JSONDecodeError, KeyError):
                         logger.warning("幂等缓存反序列化失败 key=%s，重新执行", idem_key[:8])
-                # cached 为 None 或损坏：重新执行业务（覆盖旧值）
-
-            if not nx_supported:
-                # ===== 降级路径：nx 不支持，沿用原 get 检查逻辑 =====
-                try:
-                    cached = cache.get(cache_key)
-                except Exception as e:
-                    logger.warning(
-                        "Redis 不可用，跳过幂等检查 key=%s err=%s",
-                        idem_key[:8],
-                        e,
-                    )
-                    return f(*args, **kwargs)
-
-                if cached is not None:
-                    try:
-                        payload = json.loads(cached)
-                        logger.info("幂等命中 key=%s，返回缓存结果", idem_key[:8])
-                        return jsonify(payload.get("body")), payload.get("status", 200)
-                    except (json.JSONDecodeError, KeyError):
-                        logger.warning("幂等缓存反序列化失败 key=%s，重新执行", idem_key[:8])
+                # cached 为 None（占位锁已过期）或损坏：重新执行业务（覆盖旧值）
 
             # 2. 首次请求：执行业务
             response = f(*args, **kwargs)

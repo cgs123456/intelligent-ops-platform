@@ -34,6 +34,9 @@ ops_platform.db
 .idea/
 *.iml
 
+# AI 工作区本地记忆（不入库）
+.workbuddy/
+
 # 测试缓存
 .pytest_cache/
 .coverage

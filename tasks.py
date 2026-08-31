@@ -40,9 +40,34 @@ def _task(name=None, **kwargs):
     def decorator(f):
         if celery_app is None:
             return _NullTask(getattr(f, "__name__", "task"))
+        if _TASK_BASE is not None:
+            kwargs.setdefault("base", _TASK_BASE)
         return celery_app.task(name=name or f.__name__, **kwargs)(f)
 
     return decorator
+
+
+# P0-13: 任务失败统一告警基类 —— 此前任务失败只写日志，夜间 ETL/日报挂掉无人知晓。
+# on_failure 在重试耗尽后触发，通过 Notifier 多渠道推送（钉钉/企微/邮件，未配置时降级为日志）。
+_TASK_BASE = None
+if celery_app is not None:
+
+    class _AlertTask(celery_app.Task):
+        def on_failure(self, exc, task_id, args, kwargs, einfo):
+            super().on_failure(exc, task_id, args, kwargs, einfo)
+            try:
+                from services.notifier import notifier
+
+                notifier.send_alert(
+                    title=f"Celery 任务失败: {self.name}",
+                    message=f"task_id={task_id} error={exc}",
+                    level="error",
+                    context={"task": self.name, "task_id": task_id},
+                )
+            except Exception:
+                logger.warning("任务失败告警发送异常 task=%s", self.name)
+
+    _TASK_BASE = _AlertTask
 
 
 # Flask app context 工厂（Celery worker 需要在 app context 内执行）
@@ -103,7 +128,9 @@ def run_etl_async(self):
         _get_app()
         from services.warehouse_service import WarehouseService
 
-        result = WarehouseService().run_full_pipeline()
+        # P0-13: raise_on_error=True —— 让异常上抛触发 self.retry 与 on_failure 告警，
+        # 此前 run_full_pipeline 吞掉异常，Celery 永远显示成功、重试从不发生
+        result = WarehouseService().run_full_pipeline(raise_on_error=True)
         logger.info("[celery] ETL done: %s", result)
         return result
     except Exception as exc:

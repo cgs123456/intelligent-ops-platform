@@ -4,6 +4,7 @@ Flask 主应用 · 中型企业智能运营平台（重构版）
 """
 
 import atexit
+import hashlib
 import logging
 import os
 import signal
@@ -209,9 +210,28 @@ def create_app(config_class=None):
             logger.warning("flask-smorest 未安装，跳过 API 文档")
 
     # 首页
+    # P0-8: 静态资源内容指纹 —— nginx 对 static 设置 immutable + 7 天强缓存，而 Dockerfile
+    # 构建时会原地覆盖同名 app.js/style.css，发版后老用户最长 7 天拿旧 JS（修复发不出去）。
+    # 以内容 hash 作为 ?v= 查询参数：内容变化 → URL 变化 → 缓存安全失效。
+    _static_version_cache: list = []
+
+    def _static_version() -> str:
+        if _static_version_cache:
+            return _static_version_cache[0]
+        h = hashlib.sha256()
+        for rel in ("js/app.js", "css/style.css"):
+            path = os.path.join(app.static_folder, *rel.split("/"))
+            try:
+                with open(path, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                h.update(rel.encode("utf-8"))
+        _static_version_cache.append(h.hexdigest()[:12])
+        return _static_version_cache[0]
+
     @app.route("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", static_version=_static_version())
 
     # P1-2: 深度健康检查
     @app.route("/health")

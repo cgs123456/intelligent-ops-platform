@@ -7,7 +7,7 @@ import time
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.closed_loop import ClosedLoop
-from services.rbac import require_permission, verify_sse_auth
+from services.rbac import get_actor_name, require_permission, verify_sse_auth
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,8 @@ def status():
 def run_step():
     step = request.get_json(force=True, silent=True) or {}
     step_no = step.get("step")
-    actor = step.get("actor", "system")
+    # P0-11: 操作人以认证身份为准，body 传入的 actor 仅作无认证场景兜底（防伪造审计）
+    actor = get_actor_name(step.get("actor"))
     # P0-10: 校验 step_no 为 1-5 整数
     if not isinstance(step_no, int) or step_no < 1 or step_no > 5:
         return jsonify({"error": "step 参数无效，需 1-5"}), 400
@@ -41,7 +42,7 @@ def run_step_async():
     """
     data = request.get_json(force=True, silent=True) or {}
     step_no = data.get("step")
-    actor = data.get("actor", "system")
+    actor = get_actor_name(data.get("actor"))
     if not isinstance(step_no, int) or step_no < 1 or step_no > 5:
         return jsonify({"error": "step 参数无效，需 1-5"}), 400
     try:
@@ -90,7 +91,7 @@ def get_task_status(task_id):
 def rollback():
     data = request.get_json(force=True, silent=True) or {}
     step = data.get("step")
-    actor = data.get("actor", "system")
+    actor = get_actor_name(data.get("actor"))
     if not isinstance(step, int) or step < 1 or step > 5:
         return jsonify({"error": "step 参数无效，需 1-5"}), 400
     return jsonify(ClosedLoop.rollback_step(step, actor))
@@ -100,7 +101,7 @@ def rollback():
 @require_permission("loop:reset")  # P0-9: 独立权限，仅 admin
 def reset():
     data = request.get_json(force=True, silent=True) or {}
-    actor = data.get("actor", "system")
+    actor = get_actor_name(data.get("actor"))
     return jsonify(ClosedLoop.reset(actor))
 
 

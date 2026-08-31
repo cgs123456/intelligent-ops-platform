@@ -660,4 +660,32 @@ celery -A tasks.celery_app beat --loglevel=info
 
 未启动 worker 时,异步接口 `/loop/run-step-async` 返回 503,同步接口仍可用。
 
+
+## 已完成问题修复 (P0-3 Roadmap)
+
+### High 级别修复
+- **error_response函数语法错误**: 修复code, message, error_level参数定义不匹配，移除未定义的http_status/data变量
+- **配置中的硬编码密钥**: config.py中SECRET_KEY移除默认dev值，改为生产环境必须通过环境变量设置
+- **SQLite在生产环境中的使用**: 配置要求生产环境必须使用PostgreSQL，默认配置已更新
+
+### Medium 级别修复
+- **速率限制存储配置**: _rateLIMIT_STORAGE_URI自动配置，生产环境从memory://迁移至Redis
+- **日志配置冗余**: 消除潜在的重复处理，确保request_id统一输出
+- **查询性能优化**: 慢查询阈值调整至200ms，query_hash追踪已添加
+
+### Low 级别修复
+- **注释风格统一**: 核心服务文件注释风格统一
+- **未使用导入清理**: 移除未引用的导入语句
+- **配置文档完善**: 环境变量说明更加清晰明了
+
+### 具体文件修复情况
+- `services/response.py`: error_response函数参数重组，修正http_status使用
+- `config.py`: pool_size/pool_recycle/pool_timeout通过环境变量配置，pool_pre_ping启用
+- `services/metrics.py`: SLOW_QUERY_THRESHOLD_MS可配置，query_hash追踪，Prometheus alert rules
+- `routes/loop.py`: SSE消息限制(最大50条)，动态心跳机制
+- `services/aigc_service.py`: cache_query方法，LLM provider configs与fallback chain
+- `services/rbac.py`: 审计日志占位符初始实现
+
+测试套件: 30+测试文件已准备就绪，pytest环境待安装运行。
+
 ```

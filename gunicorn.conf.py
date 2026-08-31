@@ -10,8 +10,12 @@ os.environ.setdefault("GUNICORN_SERVER", "1")
 
 bind = "0.0.0.0:5000"
 workers = int(os.getenv("GUNICORN_WORKERS", multiprocessing.cpu_count() * 2 + 1))
-worker_class = "sync"
-timeout = 120
+# P0-5: sync worker 下每个 SSE 连接 / 慢 LLM 调用独占一个 worker，几个并发请求即可
+# 耗尽全部 worker 使整站不可用；且 loop/stream 最长 120s 恰好撞上 timeout=120 被 master 强杀。
+# gthread 主线程负责心跳，worker 不会因长请求被杀，线程数可按 IO 并发放大。
+worker_class = "gthread"
+threads = int(os.getenv("GUNICORN_THREADS", "4"))
+timeout = int(os.getenv("GUNICORN_TIMEOUT", "120"))
 graceful_timeout = 30
 max_requests = 1000
 max_requests_jitter = 50
@@ -23,4 +27,7 @@ loglevel = os.getenv("GUNICORN_LOG_LEVEL", "info")
 # 仅非 Windows 配置：Windows 无 /dev/shm，留空使用系统默认临时目录。
 if os.name != "nt":
     worker_tmp_dir = "/dev/shm"
-preload_app = True  # 预加载应用，减少 worker 内存占用
+# P0-5: 关闭 preload_app。master 进程 import app 时会执行模块级 create_app()，
+# 建立 SQLAlchemy 连接池并访问数据库，fork 后多个 worker 共享同一批 TCP 连接，
+# 导致协议错乱/随机 500。改为各 worker 自行初始化（内存开销换取正确性）。
+preload_app = False

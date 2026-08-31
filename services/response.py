@@ -102,10 +102,10 @@ def success_response(data=None, message="success", code=ErrorCode.OK):
     return _build(code, message, data, 200)
 
 
-def error_response(code, message, http_status=None, data=None):
+def error_response(code, message=None, http_status=None, data=None):
     """错误响应 envelope
 
-    :param code: ErrorCode 常量
+    :param code: ErrorCode 常量或整数码
     :param message: 错误消息
     :param http_status: HTTP 状态码，默认从 HTTP_STATUS 映射
     :param data: 可选附加数据（如字段校验错误详情）

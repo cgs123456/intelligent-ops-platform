@@ -3,11 +3,11 @@ Flask-SQLAlchemy==3.1.1
 Flask-Caching==2.1.0
 Flask-Limiter==3.5.0
 Flask-Migrate==4.0.7
-Flask-Cors==4.0.0
+Flask-Cors==4.0.1  # P0-12 CVE 升级：4.0.0 存在 CVE-2024-6839/6844（CORS 日志头注入/通配符绕过）
 APScheduler==3.10.4
-Werkzeug==3.0.1
+Werkzeug==3.0.6  # P0-12 CVE 升级：3.0.1 存在 CVE-2024-34069（调试器 RCE）等，>=3.0.6 修复
 PyJWT==2.8.0
-gunicorn==21.2.0
+gunicorn==23.0.0  # P0-12 CVE 升级：21.2.0 存在 CVE-2024-1135（请求走私），>=22.0 修复
 psycopg2-binary==2.9.9
 python-dotenv==1.0.1
 prometheus-flask-exporter==0.23.1

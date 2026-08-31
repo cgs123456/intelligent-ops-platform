@@ -244,6 +244,66 @@ class RPAService:
     # 2. 最优报价查询
     # ====================================================================
 
+    def get_best_quotes(self, product_ids):
+        """批量查询多个产品的最优供应商报价（P2-3 ADS ETL 批量化配套）。
+
+        与 get_best_quote 相同的评分口径（价格 + 交期*权重），但把
+        N 产品 × (今日报价 + 兜底历史报价 + 逐条 Supplier 查询) 的 3N+ 条查询
+        收敛为 3 条（今日报价 IN / 历史兜底 IN / Supplier IN）。
+
+        :param product_ids: 产品 ID 列表
+        :return: {product_id: (quote, supplier)}，无报价的产品不在字典中
+        """
+        ids = [pid for pid in set(product_ids or []) if pid is not None]
+        if not ids:
+            return {}
+        today = date.today()
+        # 1. 今日报价（一次 IN 查询）
+        quotes_by_product: dict = {}
+        today_quotes = ExtSupplierQuote.query.filter(
+            ExtSupplierQuote.product_id.in_(ids), ExtSupplierQuote.quote_date == today
+        ).all()
+        for q in today_quotes:
+            quotes_by_product.setdefault(q.product_id, []).append(q)
+
+        # 2. 无今日报价的产品：一次取最近历史报价，Python 侧按产品取前 5 条
+        missing = [pid for pid in ids if not quotes_by_product.get(pid)]
+        if missing:
+            hist = (
+                ExtSupplierQuote.query.filter(ExtSupplierQuote.product_id.in_(missing))
+                .order_by(ExtSupplierQuote.product_id.asc(), ExtSupplierQuote.collected_at.desc())
+                .all()
+            )
+            counts: dict = {}
+            for q in hist:  # 查询已按 (product_id, collected_at desc) 排序
+                taken = counts.get(q.product_id, 0)
+                if taken >= 5:
+                    continue
+                quotes_by_product.setdefault(q.product_id, []).append(q)
+                counts[q.product_id] = taken + 1
+
+        # 3. 供应商一次性预取（替换逐条 db.session.get）
+        supplier_ids = {q.supplier_id for quotes in quotes_by_product.values() for q in quotes}
+        suppliers = {}
+        if supplier_ids:
+            suppliers = {s.id: s for s in Supplier.query.filter(Supplier.id.in_(supplier_ids)).all()}
+
+        best_map = {}
+        for pid, quotes in quotes_by_product.items():
+            best = None
+            best_score = float("inf")
+            for q in quotes:
+                sup = suppliers.get(q.supplier_id)
+                if not sup:
+                    continue
+                score = float(q.quote_price) + sup.lead_days * self.LEAD_TIME_WEIGHT
+                if score < best_score:
+                    best_score = score
+                    best = (q, sup)
+            if best:
+                best_map[pid] = best
+        return best_map
+
     def get_best_quote(self, product_id):
         """
         查询某产品的最优供应商报价（综合评分 = 价格 + 交期*权重）。

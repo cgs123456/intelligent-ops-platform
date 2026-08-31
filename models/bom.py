@@ -13,6 +13,8 @@
 
 from datetime import datetime
 
+from sqlalchemy import Index
+
 from extensions import db
 
 
@@ -23,6 +25,8 @@ class BOM(db.Model):
     """
 
     __tablename__ = "bom"
+    # P1-5: (product_id, version) 唯一 —— 防止同产品同版本重复建 BOM（与迁移 h9i0j1k2l3m4 对齐）
+    __table_args__ = (Index("ux_bom_product_version", "product_id", "version", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)  # 成品/半成品
     code = db.Column(db.String(32), unique=True, nullable=False, index=True)  # BOM 编码
@@ -42,6 +46,8 @@ class BOMItem(db.Model):
     """
 
     __tablename__ = "bom_item"
+    # P1-5: (bom_id, component_product_id) 唯一 —— 同一子件不可重复行
+    __table_args__ = (Index("ux_bom_item_bom_component", "bom_id", "component_product_id", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     bom_id = db.Column(db.Integer, db.ForeignKey("bom.id"), nullable=False, index=True)
     component_product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)

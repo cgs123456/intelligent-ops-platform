@@ -31,8 +31,16 @@ from sqlalchemy import func, text
 from extensions import cache, db
 from models.erp import Product, PurchaseOrder, SaleOrder, StockMove
 from models.warehouse import *  # noqa: F401,F403  ODS/DWD/DWS/ADS 模型及治理表
+from services.forecast import forecast_daily_demand
 
 logger = logging.getLogger(__name__)
+
+# P0/M3: ADS 缓存固定 key —— 带日期维度，跨请求/跨实例稳定一致
+_ADS_CACHE_PREFIX = "ads_data"
+
+
+def _ads_cache_key():
+    return f"{_ADS_CACHE_PREFIX}:{date.today().isoformat()}"
 
 
 class WarehouseService:
@@ -73,8 +81,14 @@ class WarehouseService:
 
     # ==================== 公共接口 ====================
 
-    def run_full_pipeline(self):
-        """全量 ETL：ODS → DWD → DWS → ADS，返回每层处理记录数"""
+    def run_full_pipeline(self, raise_on_error=False):
+        """全量 ETL：ODS → DWD → DWS → ADS，返回每层处理记录数
+
+        P0-13: raise_on_error=True 时失败异常向上抛（Celery 任务用）——
+        此前吞掉异常导致 Celery 永远显示任务成功、self.retry 重试机制从不触发、
+        失败告警也不发送，夜间 ETL 挂掉无人知晓，日报/异常检测基于旧数据。
+        HTTP 路由与闭环步骤保持默认 False（返回 results["error"] 的兼容行为）。
+        """
         results = {}
         try:
             results["ods"] = self._etl_ods()
@@ -84,8 +98,12 @@ class WarehouseService:
         except Exception as e:
             logger.exception("ETL pipeline failed: %s", e)
             results["error"] = str(e)
-        # 失效 ADS 缓存（无论成功失败，确保下次读取为最新）
-        self._invalidate_ads_cache()
+            # 失效 ADS 缓存（无论成功失败，确保下次读取为最新）
+            self._invalidate_ads_cache()
+            if raise_on_error:
+                raise
+        else:
+            self._invalidate_ads_cache()
         return results
 
     def run_data_quality_tests(self):
@@ -186,9 +204,31 @@ class WarehouseService:
         self._invalidate_ads_cache()
         return results
 
-    @cache.memoize(timeout=1800)
     def get_ads_data(self):
-        """获取 ADS 层数据供 AIGC 和前端使用（缓存 30 分钟）"""
+        """获取 ADS 层数据供 AIGC 和前端使用（缓存 30 分钟）
+
+        P0/M3 修复：原 @cache.memoize 用在实例方法上，memoize 的 key 包含 self，
+        而 WarehouseService 每次请求都新实例化 → key 每次不同 → 1800s 缓存从未命中，
+        /api/dashboard 与 /fde/ads 每次全量重查 ADS。改为显式固定 key（按日期维度），
+        失效与写入使用同一 key。
+        """
+        cache_key = _ads_cache_key()
+        try:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except Exception as e:  # pragma: no cover - 缓存不可用时直查 DB
+            logger.debug("ads cache get skipped: %s", e)
+
+        data = self._load_ads_data()
+
+        try:
+            cache.set(cache_key, data, timeout=1800)
+        except Exception as e:  # pragma: no cover
+            logger.debug("ads cache set skipped: %s", e)
+        return data
+
+    def _load_ads_data(self):
         today = date.today()
         suggest = self.session.query(AdsReplenishmentSuggest).filter_by(dt=today).all()
         report = self.session.query(AdsDailyOpsReport).filter_by(dt=today).first()
@@ -295,9 +335,18 @@ class WarehouseService:
             q = self.session.query(SaleOrder)
             if incremental and wm is not None:
                 q = q.filter(SaleOrder.created_at > wm)
-            existing_nos = {r[0] for r in self.session.query(OdsSaleOrder.order_no).all()}
+            rows = q.order_by(SaleOrder.created_at.asc()).all()
+            # P2-4: 去重下推 —— 原实现把 ODS 全表 order_no 载入内存 set（数据量线性膨胀）。
+            # order_no 在源表唯一，重复必然同单号：只按候选单号 IN 查询已存在的交集。
+            candidate_nos = [so.order_no for so in rows]
+            existing_nos = set()
+            if candidate_nos:
+                existing_nos = {
+                    r[0]
+                    for r in self.session.query(OdsSaleOrder.order_no).filter(OdsSaleOrder.order_no.in_(candidate_nos)).all()
+                }
             n, new_wm = 0, wm
-            for so in q.order_by(SaleOrder.created_at.asc()).all():
+            for so in rows:
                 if new_wm is None or so.created_at > new_wm:
                     new_wm = so.created_at
                 if so.order_no in existing_nos:
@@ -323,9 +372,19 @@ class WarehouseService:
             q = self.session.query(PurchaseOrder)
             if incremental and wm is not None:
                 q = q.filter(PurchaseOrder.created_at > wm)
-            existing_nos = {r[0] for r in self.session.query(OdsPurchaseOrder.order_no).all()}
+            rows = q.order_by(PurchaseOrder.created_at.asc()).all()
+            # P2-4: 同上，按候选单号 IN 下推去重
+            candidate_nos = [po.order_no for po in rows]
+            existing_nos = set()
+            if candidate_nos:
+                existing_nos = {
+                    r[0]
+                    for r in self.session.query(OdsPurchaseOrder.order_no)
+                    .filter(OdsPurchaseOrder.order_no.in_(candidate_nos))
+                    .all()
+                }
             n, new_wm = 0, wm
-            for po in q.order_by(PurchaseOrder.created_at.asc()).all():
+            for po in rows:
                 if new_wm is None or po.created_at > new_wm:
                     new_wm = po.created_at
                 if po.order_no in existing_nos:
@@ -351,18 +410,26 @@ class WarehouseService:
             q = self.session.query(StockMove)
             if incremental and wm is not None:
                 q = q.filter(StockMove.created_at > wm)
-            existing_keys = {
-                (r[0], r[1], r[2], r[3], r[4])
-                for r in self.session.query(
-                    OdsStockMove.ref_order,
-                    OdsStockMove.product_id,
-                    OdsStockMove.qty,
-                    OdsStockMove.move_type,
-                    OdsStockMove.dt,
-                ).all()
-            }
+            rows = q.order_by(StockMove.created_at.asc()).all()
+            # P2-4: 复合键含 dt（dt 有索引且重复必然同 dt），按候选日期 IN 下推，
+            # 只加载可能冲突的行，五元组比对仍在 Python 完成
+            candidate_dts = sorted({sm.created_at.date() for sm in rows})
+            existing_keys = set()
+            if candidate_dts:
+                existing_keys = {
+                    (r[0], r[1], r[2], r[3], r[4])
+                    for r in self.session.query(
+                        OdsStockMove.ref_order,
+                        OdsStockMove.product_id,
+                        OdsStockMove.qty,
+                        OdsStockMove.move_type,
+                        OdsStockMove.dt,
+                    )
+                    .filter(OdsStockMove.dt.in_(candidate_dts))
+                    .all()
+                }
             n, new_wm = 0, wm
-            for sm in q.order_by(StockMove.created_at.asc()).all():
+            for sm in rows:
                 if new_wm is None or sm.created_at > new_wm:
                     new_wm = sm.created_at
                 key = (sm.ref_order, sm.product_id, sm.qty, sm.move_type, sm.created_at.date())
@@ -554,9 +621,13 @@ class WarehouseService:
 
     def _etl_ads(self, target_date=None):
         """ADS 应用层：DWS → ADS。
-        补货建议 = 安全库存 + 日均销量*交期 - 当前库存 - 在途
+        补货建议 = 安全库存 + 预测日均需求*交期 - 当前库存 - 在途
         经营日报 = 近7日销售/采购/库存指标汇总。
         target_date 默认今天；backfill 时按指定日期生成。
+
+        P2-3: 每产品 3 次查询的 N+1（7日销量/在途/最优报价）收敛为 3 条批量查询。
+        P2-5: 日均需求从"近7日简单均值"升级为 forecast_daily_demand
+              （加权移动平均 + 阻尼趋势），平坦销量下与旧口径一致。
         """
         target_date = target_date or date.today()
         week_ago = target_date - timedelta(days=7)
@@ -573,50 +644,67 @@ class WarehouseService:
                 RPAService = None  # type: ignore[misc]
 
             products = self.session.query(Product).all()
+            product_ids = [p.id for p in products]
+
+            # ---- 批量预取（P2-3：替代每产品循环内查库）----
+            # 日销量序列（供预测内核 + recent_7d_sales 列）
+            window_days = int(self._flag("FDE_FORECAST_WINDOW_DAYS", 14))
+            series_start = target_date - timedelta(days=max(window_days, 7) - 1)
+            sales_rows = (
+                self.session.query(DwsSalesSkuDaily.product_id, DwsSalesSkuDaily.dt, DwsSalesSkuDaily.sale_qty)
+                .filter(
+                    DwsSalesSkuDaily.dt >= series_start,
+                    DwsSalesSkuDaily.dt <= target_date,
+                )
+                .all()
+            )
+            series_map: dict = {}
+            for pid, dt, qty in sales_rows:
+                series_map.setdefault(pid, []).append((dt, qty or 0))
+
+            # 在途采购量（已确认未到货）：一条 GROUP BY
+            transit_rows = (
+                self.session.query(PurchaseOrder.product_id, func.coalesce(func.sum(PurchaseOrder.qty), 0))
+                .filter(PurchaseOrder.status == "confirmed")
+                .group_by(PurchaseOrder.product_id)
+                .all()
+            )
+            transit_map = {r[0]: int(r[1] or 0) for r in transit_rows}
+
+            # 最优供应商报价：批量版（3 条查询替换 3N 条）
+            best_quote_map = {}
+            if RPAService is not None:
+                try:
+                    best_quote_map = RPAService(self.session).get_best_quotes(product_ids)
+                except Exception as e:
+                    logger.warning("RPA get_best_quotes failed: %s", e)
+
             rep_n = 0
             for p in products:
-                # 近7日销量
-                recent_sales = (
-                    self.session.query(func.coalesce(func.sum(DwsSalesSkuDaily.sale_qty), 0))
-                    .filter(
-                        DwsSalesSkuDaily.product_id == p.id,
-                        DwsSalesSkuDaily.dt >= week_ago,
-                        DwsSalesSkuDaily.dt <= target_date,
-                    )
-                    .scalar()
-                    or 0
+                # P2-5: 预测日均需求（加权移动平均 + 阻尼趋势）
+                fc = forecast_daily_demand(
+                    series_map.get(p.id, []),
+                    target_date=target_date,
+                    window_days=window_days,
                 )
+                forecast_daily = fc["forecast"]
+                recent_sales = fc["recent_7d_sales"]
+                avg_daily = recent_sales / 7.0 if recent_sales else 0.0
+                in_transit = transit_map.get(p.id, 0)
 
-                # 在途采购量（已确认未到货）
-                in_transit = (
-                    self.session.query(func.coalesce(func.sum(PurchaseOrder.qty), 0))
-                    .filter(
-                        PurchaseOrder.product_id == p.id,
-                        PurchaseOrder.status == "confirmed",
-                    )
-                    .scalar()
-                    or 0
-                )
-
-                avg_daily = float(recent_sales) / 7.0 if recent_sales else 0.0
-
-                # 最优供应商（决定交期与建议供应商）；RPAService.get_best_quote 为实例方法，需实例化调用
-                best = None
-                if RPAService is not None:
-                    try:
-                        best = RPAService(self.session).get_best_quote(p.id)
-                    except Exception as e:
-                        logger.warning("RPA get_best_quote failed for product %s: %s", p.id, e)
+                # 最优供应商（决定交期与建议供应商）
+                best = best_quote_map.get(p.id)
                 # P1-8: 防御性检查 best[1] 避免访问 None 或空值导致 TypeError
                 best_supplier = best[1] if best and len(best) > 1 and best[1] is not None else None
                 lead_days = best_supplier.lead_days if best_supplier else 5
-                suggested = max(0, int(p.safety_stock + avg_daily * lead_days - p.stock_qty - in_transit))
+                suggested = max(0, int(p.safety_stock + forecast_daily * lead_days - p.stock_qty - in_transit))
                 sup_id = best_supplier.id if best_supplier else None
                 sup_name = best_supplier.name if best_supplier else "无可用供应商"
 
                 reason = (
-                    f"近7日销量{recent_sales}件(日均{avg_daily:.1f})，当前库存{p.stock_qty}件，"
-                    f"在途{in_transit}件，安全库存{p.safety_stock}件，"
+                    f"预测日均需求{forecast_daily:.1f}件（{fc['method']}，置信度{fc['confidence']:.0%}，"
+                    f"趋势{fc['trend']:+.1f}），近7日销量{recent_sales}件(日均{avg_daily:.1f})，"
+                    f"当前库存{p.stock_qty}件，在途{in_transit}件，安全库存{p.safety_stock}件，"
                     f"交期{lead_days}天，建议补货{suggested}件。"
                 )
 
@@ -800,8 +888,12 @@ class WarehouseService:
         )
 
     def _invalidate_ads_cache(self):
-        """失效 get_ads_data 缓存"""
+        """失效 get_ads_data 缓存
+
+        P0/M3 修复：原 delete_memoized(WarehouseService.get_ads_data) 的 key 与
+        memoize 实际存储 key（含 self）不一致，失效从未命中。改用显式 key 删除。
+        """
         try:
-            cache.delete_memoized(WarehouseService.get_ads_data)
+            cache.delete(_ads_cache_key())
         except Exception as e:  # pragma: no cover - 缓存不可用时容错
             logger.debug("invalidate ads cache skipped: %s", e)

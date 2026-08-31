@@ -175,7 +175,7 @@ class TestMetrics:
         from services import metrics
 
         metrics._init_prometheus_metrics()
-        metrics.record_slow_query("test_table", "select", 150)
+        metrics.record_slow_query("test_table", "select", "hash", 150)
         # 不抛异常即通过
 
     def test_record_loop_step(self):
@@ -240,7 +240,7 @@ class TestMetrics:
         from services import metrics
 
         metrics._metrics.clear()
-        metrics.record_slow_query("t", "select", 100)
+        metrics.record_slow_query("t", "select", "hash", 100)
         metrics.record_loop_step(1, "ok", 1.0)
         metrics.record_suggestion_approval_rate(1, 2)
         metrics.record_etl_rows("ods", 1)
