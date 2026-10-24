@@ -84,11 +84,76 @@ jobs:
           pip install pip-audit
           pip-audit -r requirements.txt --strict --vulnerability-service osv
 
+  migrate:
+    # P0: 迁移链完整性验证——在空 PostgreSQL 上跑全量 flask db upgrade。
+    # SQLite 因跳过 PG 专属 DDL 无法覆盖此路径；此前迁移文件从未在 PG 上验证过。
+    name: Migration Chain (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ops
+          POSTGRES_PASSWORD: ops
+          POSTGRES_DB: ops_migrate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ops"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run full migration chain on empty database
+        env:
+          FLASK_ENV: production
+          DATABASE_URL: postgresql://ops:ops@localhost:5432/ops_migrate_test
+          # ProdConfig 必填项（只为通过启动校验，值无实际作用）
+          SECRET_KEY: ci-migration-check-secret-key-0123456789abcdef
+          FIELD_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          RATELIMIT_STORAGE_URI: redis://localhost:6379/1
+          CORS_ORIGINS: http://localhost
+        run: |
+          flask db upgrade
+      - name: Verify database is at head with expected objects
+        # 不用 `flask db check`：alembic autogenerate 不理解声明式分区，
+        # 会把 audit_log 月分区的子表误报为 remove_table 差异
+        env:
+          FLASK_ENV: production
+          DATABASE_URL: postgresql://ops:ops@localhost:5432/ops_migrate_test
+          SECRET_KEY: ci-migration-check-secret-key-0123456789abcdef
+          FIELD_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          RATELIMIT_STORAGE_URI: redis://localhost:6379/1
+          CORS_ORIGINS: http://localhost
+        run: |
+          flask db current | tee /tmp/db_current.txt
+          grep -q '(head)' /tmp/db_current.txt || { echo '数据库未到迁移链 head'; exit 1; }
+          TABLES=$(PGPASSWORD=ops psql -h localhost -U ops -d ops_migrate_test -t -A \
+            -c "select count(*) from information_schema.tables where table_schema='public'")
+          echo "public 表数量: $TABLES"
+          [ "$TABLES" -ge 50 ] || { echo '表数量异常，baseline 建表不完整'; exit 1; }
+          PGPASSWORD=ops psql -h localhost -U ops -d ops_migrate_test -t -A \
+            -c "select 1 from pg_tables where schemaname='public' and tablename='audit_log_default'" \
+            | grep -q 1 || { echo 'audit_log 分区缺失'; exit 1; }
+
   build:
     name: Docker Build & Scan
     runs-on: ubuntu-latest
     # P2-25: build 依赖 security，确保安全扫描通过后才构建镜像
-    needs: [lint, test, security]
+    # migrate 加入前置：迁移链在 PG 上跑不通的提交不允许构建镜像
+    needs: [lint, test, security, migrate]
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image

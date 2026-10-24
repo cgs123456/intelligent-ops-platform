@@ -37,6 +37,9 @@ class Config:
 
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+    # P2-5: JWT 独立签名密钥 —— 与 session/CSRF 用的 SECRET_KEY 隔离，
+    # 轮换 JWT 密钥不影响其他用途；未设置时回退 SECRET_KEY（向后兼容）
+    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or SECRET_KEY
     # P1-10: JWT 签名算法，默认 HS256（对称密钥）。
     # 生产环境应迁移到 RS256（非对称密钥）：设置 JWT_ALGORITHM=RS256，
     # 并配置 RSA 公私钥对（私钥签名，公钥验签），实现密钥轮换与安全分发。

@@ -11,7 +11,7 @@
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 

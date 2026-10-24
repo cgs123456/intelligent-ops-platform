@@ -999,12 +999,11 @@ class AIGCService:
         if s.status != "pending":
             raise ValueError(f"建议已处理（当前状态：{s.status})")
 
-        # P1-3: 数量修改逻辑
+        # P1-3/P0-3: 数量修改逻辑 —— 审核改量必须真正覆盖 suggested_qty（闭环 step3 按其下单）
         if action == "approved":
             if final_qty is not None:
-                if not isinstance(final_qty, int) or final_qty < 0:
-                    raise ValueError("final_qty 必须为非负整数")
-                final_qty = final_qty
+                if isinstance(final_qty, bool) or not isinstance(final_qty, int) or final_qty <= 0:
+                    raise ValueError("final_qty 必须为正整数（数量调整为 0 请直接 reject）")
             else:
                 final_qty = s.suggested_qty
         else:
@@ -1014,10 +1013,12 @@ class AIGCService:
             s.reviewed_at = datetime.now()
             s.review_note = note
             s.reviewed_by = reviewer
-            # P1-3: 若 final_qty 与 suggested_qty 不同，记到 review_note
+            # P1-3/P0-3: 若 final_qty 与 suggested_qty 不同，记到 review_note 并覆盖数量。
+            # 闭环下单（closed_loop step3）读取 suggested_qty，审核改量自此真正生效
             if action == "approved" and final_qty != s.suggested_qty:
                 extra = f"[数量调整 {s.suggested_qty}→{final_qty}] "
                 s.review_note = extra + (note or "")
+                s.suggested_qty = final_qty
             if auto_commit:
                 self.session.commit()
         except Exception as e:

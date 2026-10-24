@@ -21,6 +21,7 @@
 - 无任何配置时降级为仅记日志（dev 模式可接受）
 """
 
+import concurrent.futures
 import logging
 import os
 import threading
@@ -54,6 +55,9 @@ class Notifier:
         # P2-25: 告警聚合与抑制 —— 同一 (level, product_id) 在 suppress_window 内只发送一次
         self._alert_buffer = {}
         self.suppress_window = 300  # 默认 300 秒
+        # P2-2: 共享单 worker 发送池，替代每条告警新建一个线程
+        # （告警风暴时线程数 = 告警数；单 worker 还顺带串行化发送，避免 webhook 限流）
+        self._send_executor = None
 
     def _init_from_config(self):
         """延迟初始化（需要 app context 读取环境变量）
@@ -128,13 +132,14 @@ class Notifier:
         except RuntimeError:
             app_ref = None
 
-        # 异步发送，避免阻塞业务线程
-        thread = threading.Thread(
-            target=self._send_sync,
-            args=(title, message, level, context or {}, app_ref),
-            daemon=True,
+        # 异步发送，避免阻塞业务线程（P2-2: 共享发送池，不再每条告警起一个线程）
+        if self._send_executor is None:
+            self._send_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="alert-sender"
+            )
+        self._send_executor.submit(
+            self._send_sync, title, message, level, context or {}, app_ref
         )
-        thread.start()
 
     def _send_sync(self, title, message, level, context, app_ref=None):
         """同步发送到所有已配置渠道

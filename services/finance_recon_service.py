@@ -522,9 +522,33 @@ class ReconciliationService:
                     f"存在未匹配明细（系统侧 {unmatched_system} 条，外部侧 {unmatched_external} 条），" f"无法关闭批次"
                 )
 
-            # P1-16: 金额差异校验——存在金额差异时禁止关闭批次
-            if abs(self._to_decimal(batch.discrepancy_amount)) > Decimal("0.01"):
-                raise ValueError("批次存在金额差异，无法关闭")
+            # P0-4: 关账口径与 auto_match 对齐 —— 按匹配对逐条校验，精确（<0.01）或
+            # 税容差内（max(|系统金额|*tax_rate, 0.01)）的匹配允许关账。此前以汇总
+            # |discrepancy_amount|>0.01 一刀切：含税容差匹配的批次汇总差异永不为 0，
+            # 导致"匹配成功却永远无法关账"的自锁。discrepancy_amount 保留为参考指标。
+            bad_pairs = []
+            matched_system = (
+                self.db.query(ReconciliationEntry)
+                .filter_by(batch_id=batch_id, source="erp", matched=True)
+                .all()
+            )
+            for sys_e in matched_system:
+                if sys_e.matched_entry_id is None:
+                    continue
+                ext_e = self.db.get(ReconciliationEntry, sys_e.matched_entry_id)
+                if ext_e is None:
+                    continue
+                sys_amount = self._to_decimal(sys_e.amount)
+                diff = abs(sys_amount - self._to_decimal(ext_e.amount))
+                tax_rate = getattr(sys_e, "tax_rate", None)
+                tax_rate = self._to_decimal(tax_rate) if tax_rate is not None else Decimal("0.13")
+                tolerance = max(abs(sys_amount) * tax_rate, Decimal("0.01"))
+                if diff > tolerance:
+                    bad_pairs.append(f"{sys_e.reference_no or sys_e.id}(差异 {float(diff):.2f})")
+            if bad_pairs:
+                raise ValueError(
+                    f"存在超出税容差的匹配对 {len(bad_pairs)} 条（如 {bad_pairs[0]}），无法关闭"
+                )
 
             batch.status = "closed"
             batch.closed_at = datetime.now()

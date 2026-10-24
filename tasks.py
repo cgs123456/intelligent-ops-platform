@@ -244,31 +244,35 @@ def cleanup_token_blacklist_async(self):
 
 # ==================== 定时任务（Celery Beat）====================
 if celery_app is not None:
+    # P0-7: beat_schedule 只接受 int/float/timedelta/crontab 对象，裸 cron 字符串
+    # 会让 celery beat 启动即崩（AttributeError: 'str' object has no attribute 'app'）
+    from celery.schedules import crontab
+
     celery_app.conf.beat_schedule = {
         # 每天凌晨 02:00 执行 ETL 全量刷新
         "daily-etl-full": {
             "task": "tasks.run_etl_async",
-            "schedule": "0 2 * * *",
+            "schedule": crontab(minute=0, hour=2),
         },
         # 每天凌晨 02:30 生成经营日报（ETL 完成后）
         "daily-report": {
             "task": "tasks.generate_daily_report_async",
-            "schedule": "30 2 * * *",
+            "schedule": crontab(minute=30, hour=2),
         },
         # 每 30 分钟同步电商订单（与 RPA_SYNC_CRON 默认值对齐）
         "rpa-sync-every-30min": {
             "task": "tasks.run_rpa_scheduled_async",
-            "schedule": "*/30 * * * *",
+            "schedule": crontab(minute="*/30"),
         },
         # 改进9：每小时整点执行销售时序异常检测（09:00-22:00 业务时段）
         "hourly-anomaly-detect": {
             "task": "tasks.detect_anomalies_async",
-            "schedule": "0 9-22 * * *",
+            "schedule": crontab(minute=0, hour="9-22"),
         },
         # P1-10: 每天凌晨 03:00 清理过期的 Token 黑名单记录
         "daily-token-blacklist-cleanup": {
             "task": "tasks.cleanup_token_blacklist_async",
-            "schedule": "0 3 * * *",
+            "schedule": crontab(minute=0, hour=3),
         },
     }
     celery_app.conf.timezone = "Asia/Shanghai"

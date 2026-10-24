@@ -474,6 +474,23 @@ class TestReviewSuggestion:
             assert s.status == "approved"
             assert "数量调整 30→20" in (s.review_note or "")
 
+    def test_review_final_qty_overrides_suggested_qty(self, app, seed_pending_suggestion):
+        """P0-3: approve 改量必须真正覆盖 suggested_qty（闭环 step3 按该字段下单）"""
+        with app.app_context():
+            svc = AIGCService()
+            s = svc.review_suggestion(
+                seed_pending_suggestion, action="approve", final_qty=20, note="减量", reviewer="admin"
+            )
+            db.session.refresh(s)
+            assert s.suggested_qty == 20, "审核改量后 suggested_qty 必须被覆盖"
+
+    def test_review_approve_zero_final_qty_rejected(self, app, seed_pending_suggestion):
+        """approve 时 final_qty=0/负数必须拒绝（数量调整为 0 应直接 reject）"""
+        with app.app_context():
+            svc = AIGCService()
+            with pytest.raises(ValueError, match="正整数"):
+                svc.review_suggestion(seed_pending_suggestion, action="approve", final_qty=0, reviewer="admin")
+
     def test_review_reject(self, app, seed_pending_suggestion):
         """reject 后 status=rejected，final_qty=0"""
         with app.app_context():

@@ -538,23 +538,33 @@ class WarehouseService:
         logger.info("DWD ETL done: %s rows", total)
         return {"rows": total, "details": details}
 
+    def _upsert(self, model, rows):
+        """P2-4: 批量 upsert（PG/SQLite 的 on_conflict_do_update 语法一致，仅 import 路径不同）。
+
+        冲突键固定 (product_id, dt) —— DWS 两表的唯一键。替代原"delete 全量 + 逐行 add"：
+        无删除窗口、并发重跑不翻倍、增量重算只触碰目标日期。
+        """
+        if not rows:
+            return 0
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        ins_fn = pg_insert if self.session.get_bind().dialect.name == "postgresql" else sqlite_insert
+        stmt = ins_fn(model.__table__).values(rows)
+        update_cols = {c.key: getattr(stmt.excluded, c.key) for c in model.__table__.columns if c.key not in ("product_id", "dt")}
+        stmt = stmt.on_conflict_do_update(index_elements=["product_id", "dt"], set_=update_cols)
+        self.session.execute(stmt)
+        return len(rows)
+
     def _etl_dws(self, target_dates=None):
         """DWS 汇总层：DWD → DWS。
         target_dates 为 None 时全量重算；给定日期列表则只重算对应日期（用于 backfill）。
         注意：SQLite 原生 SQL 返回的 dt 可能是字符串，统一转为 date 对象。
+        P2-4: 改为 upsert —— 删除原"delete 全量/按日期 + 逐行 ORM add"路径。
         """
         details = {}
         try:
-            if target_dates is None:
-                # 全量重算：清空 DWS
-                self.session.query(DwsSalesSkuDaily).delete(synchronize_session=False)
-                self.session.query(DwsInventoryDaily).delete(synchronize_session=False)
-                date_filter = None
-            else:
-                for d in target_dates:
-                    self.session.query(DwsSalesSkuDaily).filter_by(dt=d).delete(synchronize_session=False)
-                    self.session.query(DwsInventoryDaily).filter_by(dt=d).delete(synchronize_session=False)
-                date_filter = set(target_dates)
+            date_filter = set(target_dates) if target_dates is not None else None
 
             # ---- SKU 日销售汇总（原生 SQL 聚合）----
             sales_sql = text("""
@@ -563,7 +573,7 @@ class WarehouseService:
                 FROM dwd_sales_order_di
                 GROUP BY product_id, product_name, dt
             """)
-            sales_n = 0
+            sales_rows = []
             for row in self.session.execute(sales_sql):
                 dt_val = row[2]
                 # SQLite 原生 SQL 返回 dt 可能为字符串，统一转 date
@@ -571,36 +581,29 @@ class WarehouseService:
                     dt_val = datetime.strptime(dt_val, "%Y-%m-%d").date()
                 if date_filter is not None and dt_val not in date_filter:
                     continue
-                self.session.add(
-                    DwsSalesSkuDaily(
-                        product_id=row[0],
-                        product_name=row[1],
-                        dt=dt_val,
-                        sale_qty=int(row[3] or 0),
-                        sale_amount=float(row[4] or 0),
-                    )
+                sales_rows.append(
+                    {
+                        "product_id": row[0],
+                        "product_name": row[1],
+                        "dt": dt_val,
+                        "sale_qty": int(row[3] or 0),
+                        "sale_amount": float(row[4] or 0),
+                    }
                 )
-                sales_n += 1
-            details["dws_sales_sku_daily"] = sales_n
+            details["dws_sales_sku_daily"] = self._upsert(DwsSalesSkuDaily, sales_rows)
 
             # ---- 库存日快照（用当前库存近似，真实场景按日结算）----
             if date_filter is not None:
                 snapshot_dates = date_filter
             else:
                 snapshot_dates = {date.today()}
-            inv_n = 0
+            inv_rows = []
             for d in snapshot_dates:
                 for p in self.session.query(Product).all():
-                    self.session.add(
-                        DwsInventoryDaily(
-                            product_id=p.id,
-                            product_name=p.name,
-                            dt=d,
-                            stock_qty=p.stock_qty,
-                        )
+                    inv_rows.append(
+                        {"product_id": p.id, "product_name": p.name, "dt": d, "stock_qty": p.stock_qty}
                     )
-                    inv_n += 1
-            details["dws_inventory_snapshot_daily"] = inv_n
+            details["dws_inventory_snapshot_daily"] = self._upsert(DwsInventoryDaily, inv_rows)
 
             self.session.commit()
         except Exception as e:

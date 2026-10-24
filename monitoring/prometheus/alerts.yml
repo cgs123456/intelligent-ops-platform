@@ -48,7 +48,7 @@ groups:
           runbook: "参考 docs/ops-runbook.md 1.2 节数据库连接耗尽排查"
 
       # ============== 3. 磁盘剩余空间不足 ==============
-      # 基于 node_exporter 的 node_filesystem 指标
+      # 基于 node_exporter 的 node_filesystem 指标（compose.monitoring node-exporter 已部署）
       # 剩余空间 < 10% 持续 1 分钟触发（critical）
       - alert: DiskSpaceLow
         expr: |
@@ -111,3 +111,19 @@ groups:
           summary: "Redis 实例宕机"
           description: "Redis 实例 {{ $labels.instance }} 已 down。缓存、限流、Celery 任务将立即受影响，请优先恢复。"
           runbook: "参考 docs/ops-runbook.md 1.3 节 Redis 连接失败排查"
+
+      # ============== 7. Celery 队列积压 ==============
+      # redis_exporter 配置 check-single-keys=db2=celery，暴露 redis_key_size{key="db2=celery"}
+      # （celery broker 位于 db2，列表名 celery）。队列长度 > 1000 持续 5 分钟触发。
+      # worker 全部停摆时任务无人消费、队列持续增长，本告警可间接反映 worker 故障
+      # （worker 容器崩溃由 compose restart: unless-stopped 自愈拉起）。
+      - alert: CeleryQueueBacklog
+        expr: redis_key_size{key="db2=celery"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: celery
+        annotations:
+          summary: "Celery 队列积压 ({{ $value }} 条待处理)"
+          description: "Celery 默认队列积压 {{ $value }} 条任务已持续 5 分钟。可能原因：worker 全部停止、长任务阻塞、突发流量。请检查 celery-worker 容器状态与 flower/日志。"
+          runbook: "参考 docs/ops-runbook.md 1.5 节异步任务堆积排查"

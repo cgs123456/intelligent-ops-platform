@@ -279,6 +279,148 @@ class TestAdsCache:
                 cache.delete(_ads_cache_key())
 
 
+# ==================== 8. 退货/调拨数量校验（P0-1）====================
+
+
+class TestReturnTransferQtyValidation:
+    def test_validate_positive_qty_rejects(self):
+        """_validate_positive_qty：0/负数/小数/字符串/bool/None 一律拒绝"""
+        from services.erp_service import ERPService
+
+        import pytest as _pytest
+
+        for qty in [0, -1, 2.5, "3", True, None]:
+            with _pytest.raises(ValueError):
+                ERPService._validate_positive_qty(qty)
+
+    def test_validate_positive_qty_accepts(self):
+        from services.erp_service import ERPService
+
+        ERPService._validate_positive_qty(1)
+        ERPService._validate_positive_qty(99999)
+
+    def test_negative_return_qty_rejected(self, app):
+        """P0-1: 负数退货数量必须拒绝（负 qty 会 stock_qty += 负数，凭空扣减库存）"""
+        with app.app_context():
+            from services.erp_service import ERPService
+
+            with pytest.raises(ValueError, match="正整数"):
+                ERPService().create_return_order("SO-NOT-EXIST", 1, qty=-3, refund_amount=30)
+
+    def test_nonpositive_return_refund_rejected(self, app):
+        """P0-1: 退款金额 0/负数/非数字必须拒绝（负红字凭证）"""
+        with app.app_context():
+            from services.erp_service import ERPService
+
+            for refund in [0, -5, "abc"]:
+                with pytest.raises(ValueError):
+                    ERPService().create_return_order("SO-NOT-EXIST", 1, qty=1, refund_amount=refund)
+
+    def test_negative_transfer_qty_rejected(self, app):
+        """P0-1: 负数调拨数量必须拒绝（负 qty 会同时凭空增减两个仓库库存）"""
+        with app.app_context():
+            from services.erp_service import ERPService
+
+            with pytest.raises(ValueError, match="正整数"):
+                ERPService().transfer_stock(999, qty=-2, from_warehouse_id=1, to_warehouse_id=2)
+
+
+# ==================== 9. MFA 禁用二次验证（P0 安全）====================
+
+
+class TestMfaDisableRequiresReauth:
+    """禁用 MFA 必须复核密码 + TOTP/备用码 —— 凭被盗 access token 不得直接拆除第二因素"""
+
+    PASSWORD = "{{SECRET_9n4xuwbu}}"
+
+    def _make_user(self, app):
+        import json
+        from uuid import uuid4
+
+        from extensions import db as _db
+        from models.system import Role, User
+        from services.password_policy import hash_password
+
+        role = Role(name=f"mfa-role-{uuid4().hex[:8]}", permissions=json.dumps(["*:*"]))
+        user = User(
+            username=f"mfa_user_{uuid4().hex[:8]}",
+            password_hash=hash_password(self.PASSWORD),
+            must_change_password=False,
+        )
+        user.roles.append(role)
+        _db.session.add(user)
+        _db.session.commit()
+        return user
+
+    def test_mfa_disable_full_flow(self, app, client, monkeypatch):
+        import pyotp
+
+        from extensions import db as _db
+        from models.system import User
+        from services.auth import AuthService
+
+        # 路由从 g.current_user（JWT sub）取身份：TESTING 模式下装饰器直接放行且不设置
+        # g.current_user，必须关掉 TESTING、开启 RBAC 才走真实 JWT 解码链路
+        monkeypatch.setitem(app.config, "TESTING", False)
+        monkeypatch.setitem(app.config, "RBAC_ENABLED", True)
+
+        with app.app_context():
+            user = self._make_user(app)
+            # 先在未启用 MFA 状态下登录拿 token（MFA 启用后 login 只返回 mfa_required）
+            login_result = AuthService.login(user.username, self.PASSWORD)
+            if isinstance(login_result, tuple):
+                login_result = login_result[0]
+            token = login_result["access_token"]
+            # 拿到 token 后再启用 MFA（模拟用户已开启 MFA 的常态）
+            secret = pyotp.random_base32()
+            user.mfa_secret = secret
+            user.mfa_enabled = True
+            _db.session.commit()
+            user_id = user.id
+            code = pyotp.TOTP(secret).now()
+
+        headers = {"Authorization": f"Bearer {token}"}
+        url = "/api/v1/auth/mfa/disable"
+
+        # 1) 缺密码 → 401
+        rv = client.post(url, json={"mfa_code": code}, headers=headers)
+        assert rv.status_code == 401, rv.get_data(as_text=True)
+        # 2) 密码错误 → 401
+        rv = client.post(url, json={"password": "WrongPass1", "mfa_code": code}, headers=headers)
+        assert rv.status_code == 401
+        # 3) 密码正确但验证码错误 → 401，MFA 仍启用
+        rv = client.post(url, json={"password": self.PASSWORD, "mfa_code": "000000"}, headers=headers)
+        assert rv.status_code == 401
+        # 4) 密码 + 有效 TOTP → 200，MFA 关闭且密钥清空
+        rv = client.post(url, json={"password": self.PASSWORD, "mfa_code": code}, headers=headers)
+        assert rv.status_code == 200
+        with app.app_context():
+            u = _db.session.get(User, user_id)
+            assert u.mfa_enabled is False
+            assert not u.mfa_secret
+
+    def test_mfa_disable_without_mfa_enabled_needs_only_password(self, app, client, monkeypatch):
+        """MFA 本就未启用的用户：密码复核即可禁用（幂等操作）"""
+        from services.auth import AuthService
+
+        monkeypatch.setitem(app.config, "TESTING", False)
+        monkeypatch.setitem(app.config, "RBAC_ENABLED", True)
+
+        with app.app_context():
+            user = self._make_user(app)
+            login_result = AuthService.login(user.username, self.PASSWORD)
+            if isinstance(login_result, tuple):
+                login_result = login_result[0]
+            token = login_result["access_token"]
+
+        rv = client.post(
+            "/api/v1/auth/mfa/disable",
+            json={"password": self.PASSWORD},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert rv.status_code == 200
+
+
 # ==================== 7. 静态资源指纹 ====================
 
 

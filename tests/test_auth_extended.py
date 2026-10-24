@@ -162,10 +162,10 @@ class TestAuthExtended:
                 assert result is None
                 assert "用户名或密码错误" in err
 
-            # 第 6 次应返回锁定消息（AuditLog fallback 计数到 5）
+            # 第 6 次应返回限流消息（P2-5: 与密码错误文案统一防枚举）
             result, err = AuthService.login("lockout_user", "WrongPass@1")
             assert result is None
-            assert "锁定" in err
+            assert "登录失败次数过多" in err
 
     # ==================== 6. must_change_password 字段 ====================
 

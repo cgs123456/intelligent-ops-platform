@@ -165,11 +165,13 @@ def batch_report(batch_id: int):
                 "discrepancy_amount": float(batch.discrepancy_amount or 0),
             }
 
-        # 未匹配明细
+        # 未匹配明细（P2-4: limit 上限防大结果集，默认 200）
+        limit = min(max(request.args.get("limit", 200, type=int), 1), 500)
         unmatched = (
             db.session.query(ReconciliationEntry)
             .filter_by(batch_id=batch_id, matched=False)
             .order_by(ReconciliationEntry.source, ReconciliationEntry.id)
+            .limit(limit)
             .all()
         )
         unmatched_list = [

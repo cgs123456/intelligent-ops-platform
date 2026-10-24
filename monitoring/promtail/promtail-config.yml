@@ -31,10 +31,15 @@ scrape_configs:
     docker_sd_configs:
       - host: unix:///var/run/docker.sock     # 通过宿主机 docker socket 发现容器
         refresh_interval: 15s                  # 每 15s 重新枚举容器
-        # 只采集有 ops 标签的容器（通过 docker-compose 标签过滤本项目容器）
+        # 只采集本项目容器（通过 docker-compose 标签过滤）。
+        # P2-6 修复：CD 部署目录为 /opt/ops-platform（compose project 名 ops-platform），
+        # 原来只写 intelligent-ops-platform 会导致生产日志零采集；两个 project 名都放行
+        # （仓库目录本地跑 compose 时 project 名为 intelligent-ops-platform）。
         filters:
           - name: label
-            values: ["com.docker.compose.project=intelligent-ops-platform"]
+            values:
+              - "com.docker.compose.project=ops-platform"
+              - "com.docker.compose.project=intelligent-ops-platform"
 
     # relabel_configs：在采集前对标签进行加工，提取可用维度
     relabel_configs:
@@ -73,9 +78,11 @@ scrape_configs:
           on_failure: skip
 
       # 3) 将 level 作为 Loki 标签（便于按 ERROR/WARN 过滤）
+      # P2-6 修复：request_id 不再作为标签——高基数标签会把流数量推向 loki
+      # max_streams（默认 4k-15k）上限触发 429 丢日志。request_id 保留在
+      # 日志行 JSON 里，查询时用 {job="..."} | json | request_id="..." 过滤。
       - labels:
           level:
-          request_id:
 
       # 4) 提取 message 作为输出内容（默认输出整行原内容）
       - output:

@@ -324,6 +324,78 @@ class TestReconciliationTotalsAndClose:
             assert batch.status == "closed"
             assert batch.closed_at is not None
 
+    def test_close_batch_tax_tolerance_match_succeeds(self, app):
+        """P0-4: 税容差内匹配（113 vs 100，diff 13 ≤ 113*13%=14.69）的批次必须能关账。
+
+        原实现以汇总 |discrepancy_amount|>0.01 一刀切，此类批次匹配成功却永远无法关闭（自锁）。
+        """
+        with app.app_context():
+            svc = ReconciliationService()
+            batch = svc.create_batch(period="2026-07")
+            svc.import_entries(
+                batch.id,
+                [
+                    {
+                        "source": "erp",
+                        "account_code": "应收账款",
+                        "entry_date": "2026-07-15",
+                        "amount": "113.00",
+                        "direction": "debit",
+                        "reference_no": "SO-TAX",
+                    },
+                    {
+                        "source": "bank",
+                        "account_code": "BANK-001",
+                        "entry_date": "2026-07-15",
+                        "amount": "100.00",
+                        "direction": "credit",
+                        "reference_no": "SO-TAX",
+                    },
+                ],
+            )
+            svc.auto_match(batch.id)
+            assert batch.status == "matched", "税容差内应被 auto_match 匹配"
+            ok = svc.close_batch(batch.id, closed_by="finance_manager")
+            assert ok is True
+            assert batch.status == "closed"
+
+    def test_close_batch_matched_pair_beyond_tolerance_fails(self, app):
+        """匹配对金额事后漂移超出税容差时必须拒绝关账（P0-4 新关账闸门）"""
+        with app.app_context():
+            svc = ReconciliationService()
+            batch = svc.create_batch(period="2026-07")
+            svc.import_entries(
+                batch.id,
+                [
+                    {
+                        "source": "erp",
+                        "account_code": "应收账款",
+                        "entry_date": "2026-07-15",
+                        "amount": "100.00",
+                        "direction": "debit",
+                        "reference_no": "SO-BAD",
+                    },
+                    {
+                        "source": "bank",
+                        "account_code": "BANK-001",
+                        "entry_date": "2026-07-15",
+                        "amount": "100.00",
+                        "direction": "credit",
+                        "reference_no": "SO-BAD",
+                    },
+                ],
+            )
+            svc.auto_match(batch.id)
+            assert batch.status == "matched"
+            # 模拟落库后系统侧金额被调整：匹配对差异 50 > max(150*13%, 0.01)=19.5
+            sys_entry = (
+                db.session.query(ReconciliationEntry).filter_by(batch_id=batch.id, source="erp").first()
+            )
+            sys_entry.amount = 150
+            db.session.commit()
+            with pytest.raises(ValueError, match="税容差"):
+                svc.close_batch(batch.id)
+
     def test_close_batch_already_closed_fails(self, app):
         """已关闭批次不可重复关闭"""
         with app.app_context():

@@ -215,3 +215,32 @@ networkPolicy:
   #       - protocol: TCP
   #         port: 6379   # Redis
   egress: []
+
+# ===================================================================
+# P2-7: Celery（异步任务 + 定时调度）
+# web Deployment 不跑任务；worker/beat 由以下配置独立部署
+# ===================================================================
+celery:
+  enabled: true
+  worker:
+    replicas: 2
+    concurrency: 2
+    # acks_late 下等待任务完成的时间上限
+    terminationGracePeriodSeconds: 90
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  beat:
+    enabled: true
+    # 单实例策略已在模板固化（Recreate），防双调度
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi

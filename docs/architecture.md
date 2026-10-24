@@ -137,7 +137,7 @@ flowchart TB
         ErpService[erp_service.py<br/>库存/财务]
         RpaService[rpa_service.py<br/>采集/同步]
         WhService[warehouse_service.py<br/>ETL 流水线]
-        ClosedLoop[closed_loop.py<br/>LangGraph 闭环]
+        ClosedLoop[closed_loop.py<br/>五步闭环编排]
         MultiAgent[multiagent.py<br/>多 Agent 博弈]
         DataAgent[data_agent.py<br/>Text2SQL sqlglot]
         Anomaly[anomaly_detector.py<br/>时序异常]
@@ -202,45 +202,41 @@ flowchart TB
 3. **同步模型足够**：核心场景是五步闭环状态机 + SSE 流式输出，Gunicorn 多 worker + 同步 worker_class 已能满足吞吐需求，无需 FastAPI 的异步复杂度
 4. **生态匹配**：Flask-Caching / Flask-Limiter / Flask-Migrate / Flask-Cors / flask-smorest 都是成熟稳定的扩展，覆盖缓存、限流、迁移、CORS、API 文档需求
 
-### 3.2 为什么用 LangGraph 做 Agent 编排
+### 3.2 五步闭环为什么用节点函数单步执行模式
 
-**问题背景**：五步闭环早期用硬编码 if-elif 状态机实现，存在以下痛点：
+**问题背景**：五步闭环曾引入 LangGraph StateGraph 做声明式编排（条件边、interrupt 人工审核、fan-out 并行），但实际运行模式是「API/定时任务按步串行驱动」：
 
-- 条件分支（无建议跳过审核、下单失败重试）散落在主流程中，难以维护
-- 人工审核等待节点无法优雅表达
-- step4（ERP 入库）与 step5（FDE 刷新）的并行执行需要手工线程管理
+- 人工审核（step2）本来就是跨请求等待，图引擎的 interrupt 暂停-恢复语义用不上，等待由 LoopState 落库表达
+- 每步独立加跨进程文件锁、独立超时与审计日志，图的自动并行调度反而绕过这些边界
+- `graph.invoke()` 一次性跑完五步的模式与「人工审核 + 外部逐步触发」的业务节奏冲突，图定义沦为永不执行的死代码，还引入 langgraph 硬依赖与降级双路径
 
-**LangGraph 方案**：
+**现行方案**：节点函数（`_node_step1` ~ `_node_step5`）+ `run_step(step_no)` 分发：
 
 ```mermaid
 flowchart TB
     step1[step1: AIGC 生成建议]
-    step2[step2: 人工审核<br/>interrupt 节点]
+    step2[step2: 人工审核<br/>LoopState 落库等待]
     step3[step3: RPA 下单]
-    fan_out[fan_out: 并行分发]
     step4[step4: ERP 记账入库]
     step5[step5: FDE 刷新 ADS]
-    end_node([END])
+    done([完成])
 
     step1 -->|有建议| step2
-    step1 -->|无建议| end_node
+    step1 -->|无建议| step5
     step2 -->|approve| step3
-    step2 -->|reject| end_node
+    step2 -->|reject| done
     step3 -->|失败重试| step3
-    step3 -->|成功| fan_out
-    fan_out --> step4
-    fan_out --> step5
-    step4 --> end_node
-    step5 --> end_node
+    step3 -->|继续| step4
+    step4 --> step5
+    step5 --> done
 ```
 
 **决策理由**：
 
-1. **声明式状态图**：用 `StateGraph` + `add_node` + `add_edge` 声明节点与边，条件分支用 `add_conditional_edges`，比 if-elif 更清晰
-2. **interrupt 原语**：`interrupt()` 原生支持人工审核暂停-恢复语义，无需手工轮询 LoopState
-3. **并行 fan-out**：`fan_out` 节点向 step4 + step5 同时建边，LangGraph 自动并行调度
-4. **优雅降级**：`langgraph` 未安装时 `interrupt = None`，代码降级到 if-elif 硬编码，保证零依赖可运行
-5. **可观测**：StateGraph 自带状态快照，便于调试与断点续跑
+1. **单步幂等**：每步由外部显式触发（API/定时任务），天然携带跨进程文件锁、超时与审计边界，重试语义清晰
+2. **人工审核零成本表达**：审核等待 = LoopState 状态落库 + SSE 轮询，无需图引擎暂停原语
+3. **无冗余依赖**：删除 langgraph 硬依赖与 if-elif 降级双路径，单一执行路径降低维护与测试成本
+4. **可观测**：LoopState 表即状态快照，/loop/status 随时可查每步详情
 
 ### 3.3 为什么用 sqlglot 替代 sqlparse
 

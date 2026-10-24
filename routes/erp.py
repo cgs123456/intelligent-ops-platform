@@ -102,30 +102,39 @@ def reorder_rules():
     支持查询参数：
         - product_id: 按产品过滤
         - is_active: 是否启用（true/false，默认 true）
+        - page / per_page: 分页（默认 1 / 50，per_page 上限 200）
     """
     from models.erp import ReorderRule
 
     product_id = request.args.get("product_id", type=int)
     is_active = request.args.get("is_active", "true").lower() == "true"
 
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+
     query = ReorderRule.query.filter_by(is_active=is_active) if is_active else ReorderRule.query
     if product_id:
         query = query.filter_by(product_id=product_id)
-    rules = query.all()
+    pag = query.order_by(ReorderRule.id).paginate(page=page, per_page=per_page, error_out=False)
     return jsonify(
-        [
-            {
-                "id": r.id,
-                "product_id": r.product_id,
-                "warehouse_id": r.warehouse_id,
-                "min_qty": r.min_qty,
-                "max_qty": r.max_qty,
-                "supplier_id": r.supplier_id,
-                "is_active": r.is_active,
-                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None,
-            }
-            for r in rules
-        ]
+        {
+            "items": [
+                {
+                    "id": r.id,
+                    "product_id": r.product_id,
+                    "warehouse_id": r.warehouse_id,
+                    "min_qty": r.min_qty,
+                    "max_qty": r.max_qty,
+                    "supplier_id": r.supplier_id,
+                    "is_active": r.is_active,
+                    "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None,
+                }
+                for r in pag.items
+            ],
+            "page": pag.page,
+            "per_page": pag.per_page,
+            "total": pag.total,
+        }
     )
 
 
@@ -149,6 +158,7 @@ def budgets():
         - cost_center_id: 按成本中心过滤
         - period: 按期间过滤（如 2026-07）
         - is_active: 是否启用（默认 true）
+        - page / per_page: 分页（默认 1 / 50，per_page 上限 200）
     """
     from models.erp import Budget
 
@@ -156,28 +166,36 @@ def budgets():
     period = request.args.get("period", type=str)
     is_active = request.args.get("is_active", "true").lower() == "true"
 
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+
     query = Budget.query.filter_by(is_active=is_active) if is_active else Budget.query
     if cost_center_id:
         query = query.filter_by(cost_center_id=cost_center_id)
     if period:
         query = query.filter_by(period=period)
-    rows = query.all()
+    pag = query.order_by(Budget.id).paginate(page=page, per_page=per_page, error_out=False)
     return jsonify(
-        [
-            {
-                "id": b.id,
-                "cost_center_id": b.cost_center_id,
-                "period": b.period,
-                "budget_amount": float(b.budget_amount or 0),
-                "actual_amount": float(b.actual_amount or 0),
-                # 使用率 = 实际 / 预算（防 0 除）
-                "usage_rate": float(b.actual_amount or 0) / float(b.budget_amount or 1),
-                "category": b.category,
-                "is_active": b.is_active,
-                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else None,
-            }
-            for b in rows
-        ]
+        {
+            "items": [
+                {
+                    "id": b.id,
+                    "cost_center_id": b.cost_center_id,
+                    "period": b.period,
+                    "budget_amount": float(b.budget_amount or 0),
+                    "actual_amount": float(b.actual_amount or 0),
+                    # 使用率 = 实际 / 预算（防 0 除）
+                    "usage_rate": float(b.actual_amount or 0) / float(b.budget_amount or 1),
+                    "category": b.category,
+                    "is_active": b.is_active,
+                    "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else None,
+                }
+                for b in pag.items
+            ],
+            "page": pag.page,
+            "per_page": pag.per_page,
+            "total": pag.total,
+        }
     )
 
 

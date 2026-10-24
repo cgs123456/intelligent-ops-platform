@@ -43,8 +43,8 @@ scrape_configs:
         replacement: ops-platform:5000
 
   # ============== 2. Redis 指标 ==============
-  # 使用 redis_exporter（需在 compose 中单独部署，此处预留抓取配置）
-  # 对应 alerts.yml: RedisDown
+  # 使用 redis_exporter（compose.monitoring 已部署，check-single-keys 额外暴露 celery 队列长度）
+  # 对应 alerts.yml: RedisDown / CeleryQueueBacklog
   - job_name: 'redis'
     static_configs:
       - targets: ['redis-exporter:9121']
@@ -52,7 +52,7 @@ scrape_configs:
           service: redis
 
   # ============== 3. PostgreSQL 指标 ==============
-  # 使用 postgres_exporter（需在 compose 中单独部署，此处预留抓取配置）
+  # postgres_exporter（compose.monitoring 已部署 postgres-exporter:9187）
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
@@ -60,7 +60,7 @@ scrape_configs:
           service: postgres
 
   # ============== 4. 节点指标（磁盘空间等） ==============
-  # 使用 node_exporter（需在 compose 中单独部署或宿主机运行）
+  # node_exporter（compose.monitoring 已部署 node-exporter:9100，挂载宿主机 /proc /sys /）
   # 对应 alerts.yml: DiskSpaceLow
   - job_name: 'node'
     static_configs:

@@ -45,28 +45,30 @@ route:
       continue: false
 
 # --------------------------------------------------------------------
-# 接收器（P1-1: 通过环境变量注入真实 webhook URL，未配置则用占位 + 启动告警）
-# 生产环境部署前必须设置以下环境变量（在 docker-compose 中通过 environment 注入）：
+# 接收器（P1-1: 通过环境变量注入真实 webhook URL）
+# 本文件同时是渲染模板（.template）：
+#   - 占位符统一为 ${VAR} 纯形式（无默认值后缀）
+#   - 默认值在 alertmanager-entrypoint.sh 中以 POSIX 参数展开注入；
+#     原先的 ${VAR:default} 写法 envsubst 不识别，任何情况下都不会被替换
+# 生产环境部署前可设置（在 docker-compose 中通过 environment 注入）：
 #   ALERTMANAGER_CRITICAL_WEBHOOK  critical 告警通知 URL（钉钉/企业微信/邮件网关）
 #   ALERTMANAGER_WARNING_WEBHOOK   warning 告警通知 URL
 #   ALERTMANAGER_DEFAULT_WEBHOOK   兜底通知 URL
-# Alertmanager 原生不支持环境变量插值，需在部署时用 envsubst 渲染，或直接编辑本文件。
 # --------------------------------------------------------------------
 receivers:
   - name: 'default-webhook'
     webhook_configs:
-      # 生产环境：通过 ALERTMANAGER_DEFAULT_WEBHOOK 环境变量注入真实 URL
       # 钉钉: https://oapi.dingtalk.com/robot/send?access_token=XXX
       # 企业微信: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=XXX
-      # 未配置时指向本地 5001 端口的告警转发服务（需另部署）
-      - url: '${ALERTMANAGER_DEFAULT_WEBHOOK:http://127.0.0.1:5001/alertmanager/default}'
+      # 未配置时 entrypoint 渲染为本地 5001 端口的告警转发服务（需另部署）
+      - url: '${ALERTMANAGER_DEFAULT_WEBHOOK}'
         send_resolved: true
 
   - name: 'critical-webhook'
     webhook_configs:
       # P1-1: critical 告警必须配置真实多渠道通知（电话+短信+邮件+IM）
       # 通过 ALERTMANAGER_CRITICAL_WEBHOOK 环境变量注入（部署时用 alertmanager-entrypoint.sh 渲染）
-      - url: '${ALERTMANAGER_CRITICAL_WEBHOOK:http://127.0.0.1:5001/alertmanager/critical}'
+      - url: '${ALERTMANAGER_CRITICAL_WEBHOOK}'
         send_resolved: true
     # 生产环境邮件接收器（取消注释并配置 SMTP 后启用，配合上方 global.smtp_* 配置）
     # email_configs:
@@ -76,7 +78,7 @@ receivers:
 
   - name: 'warning-webhook'
     webhook_configs:
-      - url: '${ALERTMANAGER_WARNING_WEBHOOK:http://127.0.0.1:5001/alertmanager/warning}'
+      - url: '${ALERTMANAGER_WARNING_WEBHOOK}'
         send_resolved: true
 
 # --------------------------------------------------------------------

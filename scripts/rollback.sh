@@ -53,18 +53,26 @@ docker pull "$FULL_IMAGE" || {
     exit 1
 }
 
-# 更新 docker-compose tag
-export IMAGE_TAG="$ROLLBACK_TAG"
+# 更新 .env 中的 IMAGE_TAG（与 CD 部署同一数据源：
+# web/celery-worker/celery-beat 统一读取，保证回滚后下一轮部署/重启版本一致）
+grep -v '^IMAGE_TAG=' .env > .env.tmp || true
+echo "IMAGE_TAG=${FULL_IMAGE}" >> .env.tmp
+mv .env.tmp .env
+
 echo "回滚部署..."
-docker-compose -f "$COMPOSE_FILE" up -d --no-deps
+# 只重建应用容器（--no-deps 不指定服务列表时会波及 db/redis/nginx 等，
+# 导致数据库也被重启；显式列出与 CD 部署相同的服务集合）
+docker-compose -f "$COMPOSE_FILE" up -d --no-deps web celery-worker celery-beat
 
 # 健康检查
 echo "等待服务就绪..."
 for i in $(seq 1 $MAX_RETRIES); do
     if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
         echo "✓ 健康检查通过 (attempt $i/$MAX_RETRIES)"
-        # 重载 nginx
-        docker exec ops_nginx nginx -s reload 2>/dev/null || echo "WARN: nginx reload 跳过（容器可能未运行）"
+        # 重载 nginx（compose 服务名为 nginx；ops_nginx 为历史容器名，双兜底）
+        docker exec nginx nginx -s reload 2>/dev/null \
+            || docker exec ops_nginx nginx -s reload 2>/dev/null \
+            || echo "WARN: nginx reload 跳过（容器可能未运行）"
         echo "=========================================="
         echo "  ✓ 回滚成功: $ROLLBACK_TAG"
         echo "=========================================="

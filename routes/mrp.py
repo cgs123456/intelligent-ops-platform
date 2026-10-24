@@ -32,11 +32,18 @@ def create_bom():
 @bp.route("/boms", methods=["GET"])
 @require_permission("mrp:read")
 def list_boms():
-    """查询 BOM 列表"""
+    """查询 BOM 列表（P2-4: 分页，默认 1/50，per_page 上限 200）
+
+    与 /api/v1/erp/reorder-rules 分页结构一致：{items, page, per_page, total}
+    """
     from models.bom import BOM
     from models.erp import Product
 
-    boms = BOM.query.all()
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+
+    pag = BOM.query.order_by(BOM.id).paginate(page=page, per_page=per_page, error_out=False)
+    boms = pag.items
     # 批量预取产品，避免 N+1
     product_ids = {b.product_id for b in boms}
     product_map = {}
@@ -44,7 +51,7 @@ def list_boms():
         product_map = {p.id: p for p in Product.query.filter(Product.id.in_(product_ids)).all()}
     return jsonify(
         {
-            "data": [
+            "items": [
                 {
                     "id": b.id,
                     "code": b.code,
@@ -59,7 +66,10 @@ def list_boms():
                     "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else None,
                 }
                 for b in boms
-            ]
+            ],
+            "page": page,
+            "per_page": per_page,
+            "total": pag.total,
         }
     )
 

@@ -1,0 +1,23 @@
+# Grafana 数据源自动供给（P2-6 断点④修复）
+# Prometheus 与 Loki 均为 compose.monitoring 内网服务名直连
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus     # dashboard JSON 以此 uid 引用，改名不断链
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s   # 与 prometheus.yml global scrape_interval 对齐
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000     # 单次查询返回行数上限，防浏览器拉爆

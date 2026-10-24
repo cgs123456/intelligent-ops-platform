@@ -203,12 +203,18 @@ class DataAgent:
         sql = re.sub(r"\s*```$", "", sql)
         sql = sql.strip().strip("`").rstrip(";").strip()
 
-        # 1. 解析（parse_one 天然保证单语句，多语句抛 ParseError）
+        # 1. 解析 + 显式单语句校验
+        # P0: sqlglot>=23 的 parse_one 对多语句静默取第一条、不抛错，"天然保证单语句"
+        # 的假设不成立（requirements 允许 23~26，行为随版本漂移），必须显式拒绝多语句
         try:
-            expression = sqlglot.parse_one(sql, dialect="sqlite")
+            statements = sqlglot.parse(sql, dialect="sqlite")
         except Exception as e:
             logger.warning("[DataAgent] SQL 解析失败: %s", e)
             return None
+        if not statements or len(statements) > 1:
+            logger.warning("[DataAgent] SQL 校验失败：仅允许单条 SELECT 语句")
+            return None
+        expression = statements[0]
 
         # 2. 根节点类型校验：必须是 SELECT / Union（WITH 子句的 SELECT 也返回 exp.Select）
         if not isinstance(expression, (exp.Select, exp.Union)):
@@ -286,15 +292,44 @@ class DataAgent:
         """执行 SELECT SQL，返回 (result_list, rows_count)。
 
         - 使用 SQLAlchemy session.execute(text(sql)) 真执行
-        - 仅 SELECT，只读事务（不 commit）
+        - P2-3: 只读事务 —— sqlglot AST 校验只拦关键字，函数旁路（如 pg_read_file、
+          set_config 改写 search_path）挡不住；只读事务让写操作在 DB 层直接报错。
+          PG：先 commit 掉 pending 写入使 SET TRANSACTION 成为事务首语句；
+          SQLite：连接级 PRAGMA query_only。
+        - 语句超时由 config 的 PG statement_timeout=5000（engine 级）兜底
         - 结果转 dict 列表，最多 MAX_ROWS 行
         - 异常返回 (None, 0)
         """
         try:
             from sqlalchemy import text
 
-            result = self.session.execute(text(sql))
-            rows = result.fetchmany(self.MAX_ROWS)
+            bind = self.session.get_bind()
+            if bind.dialect.name == "postgresql":
+                self.session.commit()  # 清空 pending 写入，保证 SET TRANSACTION 是事务首语句
+                self.session.execute(text("SET TRANSACTION READ ONLY"))
+                result = self.session.execute(text(sql))
+                rows = result.fetchmany(self.MAX_ROWS)
+                self.session.rollback()
+            else:
+                # SQLite：PRAGMA query_only 是连接级，必须打在 session 事务绑定的
+                # 同一 DBAPI 连接上（raw_connection() 另取池连接，会打错对象）
+                fairy = self.session.connection().connection  # 池代理连接，自带 cursor()
+
+                def _pragma(stmt):
+                    cur = fairy.cursor()
+                    try:
+                        cur.execute(stmt)
+                    finally:
+                        cur.close()
+
+                _pragma("PRAGMA query_only = ON")
+                try:
+                    result = self.session.execute(text(sql))
+                    rows = result.fetchmany(self.MAX_ROWS)
+                finally:
+                    # 先恢复连接属性再回滚：rollback 会把连接归还池，迟了会污染池里后续写入
+                    _pragma("PRAGMA query_only = OFF")
+                    self.session.rollback()
             if not rows:
                 return [], 0
             # 取列名

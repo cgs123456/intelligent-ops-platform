@@ -94,6 +94,8 @@ class ERPService:
         非正数单价会污染移动加权平均成本核算。qty 列为 Integer，这里拒绝小数与字符串数字
         以外的输入；unit_price 允许 int/float/str/Decimal，但必须 > 0。
         """
+        if isinstance(qty, bool):  # bool 是 int 子类，int(True)==1 会绕过数值校验
+            raise ValueError(f"数量必须为正整数: {qty!r}")
         try:
             qty_val = int(qty)
         except (TypeError, ValueError):
@@ -106,6 +108,16 @@ class ERPService:
             raise ValueError(f"单价必须为数字: {unit_price!r}")
         if price_val <= 0:
             raise ValueError(f"单价必须大于 0: {unit_price!r}")
+
+    @staticmethod
+    def _validate_positive_qty(qty):
+        """P0-1/P0-2: 退货/调拨数量校验 —— 必须为正整数。
+
+        负数退货会反向搬运库存（stock_qty += 负数）并生成负红字凭证；
+        负数调拨负负得正凭空入库；0 只产生无效流水。bool 视为非法输入。
+        """
+        if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
+            raise ValueError(f"数量必须为正整数: {qty!r}")
 
     def create_purchase_order(
         self,
@@ -595,6 +607,14 @@ class ERPService:
         - ReturnOrder 记录
         """
         try:
+            # P0-1: 拒绝非正数数量/金额 —— 负数退货会反向搬运库存并生成负红字凭证
+            self._validate_positive_qty(qty)
+            try:
+                refund_val = self._to_decimal(refund_amount)
+            except Exception:
+                raise ValueError(f"退款金额必须为数字: {refund_amount!r}")
+            if refund_val <= 0:
+                raise ValueError(f"退款金额必须大于 0: {refund_amount!r}")
             # P1-7: 校验原销售单存在 + product_id 一致 + 退货数量不超过原销量（扣减已退量）
             sale_order = self.db.query(SaleOrder).filter_by(order_no=original_order_no).first()
             if not sale_order:
@@ -746,9 +766,13 @@ class ERPService:
             if from_warehouse_id == to_warehouse_id:
                 raise ValueError("源仓库与目标仓库相同")
 
+            # P0-2: 拒绝非正数数量 —— 负数调拨负负得正凭空入库，0 产生两条无效流水
+            self._validate_positive_qty(qty)
+
             # P1-5: 加行锁 SELECT FOR UPDATE，防止并发调拨导致超卖
             # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
-            self.db.query(Product).filter_by(id=product_id).with_for_update().first()
+            if not self.db.query(Product).filter_by(id=product_id).with_for_update().first():
+                raise ValueError(f"产品不存在: {product_id}")
 
             # P1-10: 校验源仓库库存 —— 聚合源仓库 StockMove.qty 求和，校验 >= qty
             source_stock = (

@@ -1,7 +1,6 @@
 """闭环编排器
 五步闭环：AIGC建议 → 人审核 → RPA下单 → ERP记账 → FDE刷新
 支持：跨进程文件锁、超时处理、回滚机制、自动触发、SSE进度
-基于 LangGraph StateGraph 编排（不可用时降级为 if-elif 硬编码）
 """
 
 import json
@@ -31,20 +30,6 @@ try:
     _HAS_MSVCRT = True
 except ImportError:
     _HAS_MSVCRT = False
-
-# LangGraph 可选依赖（不可用时降级为 if-elif 硬编码状态机）
-try:
-    from langgraph.graph import END, StateGraph
-    from langgraph.types import Command, interrupt
-
-    _HAS_LANGGRAPH = True
-except ImportError:
-    _HAS_LANGGRAPH = False
-    END = None
-    StateGraph = None
-    Command = None
-    interrupt = None
-
 
 def _file_lock(run_id, step):
     """跨进程文件锁（兼容 gunicorn 多 worker）。
@@ -204,53 +189,49 @@ def with_timeout(seconds):
     return decorator
 
 
-# ==================== LangGraph 状态 Schema ====================
+# ==================== 闭环状态 Schema ====================
 
-if _HAS_LANGGRAPH:
+class ClosedLoopState(TypedDict, total=False):
+    """闭环单步执行的状态 schema（节点函数间传递）
 
-    class ClosedLoopState(TypedDict, total=False):
-        """LangGraph 闭环状态 schema
+    字段说明：
+    - run_id: 闭环运行轮次 ID
+    - current_step: 当前执行步骤号 (1-5)
+    - steps_status: 各步骤状态 {step_no: "pending"/"running"/"done"/"failed"}
+    - suggestions: 补货建议列表（step1 产出）
+    - orders: 采购单列表（step3 产出）
+    - errors: 错误信息列表
+    - actor: 操作人
+    - detail: 当前步骤详情
+    - retry_count: step3 重试次数
+    - need_manual: step2 是否需要人工审核
+    """
 
-        字段说明：
-        - run_id: 闭环运行轮次 ID
-        - current_step: 当前执行步骤号 (1-5)
-        - steps_status: 各步骤状态 {step_no: "pending"/"running"/"done"/"failed"}
-        - suggestions: 补货建议列表（step1 产出）
-        - orders: 采购单列表（step3 产出）
-        - errors: 错误信息列表
-        - actor: 操作人
-        - detail: 当前步骤详情
-        - retry_count: step3 重试次数
-        - need_manual: step2 是否需要人工审核
-        """
+    run_id: int
+    current_step: int
+    steps_status: dict
+    suggestions: list
+    orders: list
+    errors: list
+    actor: str
+    detail: str
+    retry_count: int
+    need_manual: bool
 
-        run_id: int
-        current_step: int
-        steps_status: dict
-        suggestions: list
-        orders: list
-        errors: list
-        actor: str
-        detail: str
-        retry_count: int
-        need_manual: bool
-
-else:
-    # langgraph 不可用时占位
-    ClosedLoopState = None  # type: ignore[misc]
 
 
 class ClosedLoop:
-    """五步闭环状态机（LangGraph StateGraph 编排）
+    """五步闭环状态机（节点函数单步执行模式）
 
-    编排流程：
-        step1(AIGC建议) --无建议--> step5(FDE刷新) --> END
-                         --有建议--> step2(人工审核, interrupt)
+    编排流程（步骤推进由外部调用方通过 run_step(step_no) 串行驱动）：
+        step1(AIGC建议) --无建议--> step5(FDE刷新) --> 完成
+                         --有建议--> step2(人工审核)
         step2 --> step3(RPA下单)
         step3 --失败重试--> step3
-             --继续--> step4(ERP入库) + step5(FDE刷新) 并行 --> END
+             --继续--> step4(ERP入库)、step5(FDE刷新)
 
-    LangGraph 不可用时降级为原有 if-elif 硬编码逻辑。
+    各节点函数（_node_step1 ~ _node_step5）自行处理跨进程锁、LoopState、
+    超时、审计日志与告警通知。
     """
 
     STEPS = [
@@ -260,10 +241,6 @@ class ClosedLoop:
         (4, "ERP记账入库", "ERP"),
         (5, "FDE刷新指标", "FDE"),
     ]
-
-    # 懒加载的 LangGraph 编译图
-    _graph = None
-    _graph_lock = threading.Lock()
 
     @staticmethod
     def _services():
@@ -284,97 +261,13 @@ class ClosedLoop:
         except Exception:
             return 60
 
-    # ==================== LangGraph 图定义 ====================
-
-    @staticmethod
-    def _get_graph():
-        """懒加载编译好的 LangGraph StateGraph（线程安全双重检查锁定）"""
-        if not _HAS_LANGGRAPH:
-            return None
-        if ClosedLoop._graph is None:
-            with ClosedLoop._graph_lock:
-                if ClosedLoop._graph is None:
-                    ClosedLoop._graph = ClosedLoop._build_graph()
-        return ClosedLoop._graph
-
-    # P0-fix 注意：本方法构建的 LangGraph 图当前未被 graph.invoke() 调用。
-    # 实际执行路径为 _run_step_via_graph() 中的 getattr 直接调用节点函数。
-    # 图的条件路由（_route_after_step1/step3）和并行执行（fan_out）暂未生效。
-    # 保留代码供未来启用完整图编排，但当前应视为未使用的死代码。
-    # 如需启用，需在 run_step 中改为 graph.invoke({"step_no": step_no, ...})。
-    @staticmethod
-    def _build_graph():
-        """构建五步闭环 StateGraph
-
-        当前未在运行时调用，保留用于未来完整编排模式（一次性 graph.invoke() 走完 5 步）。
-        运行时单步执行由 _run_step_via_graph 直接调用节点函数实现。
-
-        节点：step1 ~ step5 对应 5 个步骤，fan_out 为并行分发节点
-        边：
-        - step1 → 条件分支（无补货建议跳到 step5，否则 step2 人工审核）
-        - step2 → step3（人工审核 interrupt 完成后继续）
-        - step3 → 条件分支（下单失败重试 step3，否则到 fan_out）
-        - fan_out → step4 + step5（并行执行 ERP入库 和 FDE刷新）
-        - step4, step5 → END（并行汇聚）
-        """
-        if not _HAS_LANGGRAPH:
-            return None
-
-        graph = StateGraph(ClosedLoopState)
-
-        # 注册 5 个步骤节点 + 1 个并行分发节点
-        graph.add_node("step1", ClosedLoop._node_step1)
-        graph.add_node("step2", ClosedLoop._node_step2)
-        graph.add_node("step3", ClosedLoop._node_step3)
-        graph.add_node("step4", ClosedLoop._node_step4)
-        graph.add_node("step5", ClosedLoop._node_step5)
-        graph.add_node("fan_out", ClosedLoop._node_fan_out)
-
-        # 入口：step1
-        graph.set_entry_point("step1")
-
-        # step1 → 条件路由：无补货建议则跳过 step2/3 直接到 step5
-        graph.add_conditional_edges(
-            "step1",
-            ClosedLoop._route_after_step1,
-            {"review": "step2", "skip": "step5"},
-        )
-
-        # step2 → step3（人工审核完成后继续下单）
-        graph.add_edge("step2", "step3")
-
-        # step3 → 条件路由：下单失败重试（最多 2 次），否则到 fan_out 并行执行
-        graph.add_conditional_edges(
-            "step3",
-            ClosedLoop._route_after_step3,
-            {"retry": "step3", "continue": "fan_out"},
-        )
-
-        # fan_out → step4 + step5（并行执行 ERP入库 和 FDE刷新）
-        graph.add_edge("fan_out", "step4")
-        graph.add_edge("fan_out", "step5")
-
-        # step4, step5 → END（并行汇聚）
-        graph.add_edge("step4", END)
-        graph.add_edge("step5", END)
-
-        return graph.compile()
-
-    @staticmethod
-    def _node_fan_out(state):
-        """并行分发节点：触发 step4（ERP入库）和 step5（FDE刷新）并行执行
-
-        该节点本身不执行业务逻辑，仅作为 fan-out 分发点。
-        """
-        return state
-
     # ==================== 条件路由函数 ====================
 
     @staticmethod
     def _route_after_step1(state):
         """step1 后路由：无补货建议则跳过 step2/3 直接到 step5
 
-        :param state: LangGraph 状态
+        :param state: 闭环状态
         :return: "review"（有建议→人工审核）或 "skip"（无建议→直接刷新指标）
         """
         suggestions = state.get("suggestions", [])
@@ -388,7 +281,7 @@ class ClosedLoop:
     def _route_after_step3(state):
         """step3 后路由：下单失败可重试（最多 2 次），否则并行执行 step4 + step5
 
-        :param state: LangGraph 状态
+        :param state: 闭环状态
         :return: "retry"（重试下单）或 "continue"（并行入库 + 刷新）
         """
         errors = state.get("errors", [])
@@ -398,11 +291,11 @@ class ClosedLoop:
             return "retry"
         return "continue"
 
-    # ==================== LangGraph 节点函数 ====================
+    # ==================== 节点函数 ====================
 
     @staticmethod
     def _prepare_state(step_no, actor):
-        """准备 LangGraph 状态（从 DB 读取已有步骤状态）
+        """准备 闭环状态（从 DB 读取已有步骤状态）
 
         :param step_no: 要执行的步骤号
         :param actor: 操作人
@@ -438,11 +331,11 @@ class ClosedLoop:
     def _execute_node(state, step_no, step_name, step_func):
         """通用图节点执行器：处理跨进程锁、LoopState 记录、超时、审计日志、告警
 
-        :param state: LangGraph 状态
+        :param state: 闭环状态
         :param step_no: 步骤号
         :param step_name: 步骤名称
         :param step_func: 步骤执行函数 (actor) -> detail_str
-        :return: API 响应 dict（同时包含状态更新字段供 LangGraph 使用）
+        :return: API 响应 dict（同时包含状态更新字段供 状态更新使用）
         """
         run_id = state["run_id"]
         actor = state["actor"]
@@ -569,7 +462,7 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step1(state):
-        """LangGraph 节点：步骤1 AIGC生成补货建议
+        """节点函数：步骤1 AIGC生成补货建议
 
         执行后根据建议数量更新状态，供条件路由 _route_after_step1 判断。
         """
@@ -579,7 +472,7 @@ class ClosedLoop:
             "AIGC生成建议",
             lambda actor, cancel_event=None: ClosedLoop._step1_generate_suggestions(cancel_event=cancel_event),
         )
-        # 补充状态字段供 LangGraph 路由使用
+        # 补充状态字段供路由决策使用
         if result.get("status") == "done":
             detail = result.get("detail", "")
             has_suggestions = "无需补货" not in detail if detail else False
@@ -596,7 +489,7 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step2(state):
-        """LangGraph 节点：步骤2 人工审核
+        """节点函数：步骤2 人工审核
 
         当前为单步执行模式，interrupt 仅在完整 graph.invoke() 模式下生效。
         本节点直接返回 need_manual 状态，人工审核通过 API 调用 run_step(3) 推进。
@@ -652,7 +545,7 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step3(state):
-        """LangGraph 节点：步骤3 RPA自动下单
+        """节点函数：步骤3 RPA自动下单
 
         执行后根据结果更新 errors 和 retry_count，供条件路由 _route_after_step3 判断。
         """
@@ -662,7 +555,7 @@ class ClosedLoop:
             "RPA自动下单",
             lambda actor, cancel_event=None: ClosedLoop._step3_rpa_order(actor, cancel_event=cancel_event),
         )
-        # 补充状态字段供 LangGraph 路由使用
+        # 补充状态字段供路由决策使用
         if result.get("error"):
             result["errors"] = [result["error"]]
             result["retry_count"] = state.get("retry_count", 0) + 1
@@ -673,7 +566,7 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step4(state):
-        """LangGraph 节点：步骤4 ERP记账入库（与 step5 可并行）"""
+        """节点函数：步骤4 ERP记账入库（与 step5 可并行）"""
         result = ClosedLoop._execute_node(
             state,
             4,
@@ -685,7 +578,7 @@ class ClosedLoop:
 
     @staticmethod
     def _node_step5(state):
-        """LangGraph 节点：步骤5 FDE刷新指标（与 step4 可并行）"""
+        """节点函数：步骤5 FDE刷新指标（与 step4 可并行）"""
         result = ClosedLoop._execute_node(
             state,
             5,
@@ -742,32 +635,15 @@ class ClosedLoop:
 
     @staticmethod
     def run_step(step_no, actor="system"):
-        """执行指定步骤（带跨进程锁 + 超时）
-
-        LangGraph 可用时通过图节点分发，否则降级为 if-elif 硬编码逻辑。
-        公共 API 签名保持兼容。
-        """
-        if _HAS_LANGGRAPH and ClosedLoop._get_graph() is not None:
-            return ClosedLoop._run_step_via_graph(step_no, actor)
-        return ClosedLoop._run_step_legacy(step_no, actor)
+        """执行指定步骤（带跨进程锁 + 超时）"""
+        return ClosedLoop._run_step_via_graph(step_no, actor)
 
     @staticmethod
     def _run_step_via_graph(step_no, actor="system"):
-        """单步执行模式：通过 LangGraph 图节点函数执行单步。
+        """单步执行：getattr 直接调用对应节点函数（_node_step1 ~ _node_step5）。
 
-        当前实际执行方式（P0-fix 标注）：
-            本方法 **不调用 graph.invoke()**，而是通过 ``getattr(ClosedLoop, node_map[step_no])``
-            直接获取并调用对应的节点函数（``_node_step1`` ~ ``_node_step5``）。节点函数
-            内部自行处理跨进程锁、LoopState、超时、审计日志、告警通知等逻辑。
-
-            因此 ``_build_graph()`` 中定义的条件路由（``_route_after_step1`` /
-            ``_route_after_step3``）和并行 fan_out（``_node_fan_out``）在当前模式下
-            **不会生效**，步骤间的推进由外部调用方（API/定时任务）通过 ``run_step(step_no)``
-            串行驱动。
-
-            图定义（``_build_graph``）保留用于未来完整运行模式（一次性走完 5 步），届时
-            需在 ``run_step`` 中改为 ``graph.invoke({"step_no": step_no, ...})``，节点内
-            的 ``interrupt`` 才会生效。
+        节点函数内部自行处理跨进程锁、LoopState、超时、审计日志、告警通知等逻辑；
+        步骤间的推进由外部调用方（API/定时任务）通过 run_step(step_no) 串行驱动。
         """
         state = ClosedLoop._prepare_state(step_no, actor)
         node_map = {1: "_node_step1", 2: "_node_step2", 3: "_node_step3", 4: "_node_step4", 5: "_node_step5"}
@@ -775,157 +651,6 @@ class ClosedLoop:
         return node_fn(state)
 
     @staticmethod
-    def _run_step_legacy(step_no, actor="system"):
-        """降级执行：原有 if-elif 硬编码逻辑（langgraph 不可用时使用）"""
-        run_id = ClosedLoop.get_current_run_id()
-        step_name = ClosedLoop.STEPS[step_no - 1][1]
-
-        # 获取跨进程锁
-        locked, release = _acquire_lock(run_id, step_no)
-        if not locked:
-            return {"error": f"步骤{step_no}正在执行中（其他进程持有锁），请勿重复触发", "step": step_no}
-
-        try:
-            rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
-            if rec and rec.status == "done":
-                return {"error": f"步骤{step_no}已完成，请从下一步继续", "step": step_no}
-
-            if not rec:
-                rec = LoopState(run_id=run_id, step=step_no, step_name=step_name, status="running")
-                rec.started_at = datetime.now()
-                db.session.add(rec)
-            else:
-                rec.status = "running"
-                rec.started_at = datetime.now()
-            db.session.commit()
-
-            try:
-                timeout = ClosedLoop._get_timeout()
-
-                @with_timeout(timeout)
-                def _execute(cancel_event=None):
-                    # P0-2 fix: check cancel_event before step execution
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise TimeoutError("Step cancelled before execution")
-                    if step_no == 1:
-                        detail = ClosedLoop._step1_generate_suggestions(cancel_event=cancel_event)
-                    elif step_no == 3:
-                        detail = ClosedLoop._step3_rpa_order(actor, cancel_event=cancel_event)
-                    elif step_no == 4:
-                        detail = ClosedLoop._step4_erp_receive(actor, cancel_event=cancel_event)
-                    elif step_no == 5:
-                        detail = ClosedLoop._step5_fde_refresh(actor, cancel_event=cancel_event)
-                    else:
-                        detail = None
-                    # P0-2 fix: if cancelled during execution, rollback instead of commit
-                    if cancel_event is not None and cancel_event.is_set():
-                        db.session.rollback()
-                        raise TimeoutError("Step cancelled during execution")
-                    return detail
-
-                # 步骤2特殊处理
-                if step_no == 2:
-                    rec.status = "pending"
-                    rec.detail = "等待人工审核建议"
-                    rec.finished_at = datetime.now()
-                    db.session.commit()
-                    db.session.add(
-                        AuditLog(
-                            actor=actor,
-                            action="loop_step_wait",
-                            target_type="loop",
-                            target_id=str(run_id),
-                            detail=f"步骤{step_no}等待人工审核",
-                        )
-                    )
-                    db.session.commit()
-                    return {"step": 2, "message": "请前往审核看板处理待审建议", "need_manual": True}
-
-                detail = _execute()
-                rec.status = "done"
-                rec.detail = detail
-                rec.finished_at = datetime.now()
-                db.session.commit()
-                db.session.add(
-                    AuditLog(
-                        actor=actor,
-                        action="loop_step_done",
-                        target_type="loop",
-                        target_id=f"{run_id}-{step_no}",
-                        detail=detail[:500] if detail else "",
-                    )
-                )
-                db.session.commit()
-                return {"step": step_no, "status": "done", "detail": detail}
-
-            except TimeoutError as e:
-                db.session.rollback()
-                rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
-                if rec:
-                    rec.status = "failed"
-                    rec.detail = f"超时：{str(e)}"
-                    rec.finished_at = datetime.now()
-                    db.session.commit()
-                db.session.add(
-                    AuditLog(
-                        actor=actor,
-                        action="loop_step_timeout",
-                        target_type="loop",
-                        target_id=f"{run_id}-{step_no}",
-                        detail=str(e)[:500],
-                    )
-                )
-                db.session.commit()
-                # P1-2: 失败时触发告警通知
-                try:
-                    from services.notifier import notifier
-
-                    notifier.send_alert(
-                        title=f"闭环步骤{step_no}超时",
-                        message=f"Run #{run_id} step {step_no} 超时：{str(e)[:200]}",
-                        level="error",
-                        context={"run_id": run_id, "step": step_no},
-                    )
-                except Exception:
-                    pass
-                # P0-2 fix: release session after timeout to prevent daemon thread
-                # from using the shared db.session (SQLAlchemy sessions are not thread-safe)
-                db.session.remove()
-                return {"step": step_no, "error": f"步骤超时：{e}"}
-            except Exception as e:
-                logger.exception("步骤%s执行失败", step_no)
-                db.session.rollback()
-                rec = LoopState.query.filter_by(run_id=run_id, step=step_no).first()
-                if rec:
-                    rec.status = "failed"
-                    rec.detail = str(e)[:500]
-                    rec.finished_at = datetime.now()
-                    db.session.commit()
-                db.session.add(
-                    AuditLog(
-                        actor=actor,
-                        action="loop_step_failed",
-                        target_type="loop",
-                        target_id=f"{run_id}-{step_no}",
-                        detail=str(e)[:500],
-                    )
-                )
-                db.session.commit()
-                # P1-2: 失败时触发告警通知
-                try:
-                    from services.notifier import notifier
-
-                    notifier.send_alert(
-                        title=f"闭环步骤{step_no}执行失败",
-                        message=f"Run #{run_id} step {step_no} 异常：{str(e)[:200]}",
-                        level="error",
-                        context={"run_id": run_id, "step": step_no, "error": str(e)[:100]},
-                    )
-                except Exception:
-                    pass
-                return {"step": step_no, "error": str(e)}
-        finally:
-            release()
 
     # ==================== 回滚（带业务副作用补偿） ====================
 
@@ -1132,6 +857,8 @@ class ClosedLoop:
     def _step3_rpa_order(actor="system", cancel_event=None):
         from models.aigc import Suggestion
 
+        from models.erp import PurchaseOrder
+
         _, RPAService, _, _ = ClosedLoop._services()
         approved = Suggestion.query.filter_by(status="approved").all()
         if not approved:
@@ -1142,6 +869,15 @@ class ClosedLoop:
         rpa = RPAService()
         results = []
         for sug in approved:
+            # P2-1 幂等：该建议已产生过采购单（含已取消，补偿语义为不自动重下）则跳过，
+            # 与 purchase_order.suggestion_id 唯一约束互为兜底——step3 崩溃后重跑不重复下单
+            existing_po = PurchaseOrder.query.filter_by(suggestion_id=sug.id).first()
+            if existing_po:
+                if sug.status != "ordered":
+                    sug.status = "ordered"
+                    db.session.commit()
+                results.append(f"{sug.product_name}→已有采购单 {existing_po.order_no}，跳过")
+                continue
             # P0-6: 超时取消后立刻停止下单 —— place_supplier_order 内部是独立事务，
             # 不中止的话僵尸线程会在步骤标记 failed 后继续产生新的采购单
             if cancel_event is not None and cancel_event.is_set():
@@ -1158,6 +894,9 @@ class ClosedLoop:
                     if result["status"] == "ok":
                         sug.status = "ordered"
                         sug.run_id = run_id
+                        # P2-1: 状态推进紧贴 PO 事务提交，最小化"PO 已落库而建议仍 approved"
+                        # 的崩溃窗口（该窗口内重跑由 suggestion_id 唯一约束兜底）
+                        db.session.commit()
                         results.append(f'{sug.product_name}→{result["supplier"]}({result["ext_order_no"]})')
                         success = True
                         break

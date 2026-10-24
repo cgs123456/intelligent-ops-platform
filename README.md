@@ -46,7 +46,7 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 
 ### 高级改进
 
-- **LangGraph 闭环编排**:五步闭环从硬编码状态机升级为 LangGraph StateGraph,支持条件分支(无建议跳过审核)、interrupt 节点(人工审核)、并行执行(ERP 入库 + FDE 刷新),langgraph 未安装时优雅降级到 if-elif 逻辑
+- **闭环编排**:五步闭环采用节点函数单步执行模式(条件分支:step1 无建议跳过审核;step3 下单失败重试),步骤推进由 API/定时任务串行驱动,保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发
 - **sqlglot SQL 解析**:Data Agent 的 SQL AST 校验从 sqlparse 升级为 sqlglot,用真正的 AST 类型检查替代正则关键字匹配,消除列名 `u.update` 误判为 DML 的问题,CTE 别名追踪用 `find_all(exp.Table)` + `exp.CTE` 过滤,5 行替代 70 行状态机
 - **Agent 评测框架**:gold SQL 回归测试,三级对比(exact > table_set > result_set),12 条测试用例覆盖 5 个类别,退化检测对比上次评测报告(accuracy_delta / new_failures / new_passes),CLI 入口 `python -m services.evaluator`
 
@@ -278,7 +278,7 @@ intelligent-ops-platform/
 
 ### 核心业务逻辑
 
-- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环编排。LangGraph StateGraph 定义 6 个节点(5 步 + fan_out 并行分发),条件分支(step1 无建议跳过审核 / step3 下单失败重试)、interrupt 节点(step2 人工审核等待)、step4+step5 并行执行。保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发。langgraph 未安装时降级到 if-elif 硬编码
+- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环编排。节点函数模式:5 个节点函数(_node_step1 ~ _node_step5)由 run_step 分发执行,条件路由(step1 无建议跳过审核 / step3 下单失败重试),步骤推进由 API/定时任务串行驱动。保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发
 - **[services/aigc_service.py](services/aigc_service.py)**:LLM 抽象层 + 规则引擎兜底。补货建议生成(置信度算法)、4 段式经营日报(昨日回顾+趋势+风险+建议,含 7 天趋势 + Notifier 推送)、Text2SQL(优先 DataAgent,回退规则)、关键词语义检索、自然语言查询、审核反馈自学习
 - **[services/multiagent.py](services/multiagent.py)**:改进7 多 Agent 采购博弈。`MultiAgentNegotiator` 三 Agent LLM 角色扮演(买方 + 双供应商),`score_quotes` 综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手,LLM 不可用走规则兜底
 - **[services/data_agent.py](services/data_agent.py)**:改进8 Data Agent Text2SQL 全链路。`DataAgent.query()` NL→SQL→校验→执行→NL 回复,`_validate_sql_ast` 基于 sqlglot AST 类型检查(单语句/SELECT-WITH 根节点/禁 DDL-DML 节点/表白名单/强制 LIMIT 100),`_extract_tables` 用 `find_all(exp.Table)` + CTE 别名过滤,列名含关键字不误判

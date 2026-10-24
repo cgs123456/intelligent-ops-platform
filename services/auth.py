@@ -22,6 +22,8 @@ import jwt
 from flask import current_app, g, jsonify, request
 from werkzeug.security import check_password_hash
 
+from sqlalchemy.exc import IntegrityError
+
 from extensions import db
 from models.system import AuditLog, TokenBlacklist, User
 
@@ -43,6 +45,7 @@ class AuthService:
     ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)  # P2-6: 从 2h 缩短到 30 分钟，配合前端自动刷新
     REFRESH_TOKEN_EXPIRES = timedelta(days=7)
     MAX_LOGIN_ATTEMPTS = 5
+    IP_MAX_LOGIN_ATTEMPTS = 20  # P2-5: 单 IP 锁定阈值（高于单账号，容忍 NAT 共网出口）
     LOCKOUT_DURATION = 300  # 秒
     # P1-10: JWT 签名算法默认值。实际运行时从 config.JWT_ALGORITHM 读取（见 _get_algorithm）。
     # 生产环境应迁移到 RS256（非对称密钥），实现安全密钥轮换。
@@ -98,7 +101,7 @@ class AuthService:
         if token_type == "access":
             # P2-5: 仅保留角色名（小列表），权限列表移出 token（RBAC 实时从 DB 取）
             full_payload["roles"] = [r.name for r in user.roles]
-        token = jwt.encode(full_payload, current_app.config["SECRET_KEY"], algorithm=AuthService._get_algorithm())
+        token = jwt.encode(full_payload, current_app.config["JWT_SECRET_KEY"], algorithm=AuthService._get_algorithm())
         return token, full_payload["jti"], exp
 
     # ============ P2-6: Token 黑名单（Redis 优先，不可用降级内存 set + DB） ============
@@ -186,9 +189,12 @@ class AuthService:
     def login(username, password, ip=None, mfa_code=None):
         """用户登录，返回 access_token + refresh_token"""
         # 1. 锁定检查（P1-2: 优先用 Redis 计数器，fallback 查 AuditLog）
+        # P2-5: 增加 IP 维度（防分布式喷洒），锁定/失败统一文案防用户名枚举
+        if ip and AuthService._get_login_fail_count(None, ip=ip) >= AuthService.IP_MAX_LOGIN_ATTEMPTS:
+            return None, "登录失败次数过多，请稍后重试"
         recent_fails = AuthService._get_login_fail_count(username)
         if recent_fails >= AuthService.MAX_LOGIN_ATTEMPTS:
-            return None, f"账号已被锁定，请 {AuthService.LOCKOUT_DURATION // 60} 分钟后重试"
+            return None, "登录失败次数过多，请稍后重试"
 
         # 2. 用户校验
         user = User.query.filter_by(username=username, is_active=True).first()
@@ -204,6 +210,8 @@ class AuthService:
             )
             db.session.commit()
             AuthService._incr_login_fail_count(username)  # P1-2: Redis 计数器递增
+            if ip:
+                AuthService._incr_login_fail_count(username, ip=ip)  # P2-5: IP 维度
             return None, "用户名或密码错误"
 
         # 3. P0-fix: MFA 二次认证检查
@@ -227,7 +235,10 @@ class AuthService:
                     )
                     db.session.commit()
                     # P1-1: MFA 验证码错误同样递增登录失败计数，防止暴力破解 MFA 绕过登录锁定
+                    # P2-5: 同步递增 IP 维度
                     AuthService._incr_login_fail_count(user.username)
+                    if ip:
+                        AuthService._incr_login_fail_count(user.username, ip=ip)
                     return None, "MFA 验证码错误"
                 # 匹配成功，从存储中删除已使用的备用码
                 stored.pop(idx)
@@ -249,7 +260,7 @@ class AuthService:
             )
         )
         db.session.commit()
-        AuthService._clear_login_fail_count(username)  # P1-2: 登录成功清除计数器
+        AuthService._clear_login_fail_count(username, ip=ip)  # P1-2/P2-5: 清除用户名+IP 两维度计数
 
         return {
             "access_token": access_token,
@@ -270,7 +281,7 @@ class AuthService:
         """用 refresh_token 换取新的 access + refresh（旋转 refresh）"""
         try:
             payload = jwt.decode(
-                refresh_tok, current_app.config["SECRET_KEY"], algorithms=[AuthService._get_algorithm()]
+                refresh_tok, current_app.config["JWT_SECRET_KEY"], algorithms=[AuthService._get_algorithm()]
             )
             if payload.get("type") != "refresh":
                 return None, "无效的 refresh_token"
@@ -306,7 +317,14 @@ class AuthService:
                     detail=f"new_jti={new_refresh_jti[:8]}",
                 )
             )
-            db.session.commit()
+            try:
+                db.session.commit()
+            except IntegrityError:
+                # P2-5: 同一 refresh_token 并发旋转重放 —— revoke_token 的 check-then-insert
+                # 竞态由 TokenBlacklist.jti 唯一约束兜底，第二个请求在此被拒
+                db.session.rollback()
+                logger.warning("refresh_token 重放被唯一约束拦截: user=%s", user.username)
+                return None, "refresh_token 已被使用，请重新登录"
 
             return {
                 "access_token": access_token,
@@ -368,7 +386,7 @@ class AuthService:
     def verify_token(token):
         """校验 access_token：返回 payload 或 None。检查黑名单 + token_version（Redis 缓存优先）。"""
         try:
-            payload = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=[AuthService._get_algorithm()])
+            payload = jwt.decode(token, current_app.config["JWT_SECRET_KEY"], algorithms=[AuthService._get_algorithm()])
             if payload.get("type") != "access":
                 return None
             now = time.time()
@@ -421,7 +439,7 @@ class AuthService:
             try:
                 payload = jwt.decode(
                     tok,
-                    current_app.config["SECRET_KEY"],
+                    current_app.config["JWT_SECRET_KEY"],
                     algorithms=[AuthService._get_algorithm()],
                     options={"verify_exp": False},
                 )
@@ -549,49 +567,64 @@ class AuthService:
     # ============ P1-2: 登录失败计数器（Redis 优先，AuditLog fallback） ============
 
     @staticmethod
-    def _get_login_fail_count(username):
-        """获取最近锁定窗口内的登录失败次数。优先用 Redis，fallback 查 AuditLog。"""
-        # 优先用 Redis 计数器
+    def _get_login_fail_count(username, ip=None):
+        """获取最近锁定窗口内的登录失败次数。优先用 Redis，fallback 查 AuditLog。
+
+        P2-5: ip 非空时按 IP 维度计数（防分布式口令喷洒——每账号次数少但总数大）。
+        """
+        key = f"login_fail_ip:{ip}" if ip else f"login_fail:{username}"
         try:
             from extensions import cache
 
             if current_app.config.get("CACHE_TYPE") == "redis":
-                key = f"login_fail:{username}"
                 count = cache.get(key)
                 return int(count) if count else 0
         except Exception:
             pass
 
-        # fallback: 查 AuditLog（原逻辑）
-        recent_fails = AuditLog.query.filter(
-            AuditLog.actor == username,
+        # fallback: 查 AuditLog（P2-5 增加 IP 维度过滤）
+        query = AuditLog.query.filter(
             AuditLog.action == "login_failed",
             AuditLog.created_at >= datetime.now() - timedelta(seconds=AuthService.LOCKOUT_DURATION),
-        ).count()
-        return recent_fails
+        )
+        query = query.filter(AuditLog.ip == ip) if ip else query.filter(AuditLog.actor == username)
+        return query.count()
 
     @staticmethod
-    def _incr_login_fail_count(username):
-        """递增登录失败计数器。Redis 可用时写入 Redis，否则仅靠 AuditLog 记录。"""
+    def _incr_login_fail_count(username, ip=None):
+        """递增登录失败计数器（P2-5: 支持 IP 维度；Redis 原子 INCR 替代 get+set 竞态）。
+
+        EXPIRE NX：窗口从首次失败起算，后续失败不刷新 TTL。
+        """
+        key = f"login_fail_ip:{ip}" if ip else f"login_fail:{username}"
         try:
             from extensions import cache
 
             if current_app.config.get("CACHE_TYPE") == "redis":
-                key = f"login_fail:{username}"
+                client = getattr(cache.cache, "_read_client", lambda: None)()
+                if client is not None:
+                    pipe = client.pipeline()
+                    pipe.incr(key)
+                    pipe.expire(key, AuthService.LOCKOUT_DURATION, nx=True)
+                    pipe.execute()
+                    return
+                # 后端未暴露原生客户端，退回 get+set（轻微少计，方向偏保守）
                 count = cache.get(key)
-                count = int(count) + 1 if count else 1
-                cache.set(key, count, timeout=AuthService.LOCKOUT_DURATION)
+                cache.set(key, int(count) + 1 if count else 1, timeout=AuthService.LOCKOUT_DURATION)
         except Exception:
             pass  # AuditLog 已记录，fallback 路径可用
 
     @staticmethod
-    def _clear_login_fail_count(username):
-        """登录成功后清除失败计数器。"""
+    def _clear_login_fail_count(username, ip=None):
+        """登录成功后清除失败计数器（用户名与 IP 两个维度）。"""
         try:
             from extensions import cache
 
             if current_app.config.get("CACHE_TYPE") == "redis":
-                cache.delete(f"login_fail:{username}")
+                keys = [f"login_fail:{username}"]
+                if ip:
+                    keys.append(f"login_fail_ip:{ip}")
+                cache.delete(*keys)
         except Exception:
             pass
 

@@ -122,13 +122,19 @@ def stream():
         return err
 
     def generate():
+        # P2-2: 自适应轮询替代固定 sleep(5)——闭环步骤通常秒级完成，
+        # 状态活跃期（刚发生变化）用 1s 快轮询保证看板低延迟，
+        # 静默期回落 5s 降低 DB 压力；总时长上限 120s 与原实现一致。
         last_status = None
         last_heartbeat = time.time()
-        for _ in range(24):  # P1-6: 降低查询频率到 5 秒，最多 120 秒
+        last_change = time.time()
+        deadline = time.time() + 120
+        while time.time() < deadline:
             status = ClosedLoop.get_status()
             if status != last_status:
                 yield f"data: {json.dumps(status, ensure_ascii=False)}\n\n"
                 last_status = status
+                last_change = time.time()
                 cur = status["current_step"]
                 steps = status["steps"]
                 if cur > 5 or all(s["status"] == "done" for s in steps):
@@ -138,7 +144,8 @@ def stream():
             if now - last_heartbeat > 15:
                 yield ": heartbeat\n\n"
                 last_heartbeat = now
-            time.sleep(5)  # P1-6: 降低查询频率，减少 DB session 占用
+            # 距上次状态变化 20s 内快轮询，之后回落慢轮询
+            time.sleep(1 if now - last_change < 20 else 5)
         yield 'data: {"event":"end"}\n\n'
 
     return Response(

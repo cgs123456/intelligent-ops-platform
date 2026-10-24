@@ -524,17 +524,3 @@ class TestRouteAfterStep3:
             state = {"errors": ["仍失败"], "retry_count": 2}
             assert ClosedLoop._route_after_step3(state) == "continue"
 
-
-@pytest.mark.usefixtures("db_session")
-class TestClosedLoopNodeFanOut:
-    """_node_fan_out 并行分发节点测试"""
-
-    def test_node_fan_out_returns_state(self, app):
-        """_node_fan_out 直接返回 state（不执行业务逻辑）"""
-        from services.closed_loop import ClosedLoop
-
-        with app.app_context():
-            state = {"run_id": 1, "current_step": 3, "test": "value"}
-            result = ClosedLoop._node_fan_out(state)
-            assert result == state
-            assert result["test"] == "value"

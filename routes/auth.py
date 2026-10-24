@@ -122,9 +122,17 @@ def mfa_setup():
 @bp.route("/mfa/disable", methods=["POST"])
 @require_permission("auth:mfa:disable")
 def mfa_disable():
-    """P0-fix: 禁用 MFA"""
+    """P0-fix: 禁用 MFA —— 密码复核必需；MFA 启用中还需 TOTP/备用码二次验证。
+
+    安全修复：此前仅凭有效 access token 即可禁用 MFA（token 被盗即可拆除第二因素）。
+    """
+    import json as _json
+
+    from werkzeug.security import check_password_hash
+
     from extensions import db
     from models.system import User
+    from services.mfa import mfa_service
 
     # P0-4 fix: g.user_id never set, use g.current_user (JWT payload) sub
     _payload = getattr(g, "current_user", {})
@@ -134,6 +142,23 @@ def mfa_disable():
     user = User.query.get(_uid)
     if not user:
         return jsonify({"error": "用户不存在"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    password = data.get("password", "")
+    mfa_code = (data.get("mfa_code") or "").strip()
+    if not password or not check_password_hash(user.password_hash, password):
+        return jsonify({"error": "密码错误，无法禁用 MFA"}), 401
+    if user.mfa_enabled:
+        verified = bool(user.mfa_secret) and mfa_service.verify_code(user.mfa_secret, mfa_code)
+        if not verified and user.mfa_backup_codes:
+            stored = _json.loads(user.mfa_backup_codes or "[]") if user.mfa_backup_codes else []
+            idx = mfa_service.verify_backup_code(mfa_code, stored)
+            if idx >= 0:
+                # 备用码一次性：消耗后移除
+                stored.pop(idx)
+                user.mfa_backup_codes = _json.dumps(stored)
+                verified = True
+        if not verified:
+            return jsonify({"error": "MFA 验证码错误，无法禁用 MFA"}), 401
     user.mfa_enabled = False
     user.mfa_secret = None
     user.mfa_backup_codes = None

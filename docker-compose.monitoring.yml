@@ -176,6 +176,9 @@ services:
       - REDIS_ADDR=redis://redis:6379
       # Redis 密码从环境变量注入（生产必填）
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # P2-6: 额外采集 celery broker 队列（db2 的 celery 列表）长度，
+      # 暴露 redis_key_size{key="db2=celery"}，供 alerts.yml CeleryQueueBacklog 使用
+      - REDIS_EXPORTER_CHECK_SINGLE_KEYS=db2=celery
     ports:
       # 仅监听本地，避免 exporter 端口对外暴露
       - "127.0.0.1:9121:9121"
@@ -269,14 +272,57 @@ services:
     networks:
       - default
 
+  # ============== grafana：可视化面板（P2-6 修复断点④） ==============
+  # dashboard 与数据源通过 provisioning 自动加载（免手工导入）：
+  #   /etc/grafana/provisioning  ← monitoring/grafana/provisioning
+  #   /var/lib/grafana/dashboards ← monitoring/grafana/dashboards
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: ops-grafana
+    environment:
+      # 管理员凭据从环境变量注入（生产必填；默认值仅供本机体验）
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      # 未登录用户无只读权限（面板经端口映射在内网访问）
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      # P2-6: 告警统一走 alertmanager → 钉钉/企微/邮件，Grafana 侧不再重复发信
+      - GF_ALERTING_ENABLED=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      # 仅监听本地，需 SSH 隧道访问（kubectl port-forward / ssh -L 3000:localhost:3000）
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+
 # ====================================================================
-# 数据卷：持久化 Prometheus / Loki / Promtail / Alertmanager 运行数据
+# 数据卷：持久化 Prometheus / Loki / Promtail / Alertmanager / Grafana 运行数据
 # ====================================================================
 volumes:
   prometheus_data:     # P0-4: Prometheus TSDB 数据
   loki_data:           # Loki chunks + index
   promtail_data:       # Promtail positions 文件
   alertmanager_data:   # Alertmanager 静默规则与通知状态
+  grafana_data:        # Grafana sqlite（用户/偏好）
 
 # 使用默认网络，与 docker-compose.prod.yml 中的服务互通
 # 这样 promtail 可通过服务名 loki 推送日志，alertmanager 可被 prometheus 访问，

@@ -1,0 +1,15 @@
+# Grafana dashboard 自动供给（P2-6 断点④修复）
+# 从 /var/lib/grafana/dashboards 目录加载 JSON（compose 卷挂载 monitoring/grafana/dashboards）
+apiVersion: 1
+
+providers:
+  - name: ops-platform
+    orgId: 1
+    folder: ''            # 顶层直接展示
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60   # 文件更新后 60s 内自动重载
+    allowUiUpdates: false       # 面板以版本库为唯一真相，UI 改动不持久化
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,6 +1,7 @@
 """models 包初始化 · 按层组织数据模型"""
 
 from .aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
+from .bom import BOM, BOMItem, MRPPlan, MRPRequirement
 from .erp import (
     AccountMove,
     Budget,
@@ -19,7 +20,8 @@ from .erp import (
     Warehouse,
 )
 from .external import ExtEcommerceOrder, ExtSupplierQuote
-from .system import AuditLog, LoopState, Role, User, user_roles
+from .finance import ReconciliationBatch, ReconciliationEntry
+from .system import AuditLog, LoopState, Role, TokenBlacklist, User, user_roles
 from .warehouse import (
     AdsDailyOpsReport,
     AdsReplenishmentSuggest,
@@ -80,5 +82,14 @@ __all__ = [
     "AuditLog",
     "User",
     "Role",
+    "TokenBlacklist",
     "user_roles",
+    # 财务对账（P1-11）
+    "ReconciliationBatch",
+    "ReconciliationEntry",
+    # BOM / MRP（P1-9）
+    "BOM",
+    "BOMItem",
+    "MRPPlan",
+    "MRPRequirement",
 ]

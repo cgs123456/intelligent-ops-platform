@@ -341,9 +341,22 @@ class MRPService:
                     logger.warning("release_plan 跳过：无可用供应商 product_id=%s", comp.id)
                     continue
 
+                # P0-6: 净需求 <1 经 int() 截断为 0、成本价缺失时禁止生成采购单
+                # （此前会生成 qty=0/0 价 PO，绕过 create_purchase_order 的数量/单价校验）
+                if int(req.suggested_order_qty) <= 0:
+                    logger.warning(
+                        "release_plan 跳过：净需求不足 1（suggested_order_qty=%s）product_id=%s",
+                        req.suggested_order_qty,
+                        comp.id,
+                    )
+                    continue
+
                 # P1-6: 直接创建 PurchaseOrder 对象，不调用 erp_service.create_purchase_order
                 # （后者会内部 commit，中途失败导致部分释放）。所有 PO 在循环结束后统一 commit。
                 unit_price = self._to_decimal(comp.cost_price)
+                if unit_price <= 0:
+                    logger.warning("release_plan 跳过：子件成本价未设置 product_id=%s", comp.id)
+                    continue
                 currency_code = comp.currency_code or "CNY"
                 tax_rate = self._to_decimal(comp.tax_rate) if comp.tax_rate is not None else Decimal("0.13")
                 qty = int(req.suggested_order_qty)

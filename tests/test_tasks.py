@@ -196,67 +196,95 @@ class TestGetApp:
         assert len(create_calls) == 1
 
 
-class TestTaskObjectsWhenCeleryUnavailable:
-    """celery 不可用时，所有任务对象为 _NullTask 实例"""
+_ALL_ASYNC_TASKS = [
+    "run_loop_step_async",
+    "run_etl_async",
+    "run_rpa_scheduled_async",
+    "generate_suggestions_async",
+    "generate_daily_report_async",
+    "detect_anomalies_async",
+    "cleanup_token_blacklist_async",
+]
 
-    def test_all_tasks_are_nulltask(self):
-        """celery_app 为 None 时，所有 @_task 装饰的任务都是 _NullTask"""
-        from tasks import (
-            _NullTask,
-            cleanup_token_blacklist_async,
-            detect_anomalies_async,
-            generate_daily_report_async,
-            generate_suggestions_async,
-            run_etl_async,
-            run_loop_step_async,
-            run_rpa_scheduled_async,
-        )
 
-        for task in [
-            run_loop_step_async,
-            run_etl_async,
-            run_rpa_scheduled_async,
-            generate_suggestions_async,
-            generate_daily_report_async,
-            detect_anomalies_async,
-            cleanup_token_blacklist_async,
-        ]:
-            assert isinstance(task, _NullTask), f"{task} 应为 _NullTask 实例"
+@pytest.fixture()
+def tasks_without_celery(monkeypatch):
+    """以 celery_app=None 重新加载 tasks 模块，模拟 Celery 未安装/未配置。
 
-    def test_run_loop_step_async_delay_raises(self):
-        """run_loop_step_async.delay 抛 RuntimeError（celery 未启用）"""
-        from tasks import run_loop_step_async
+    无论当前环境是否安装 celery，reload 后模块级任务都走 _NullTask 降级分支，
+    测试因此环境密闭；teardown 先还原 extensions.celery_app 再 reload，
+    保证共享会话里的后续测试拿到与真实环境一致的 tasks 模块。
+    """
+    import importlib
 
+    import extensions
+    import tasks
+
+    monkeypatch.setattr(extensions, "celery_app", None)
+    reloaded = importlib.reload(tasks)
+    yield reloaded
+    monkeypatch.undo()
+    importlib.reload(tasks)
+
+
+class TestModuleTasksCeleryUnavailable:
+    """celery 不可用时（celery_app=None），所有模块任务降级为 _NullTask"""
+
+    def test_all_tasks_are_nulltask(self, tasks_without_celery):
+        for name in _ALL_ASYNC_TASKS:
+            t = getattr(tasks_without_celery, name)
+            assert isinstance(t, tasks_without_celery._NullTask), f"{name} 应为 _NullTask 实例"
+
+    def test_run_loop_step_async_delay_raises(self, tasks_without_celery):
         with pytest.raises(RuntimeError, match="Celery 未启用"):
-            run_loop_step_async.delay(1, actor="test")
+            tasks_without_celery.run_loop_step_async.delay(1, actor="test")
 
-    def test_run_etl_async_delay_raises(self):
-        from tasks import run_etl_async
-
+    def test_run_etl_async_delay_raises(self, tasks_without_celery):
         with pytest.raises(RuntimeError):
-            run_etl_async.delay()
+            tasks_without_celery.run_etl_async.delay()
 
-    def test_cleanup_token_blacklist_async_apply_async_raises(self):
-        from tasks import cleanup_token_blacklist_async
-
+    def test_cleanup_token_blacklist_async_apply_async_raises(self, tasks_without_celery):
         with pytest.raises(RuntimeError):
-            cleanup_token_blacklist_async.apply_async()
+            tasks_without_celery.cleanup_token_blacklist_async.apply_async()
+
+    def test_beat_schedule_block_skipped(self, tasks_without_celery):
+        """celery_app=None 时 beat_schedule 初始化块被跳过，模块加载本身不抛异常"""
+        assert hasattr(tasks_without_celery, "run_loop_step_async")
 
 
-class TestBeatScheduleSkipped:
-    """celery_app 为 None 时 beat_schedule 不初始化"""
+class TestModuleTasksCeleryAvailable:
+    """celery 可用时（celery_app 非 None），模块任务绑定真实 Celery Task"""
 
-    def test_no_beat_schedule_when_celery_none(self):
-        """celery_app 为 None 时，celery_app.conf 不存在，不抛异常"""
-        # 导入 tasks 模块本身不抛异常（已验证，模块可正常 import）
+    def test_all_tasks_bound_to_celery(self):
         import tasks
+        from extensions import celery_app
+        from tasks import _NullTask
 
-        # celery_app 为 None，beat_schedule 块被跳过
+        if celery_app is None:
+            pytest.skip("当前环境未配置 Celery broker，降级路径由 TestModuleTasksCeleryUnavailable 覆盖")
+        for name in _ALL_ASYNC_TASKS:
+            t = getattr(tasks, name)
+            assert not isinstance(t, _NullTask), f"{name} 不应为 _NullTask"
+            assert hasattr(t, "run") and hasattr(t, "delay"), f"{name} 缺少 Celery Task 接口"
+
+    def test_beat_schedule_all_crontab(self):
+        """P0-7 回归：beat_schedule 必须全部是 crontab 对象。
+
+        裸 cron 字符串（"0 2 * * *"）会让 celery beat 启动即崩：
+        AttributeError: 'str' object has no attribute 'app'。
+        """
+        from celery.schedules import crontab
+
         from extensions import celery_app
 
         if celery_app is None:
-            # 模块成功加载即说明 if celery_app is not None 守卫生效
-            assert hasattr(tasks, "run_loop_step_async")
-        else:
-            # 如果 celery 可用，beat_schedule 应已配置
-            assert hasattr(celery_app.conf, "beat_schedule")
+            pytest.skip("当前环境未配置 Celery broker，降级路径由 TestModuleTasksCeleryUnavailable 覆盖")
+        schedule = celery_app.conf.beat_schedule
+        assert schedule, "beat_schedule 未配置"
+        assert len(schedule) == 5, f"应有 5 个定时任务，实际 {len(schedule)}"
+        for key, entry in schedule.items():
+            sched = entry["schedule"]
+            assert isinstance(sched, crontab), (
+                f"beat 任务 {key} 的 schedule 必须是 crontab 对象（P0-7），当前: {type(sched)}"
+            )
+        assert celery_app.conf.timezone == "Asia/Shanghai"

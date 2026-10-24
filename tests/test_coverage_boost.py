@@ -253,7 +253,7 @@ class TestMetrics:
 
 
 class TestCeleryTasks:
-    """Celery 任务测试（celery_app=None 时的降级行为）"""
+    """Celery 任务测试：_NullTask 占位行为 + 装饰器两分支（环境密闭）+ 模块任务随环境断言"""
 
     def test_null_task_delay_raises_runtime_error(self):
         """_NullTask.delay() 抛 RuntimeError"""
@@ -271,68 +271,67 @@ class TestCeleryTasks:
         with pytest.raises(RuntimeError, match="Celery 未启用"):
             t.apply_async()
 
-    def test_task_decorator_returns_null_task_when_celery_unavailable(self):
-        """celery_app=None 时，@_task 装饰器返回 _NullTask"""
-        from tasks import _task
+    def test_task_decorator_returns_null_task_when_celery_unavailable(self, monkeypatch):
+        """celery_app=None 时，@_task 装饰器返回 _NullTask（monkeypatch 模拟，不依赖安装状态）"""
+        import tasks
 
-        @_task(name="test_func")
+        monkeypatch.setattr(tasks, "celery_app", None, raising=False)
+
+        @tasks._task(name="test_func")
         def my_func():
             return "ok"
 
-        # celery_app 为 None 时应返回 _NullTask 实例
-        from tasks import _NullTask
-
-        assert isinstance(my_func, _NullTask)
+        assert isinstance(my_func, tasks._NullTask)
         # _NullTask 使用 f.__name__ 而非 name 参数（celery_app=None 时的行为）
         assert my_func.name == "my_func"
 
-    def test_task_decorator_preserves_name(self):
+    def test_task_decorator_preserves_name(self, monkeypatch):
         """未指定 name 时，使用函数 __name__"""
-        from tasks import _task
+        import tasks
 
-        @_task()
+        monkeypatch.setattr(tasks, "celery_app", None, raising=False)
+
+        @tasks._task()
         def custom_task():
             return "ok"
 
-        from tasks import _NullTask
-
-        assert isinstance(custom_task, _NullTask)
+        assert isinstance(custom_task, tasks._NullTask)
         assert custom_task.name == "custom_task"
 
-    def test_all_async_tasks_are_null_tasks(self):
-        """所有异步任务在 celery 不可用时均为 _NullTask"""
-        from tasks import (
-            _NullTask,
-            cleanup_token_blacklist_async,
-            detect_anomalies_async,
-            generate_daily_report_async,
-            generate_suggestions_async,
-            run_etl_async,
-            run_loop_step_async,
-            run_rpa_scheduled_async,
-        )
+    def test_all_async_tasks_reflect_celery_availability(self):
+        """模块级任务与 extensions.celery_app 状态一致：可用→真实 Task，不可用→_NullTask"""
+        import tasks
 
-        for t in [
-            run_loop_step_async,
-            run_etl_async,
-            run_rpa_scheduled_async,
-            generate_suggestions_async,
-            generate_daily_report_async,
-            detect_anomalies_async,
-            cleanup_token_blacklist_async,
-        ]:
-            assert isinstance(t, _NullTask), f"{t} 应为 _NullTask"
+        task_names = [
+            "run_loop_step_async",
+            "run_etl_async",
+            "run_rpa_scheduled_async",
+            "generate_suggestions_async",
+            "generate_daily_report_async",
+            "detect_anomalies_async",
+            "cleanup_token_blacklist_async",
+        ]
+        for name in task_names:
+            t = getattr(tasks, name)
+            if tasks.celery_app is None:
+                assert isinstance(t, tasks._NullTask), f"{name} 应为 _NullTask"
+            else:
+                assert not isinstance(t, tasks._NullTask), f"{name} 应为真实 Celery 任务"
 
     def test_run_loop_step_async_raises_when_called(self):
-        """run_loop_step_async.delay() 抛 RuntimeError"""
-        from tasks import run_loop_step_async
+        """celery 真不可用时 run_loop_step_async.delay 抛 RuntimeError"""
+        import tasks
 
+        if tasks.celery_app is not None:
+            pytest.skip("celery 可用时降级行为由 tests/test_tasks.py 的 reload 测试覆盖")
         with pytest.raises(RuntimeError, match="Celery 未启用"):
-            run_loop_step_async.delay(1, "test")
+            tasks.run_loop_step_async.delay(1, "test")
 
     def test_cleanup_token_blacklist_async_raises_when_called(self):
-        """cleanup_token_blacklist_async.delay() 抛 RuntimeError"""
-        from tasks import cleanup_token_blacklist_async
+        """celery 真不可用时 cleanup_token_blacklist_async.delay 抛 RuntimeError"""
+        import tasks
 
+        if tasks.celery_app is not None:
+            pytest.skip("celery 可用时降级行为由 tests/test_tasks.py 的 reload 测试覆盖")
         with pytest.raises(RuntimeError, match="Celery 未启用"):
-            cleanup_token_blacklist_async.delay()
+            tasks.cleanup_token_blacklist_async.delay()

@@ -99,8 +99,8 @@ class PurchaseOrder(db.Model):
     qty = db.Column(db.Integer, nullable=False)
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
     status = db.Column(db.String(16), nullable=False, default="draft", index=True)  # draft/confirmed/received/cancelled
-    ext_order_no = db.Column(db.String(64), index=True)
-    suggestion_id = db.Column(db.Integer, index=True)
+    ext_order_no = db.Column(db.String(64), index=True, unique=True)  # P2-1: 外部平台单号唯一，防重复同步建单
+    suggestion_id = db.Column(db.Integer, index=True, unique=True)  # P2-1: 一条补货建议最多一张采购单（幂等键）
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))  # 入库仓库
     # P1-9: 多币种 + 多税率支持
     currency_code = db.Column(db.String(3), nullable=False, default="CNY")
