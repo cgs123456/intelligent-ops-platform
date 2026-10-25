@@ -15,6 +15,7 @@ import logging
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from itertools import combinations
 
 from extensions import db
 from models.erp import AccountMove
@@ -309,7 +310,11 @@ class ReconciliationService:
               —— 原因：AccountMove.amount 为不含税金额，银行流水为含税实收金额，需容差覆盖税额
             - 已 matched 的明细不再参与匹配
             - 一对一匹配（每条 erp 明细最多匹配一条外部明细）
-            - 匹配类型记录为 exact（差额 < 0.01）或 tolerance（容差内匹配），便于审计
+            - P3-G2 多对一匹配：一对一未中时，在同一 reference_no 的剩余候选里
+              穷举 2/3 条组合（候选数 2..8 才尝试，防组合爆炸），组合金额之和落在
+              容差内即整组配平，match_type 记为 multi，星型关联（erp -> 组合首条，
+              组合各条 -> erp）。典型场景：一张发票分多笔银行流水回款。
+            - 匹配类型记录为 exact（差额 < 0.01）/ tolerance（容差内）/ multi（多对一），便于审计
 
         :param batch_id: 对账批次 ID
         :return: {"matched_count": int, "unmatched_system": int, "unmatched_external": int}
@@ -377,6 +382,35 @@ class ReconciliationService:
                         break
 
                 if matched_ext is None:
+                    # P3-G2: 多对一——同 reference_no 候选 2..8 条时穷举 2/3 组合
+                    combo = None
+                    if 2 <= len(candidates) <= 8:
+                        for size in (2, 3):
+                            for group in combinations(candidates, size):
+                                group_sum = sum(
+                                    (self._to_decimal(g.amount) for g in group),
+                                    Decimal("0"),
+                                )
+                                if abs(sys_amount - group_sum) <= tolerance:
+                                    combo = group
+                                    break
+                            if combo is not None:
+                                break
+                    if combo is None:
+                        continue
+                    # 星型匹配：erp -> 组合首条；组合各条 -> erp
+                    primary = combo[0]
+                    sys_e.matched = True
+                    sys_e.matched_entry_id = primary.id
+                    sys_e.mismatch_reason = None
+                    sys_e.match_type = "multi"
+                    for g in combo:
+                        g.matched = True
+                        g.matched_entry_id = sys_e.id
+                        g.mismatch_reason = None
+                        g.match_type = "multi"
+                        candidates.remove(g)
+                    matched_count += 1
                     continue
 
                 candidates.remove(matched_ext)
@@ -433,6 +467,76 @@ class ReconciliationService:
         except Exception as e:
             self.db.rollback()
             logger.exception("自动匹配失败: %s", e)
+            raise
+
+    def create_adjustment(
+        self,
+        batch_id: int,
+        reference_no: str,
+        amount,
+        direction: str,
+        reason: str,
+        account_code: str = "ADJ",
+        actor: str = "system",
+        ip=None,
+    ) -> ReconciliationEntry:
+        """P3-G2: 创建人工调节项（source=manual 的对账明细）。
+
+        语义：调节项是"补记的外部侧事实"——差异无法用既有外部明细配平时，
+        人工录入一条 manual 明细（如手续费、抹零、银行串户待查），随后重跑
+        auto_match 或人工匹配将其与系统侧差异条目配平，批次才可关闭。
+        调节项本身参与外部侧合计（source != erp 口径）。
+
+        :param reference_no: 业务单号（与待配平的系统侧条目同号才能自动匹配上）
+        :param amount: 正数金额（方向由 direction 表达）
+        :param direction: debit/credit
+        :param reason: 调节原因（必填，审计追溯）
+        """
+        batch = self.db.get(ReconciliationBatch, batch_id)
+        if not batch:
+            raise ValueError(f"对账批次不存在: {batch_id}")
+        if batch.status == "closed":
+            raise ValueError("批次已关闭，不可追加调节项")
+        reference_no = (reference_no or "").strip()
+        if not reference_no or len(reference_no) > 64:
+            raise ValueError("reference_no 必填且不超过 64 字符")
+        if direction not in ("debit", "credit"):
+            raise ValueError("direction 必须为 debit/credit")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("调节原因 reason 必填")
+        amount = self._to_decimal(amount)
+        if amount <= 0:
+            raise ValueError("调节金额必须为正数")
+        try:
+            entry = ReconciliationEntry(
+                batch_id=batch_id,
+                source="manual",
+                account_code=account_code or "ADJ",
+                entry_date=datetime.now(),
+                amount=amount,
+                direction=direction,
+                reference_no=reference_no,
+                matched=False,
+                mismatch_reason=None,
+                match_type=None,
+            )
+            self.db.add(entry)
+            self.db.flush()
+            self._audit(
+                "adjustment",
+                f"调节项 {reference_no} amount={amount} direction={direction} reason={reason}",
+                target_id=batch_id,
+                actor=actor,
+            )
+            self.db.commit()
+            logger.info(
+                "调节项已创建: batch=%s ref=%s amount=%s",
+                batch.batch_no, reference_no, amount,
+            )
+            return entry
+        except Exception:
+            self.db.rollback()
             raise
 
     def calculate_totals(self, batch_id: int) -> dict:
@@ -535,11 +639,29 @@ class ReconciliationService:
             for sys_e in matched_system:
                 if sys_e.matched_entry_id is None:
                     continue
-                ext_e = self.db.get(ReconciliationEntry, sys_e.matched_entry_id)
-                if ext_e is None:
-                    continue
                 sys_amount = self._to_decimal(sys_e.amount)
-                diff = abs(sys_amount - self._to_decimal(ext_e.amount))
+                # P3-G2: multi 星型匹配按"组金额和"校验（erp 条目 vs 组合成员合计），
+                # 逐对校验会把 130 vs (100+30) 误判为差异 30
+                if sys_e.match_type == "multi":
+                    group_ids = {sys_e.matched_entry_id}
+                    group_ids.update(
+                        e.id
+                        for e in self.db.query(ReconciliationEntry.id)
+                        .filter(ReconciliationEntry.matched_entry_id == sys_e.id)
+                        .all()
+                    )
+                    members = (
+                        self.db.query(ReconciliationEntry)
+                        .filter(ReconciliationEntry.id.in_(group_ids))
+                        .all()
+                    )
+                    group_sum = sum((self._to_decimal(m.amount) for m in members), Decimal("0"))
+                    diff = abs(sys_amount - group_sum)
+                else:
+                    ext_e = self.db.get(ReconciliationEntry, sys_e.matched_entry_id)
+                    if ext_e is None:
+                        continue
+                    diff = abs(sys_amount - self._to_decimal(ext_e.amount))
                 tax_rate = getattr(sys_e, "tax_rate", None)
                 tax_rate = self._to_decimal(tax_rate) if tax_rate is not None else Decimal("0.13")
                 tolerance = max(abs(sys_amount) * tax_rate, Decimal("0.01"))

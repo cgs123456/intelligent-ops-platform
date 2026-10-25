@@ -112,3 +112,62 @@ head = `b00000000002`。
 | `FDE_CLASSIFY_WINDOW_DAYS` | 90 | ABC/XYZ 分级统计窗口天数 |
 
 服务水位与窗口是 `recalc_safety_stock` / 路由参数（非全局配置），按产品调用时指定。
+
+---
+
+# 第二批（P3-G1/G2/G3）：试算平衡 / 对账多对一与调节项 / 库位
+
+## G1 科目余额表（试算平衡）
+
+`ERPService.trial_balance()` + `GET /api/v1/erp/trial-balance`（erp:read）。
+
+AccountMove 是单行凭证模型（无借贷列）：payable/receivable 正记，refund 红字
+正记靠 ref_type 区分，cogs 借贷成对（净额≈0）。报表按 (account, ref_type)
+聚合净额/税额/条数并给全局总计；同时做 ref_order 断链检查（凭证指向不存在
+的采购/销售/退货单时列入 dangling_refs）。
+
+**取舍**：真正的复式双分录改造（每凭证显式借贷两条、科目体系重构）是架构级
+变更，单行模型下强行模拟只产出伪平衡；本项落地为科目余额表 + 断链审计，
+复式改造留待有明确会计准则合规需求时评估。
+
+## G2 对账多对一匹配 + 人工调节项
+
+- `auto_match` 增强：1:1 未中时，同一 reference_no 候选 2..8 条时穷举 2/3
+  条组合，组合金额和落在容差内即整组配平（match_type=multi，星型关联：
+  erp→组合首条，组合成员→erp）。典型场景：一张发票分多笔银行流水回款。
+- `close_batch` 对齐：multi 匹配按组金额和校验（逐对校验会把 130 vs
+  (100+30) 误判差异 30）。
+- `ReconciliationService.create_adjustment()` +
+  `POST /api/v1/finance/batches/<id>/adjustments`（recon:create）：
+  人工调节项（source=manual 明细，必填 reference_no/amount/direction/
+  reason），语义为"补记的外部侧事实"——录入后重跑 auto_match 与差异条目
+  配平，批次才可关闭。调节项参与外部侧合计（source != erp 口径）。
+
+## G3 库位
+
+- `StockLocation` 模型（erp_stock_location，warehouse 内 code 唯一）；
+  `StockMove` 加 from_location_id/to_location_id（nullable，历史流水为 NULL）。
+- 约定：调拨两条流水各挂一侧库位（出库挂 from、入库挂 to）；库位现存量按
+  StockMove 有符号聚合（事件溯源口径），无独立余额表。
+- `transfer_stock` 可选 from_location_id/to_location_id（强制校验库位归属
+  仓库且启用）；仓库级余额校验仍是权威约束。
+- 端点：GET/POST `/api/v1/erp/locations`（erp:read/erp:write）、
+  GET `/api/v1/erp/locations/<id>/stock`（erp:read，产品粒度现存量）。
+
+**不做**：库位级可用量约束（现有校验在仓库级，库位视图是追溯维度）；
+收货/发货流水自动挂库位（需先有库位主数据运营流程，当前手工指定）。
+
+## 迁移
+
+`migrations/versions/b00000000003_stock_location.py`（幂等），SQLite 空库
+`flask db upgrade` 实测：b1→b2→b3 全链通过（48 表）。
+
+## 测试
+
+`tests/test_phase3_batch2.py` 7 用例：库位 CRUD/唯一性、调拨挂库位与库位
+存量视图（±30 对称）、跨仓库库位拒绝、多对一拆分回款配平（星型断言）、
+组合超容差不误配、调节项闭环（调节→重跑匹配→关账）、试算平衡聚合与断链。
+
+## 配置项汇总（第二批）
+
+无新增环境配置——库位/调节项均为业务参数（API 请求体），不引入全局开关。

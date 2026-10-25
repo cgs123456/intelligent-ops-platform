@@ -30,6 +30,7 @@ from models.erp import (
     ReorderRule,
     ReturnOrder,
     SaleOrder,
+    StockLocation,
     StockLot,
     StockMove,
     StockTake,
@@ -864,10 +865,22 @@ class ERPService:
 
     # ==================== 库存调拨 ====================
 
-    def transfer_stock(self, product_id, qty, from_warehouse_id, to_warehouse_id, actor="system", ip=None):
+    def transfer_stock(
+        self,
+        product_id,
+        qty,
+        from_warehouse_id,
+        to_warehouse_id,
+        actor="system",
+        ip=None,
+        from_location_id=None,
+        to_location_id=None,
+    ):
         """库存调拨（对应 Odoo stock.move internal transfer）：warehouse 间转移库存
         Product.stock_qty 为总库存（不随调拨变化），仅记录调拨流水影响仓库级余额。
         生成两条 transfer 流水：源仓库出库(负)、目标仓库入库(正)。
+        P3-G3: 可选记录库位——出库流水挂 from_location_id、入库流水挂 to_location_id。
+        库位归属仓库校验在此强制；库位级余额始终以流水聚合为准（事件溯源口径）。
         """
         try:
             if from_warehouse_id == to_warehouse_id:
@@ -875,6 +888,20 @@ class ERPService:
 
             # P0-2: 拒绝非正数数量 —— 负数调拨负负得正凭空入库，0 产生两条无效流水
             self._validate_positive_qty(qty)
+
+            # P3-G3: 库位归属校验（库位必须属于对应一侧仓库且启用）
+            if from_location_id is not None:
+                loc = self.db.get(StockLocation, from_location_id)
+                if loc is None or loc.warehouse_id != from_warehouse_id:
+                    raise ValueError(f"源库位不属于源仓库: location_id={from_location_id}")
+                if not loc.is_active:
+                    raise ValueError(f"源库位已停用: {loc.code}")
+            if to_location_id is not None:
+                loc = self.db.get(StockLocation, to_location_id)
+                if loc is None or loc.warehouse_id != to_warehouse_id:
+                    raise ValueError(f"目标库位不属于目标仓库: location_id={to_location_id}")
+                if not loc.is_active:
+                    raise ValueError(f"目标库位已停用: {loc.code}")
 
             # P1-5: 加行锁 SELECT FOR UPDATE，防止并发调拨导致超卖
             # with_for_update() 在 SQLite 下被忽略，PostgreSQL 下生效
@@ -902,6 +929,7 @@ class ERPService:
                 move_type="transfer",
                 ref_order=f'TR-{datetime.now().strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:8]}',
                 warehouse_id=from_warehouse_id,
+                from_location_id=from_location_id,
             )
             # 目标仓库入库流水
             in_move = StockMove(
@@ -910,6 +938,7 @@ class ERPService:
                 move_type="transfer",
                 ref_order=out_move.ref_order,
                 warehouse_id=to_warehouse_id,
+                to_location_id=to_location_id,
             )
             self.db.add_all([out_move, in_move])
             self.db.flush()
@@ -921,6 +950,7 @@ class ERPService:
                 out_move.id,
                 detail=f"调拨 product={product_id} qty={qty} "
                 f"from_wh={from_warehouse_id} to_wh={to_warehouse_id} "
+                f"from_loc={from_location_id} to_loc={to_location_id} "
                 f"ref={out_move.ref_order}",
                 ip=ip,
             )
@@ -931,6 +961,148 @@ class ERPService:
             self.db.rollback()
             logger.exception("库存调拨失败: %s", e)
             raise
+
+    # ==================== P3-G3: 库位管理 ====================
+
+    def create_location(self, warehouse_id, code, name=None, is_active=True, actor="system", ip=None):
+        """创建库位（仓库内唯一 code）。
+
+        库位是流水级追溯维度，不改变仓库级余额语义；重复 code 由
+        ux_stock_location_wh_code 唯一索引兜底，这里前置校验给出可读错误。
+        """
+        try:
+            code = (code or "").strip()
+            if not code or len(code) > 32:
+                raise ValueError("库位编码必填且不超过 32 字符")
+            wh = self.db.get(Warehouse, warehouse_id)
+            if wh is None:
+                raise ValueError(f"仓库不存在: {warehouse_id}")
+            dup = (
+                self.db.query(StockLocation)
+                .filter_by(warehouse_id=warehouse_id, code=code)
+                .first()
+            )
+            if dup is not None:
+                raise ValueError(f"库位编码已存在: {code}")
+            loc = StockLocation(
+                warehouse_id=warehouse_id, code=code, name=name, is_active=is_active
+            )
+            self.db.add(loc)
+            self.db.flush()
+            self._audit(actor, "create", "stock_location", loc.id,
+                        detail=f"创建库位 {code} warehouse={warehouse_id}", ip=ip)
+            self.db.commit()
+            return loc
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def list_locations(self, warehouse_id=None, include_inactive=False):
+        """库位清单（可按仓库过滤）。"""
+        q = self.db.query(StockLocation).order_by(StockLocation.warehouse_id, StockLocation.code)
+        if warehouse_id is not None:
+            q = q.filter_by(warehouse_id=warehouse_id)
+        if not include_inactive:
+            q = q.filter_by(is_active=True)
+        return q.all()
+
+    def location_stock(self, location_id):
+        """库位现存量（事件溯源口径）：按 StockMove.qty 有符号聚合。
+
+        约定：入库流水(to_location_id=本库位, qty>0)、出库流水(from_location_id=本库位,
+        qty<0)、调拨两条流水各挂一侧库位 —— 因此 sum(qty) over 关联流水的带符号和即
+        库位现存量。仓库级余额校验仍是权威约束；库位余额是追溯视图（未启用库位前
+        的历史流水不计入任何库位）。
+        """
+        loc = self.db.get(StockLocation, location_id)
+        if loc is None:
+            raise ValueError(f"库位不存在: {location_id}")
+        rows = (
+            self.db.query(
+                StockMove.product_id,
+                db.func.sum(StockMove.qty),
+                db.func.max(StockMove.created_at),
+            )
+            .filter(
+                db.or_(
+                    StockMove.from_location_id == location_id,
+                    StockMove.to_location_id == location_id,
+                )
+            )
+            .group_by(StockMove.product_id)
+            .all()
+        )
+        product_ids = [r[0] for r in rows]
+        products = {p.id: p for p in self.db.query(Product).filter(Product.id.in_(product_ids))} if product_ids else {}
+        return {
+            "location": {"id": loc.id, "code": loc.code, "name": loc.name,
+                         "warehouse_id": loc.warehouse_id},
+            "items": [
+                {
+                    "product_id": pid,
+                    "sku": products[pid].sku if pid in products else None,
+                    "qty": int(qty or 0),
+                    "last_move_at": last_at.isoformat() if last_at else None,
+                }
+                for pid, qty, last_at in rows
+            ],
+        }
+
+    # ==================== P3-G1: 试算平衡（科目余额表） ====================
+
+    def trial_balance(self):
+        """科目余额表（单行凭证模型下的试算平衡视图）。
+
+        AccountMove 是单行凭证（无借贷列）：payable/receivable 正记、refund 红字
+        正记靠 ref_type 区分、cogs 借贷成对（净额≈0）。本报表按 (account, ref_type)
+        聚合净额与税额并给出全局总计；同时校验 ref_order 断链（指向不存在的
+        采购单/销售单/退货单）。真正的复式双分录改造是架构级变更，见
+        docs/PHASE3_BUSINESS.md 的取舍记录。
+        """
+        rows = (
+            self.db.query(
+                AccountMove.account,
+                AccountMove.ref_type,
+                db.func.count(AccountMove.id),
+                db.func.sum(AccountMove.amount),
+                db.func.sum(AccountMove.tax_amount),
+            )
+            .group_by(AccountMove.account, AccountMove.ref_type)
+            .order_by(AccountMove.account, AccountMove.ref_type)
+            .all()
+        )
+        accounts = [
+            {
+                "account": account or "(未设置)",
+                "ref_type": ref_type,
+                "entry_count": int(cnt or 0),
+                "net_amount": float(net or 0),
+                "tax_amount": float(tax or 0),
+            }
+            for account, ref_type, cnt, net, tax in rows
+        ]
+        totals = {
+            "entry_count": sum(a["entry_count"] for a in accounts),
+            "net_amount": round(sum(a["net_amount"] for a in accounts), 2),
+            "tax_amount": round(sum(a["tax_amount"] for a in accounts), 2),
+        }
+
+        # 断链检查：ref_order 必须指向真实单据（采购/销售/退货）
+        po = {r[0] for r in self.db.query(PurchaseOrder.order_no).all()}
+        so = {r[0] for r in self.db.query(SaleOrder.order_no).all()}
+        ro = {r[0] for r in self.db.query(ReturnOrder.return_no).all()}
+        valid = po | so | ro
+        dangling = (
+            self.db.query(AccountMove.ref_order, AccountMove.ref_type, db.func.count(AccountMove.id))
+            .group_by(AccountMove.ref_order, AccountMove.ref_type)
+            .all()
+        )
+        dangling_refs = [
+            {"ref_order": ref, "ref_type": rt, "entry_count": int(cnt)}
+            for ref, rt, cnt in dangling
+            if ref not in valid
+        ]
+        return {"accounts": accounts, "totals": totals, "dangling_refs": dangling_refs}
 
     # ==================== 查询接口 ====================
 

@@ -85,6 +85,9 @@ def create_transfer():
             qty=data["qty"],
             from_warehouse_id=data["from_warehouse_id"],
             to_warehouse_id=data["to_warehouse_id"],
+            actor=get_actor_name(),
+            from_location_id=data.get("from_location_id"),
+            to_location_id=data.get("to_location_id"),
         )
         return jsonify({"status": "ok", "ref_order": ref})
     except ValueError as e:
@@ -526,3 +529,79 @@ def close_accounting_period(name: str):
         ), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/trial-balance", methods=["GET"])
+@require_permission("erp:read")
+def trial_balance():
+    """P3-G1: 科目余额表（试算平衡视图）+ ref_order 断链检查。"""
+    try:
+        return jsonify(ERPService().trial_balance())
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/locations", methods=["GET"])
+@require_permission("erp:read")
+def list_locations():
+    """P3-G3: 库位清单（?warehouse_id= 过滤，include_inactive=1 含停用）。"""
+    warehouse_id = request.args.get("warehouse_id", type=int)
+    include_inactive = request.args.get("include_inactive", "0") in ("1", "true")
+    locations = ERPService().list_locations(
+        warehouse_id=warehouse_id, include_inactive=include_inactive
+    )
+    return jsonify(
+        {
+            "items": [
+                {
+                    "id": loc.id,
+                    "warehouse_id": loc.warehouse_id,
+                    "code": loc.code,
+                    "name": loc.name,
+                    "is_active": loc.is_active,
+                }
+                for loc in locations
+            ]
+        }
+    )
+
+
+@bp.route("/locations", methods=["POST"])
+@require_permission("erp:write")
+def create_location():
+    """P3-G3: 创建库位（仓库内唯一 code）。"""
+    data = request.get_json(force=True, silent=True) or {}
+    if not data.get("warehouse_id") or not data.get("code"):
+        return jsonify({"error": "缺少必填参数 warehouse_id / code"}), 400
+    try:
+        loc = ERPService().create_location(
+            warehouse_id=data["warehouse_id"],
+            code=str(data["code"]),
+            name=data.get("name"),
+            is_active=bool(data.get("is_active", True)),
+            actor=get_actor_name(),
+        )
+        return (
+            jsonify(
+                {
+                    "id": loc.id,
+                    "warehouse_id": loc.warehouse_id,
+                    "code": loc.code,
+                    "name": loc.name,
+                    "is_active": loc.is_active,
+                }
+            ),
+            201,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/locations/<int:location_id>/stock", methods=["GET"])
+@require_permission("erp:read")
+def location_stock(location_id: int):
+    """P3-G3: 库位现存量（按 StockMove 事件溯源聚合，产品粒度）。"""
+    try:
+        return jsonify(ERPService().location_stock(location_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404

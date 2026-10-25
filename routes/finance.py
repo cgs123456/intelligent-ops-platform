@@ -11,7 +11,7 @@
 
 import logging
 
-from flask import Blueprint, request
+from flask import Blueprint, jsonify, request
 
 from extensions import db
 from models.finance import ReconciliationBatch, ReconciliationEntry
@@ -220,3 +220,38 @@ def close_batch(batch_id: int):
     except Exception:
         logger.exception("关闭批次失败 batch_id=%s", batch_id)
         return error_response("ERR_SYS_001", "关闭批次失败，请联系管理员")
+
+
+@bp.route("/batches/<int:batch_id>/adjustments", methods=["POST"])
+@require_permission("recon:create")
+def create_adjustment(batch_id: int):
+    """P3-G2: 创建人工调节项（source=manual 明细），用于配平无法自动匹配的差异。"""
+    data = request.get_json(force=True, silent=True) or {}
+    missing = [k for k in ("reference_no", "amount", "direction", "reason") if not data.get(k)]
+    if missing:
+        return jsonify({"error": f"缺少必填参数: {', '.join(missing)}"}), 400
+    try:
+        entry = ReconciliationService().create_adjustment(
+            batch_id=batch_id,
+            reference_no=data["reference_no"],
+            amount=data["amount"],
+            direction=data["direction"],
+            reason=data["reason"],
+            account_code=data.get("account_code", "ADJ"),
+            actor=get_actor_name(),
+        )
+        return (
+            jsonify(
+                {
+                    "id": entry.id,
+                    "batch_id": entry.batch_id,
+                    "source": entry.source,
+                    "reference_no": entry.reference_no,
+                    "amount": float(entry.amount),
+                    "direction": entry.direction,
+                }
+            ),
+            201,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400

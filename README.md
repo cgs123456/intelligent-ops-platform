@@ -408,6 +408,10 @@ flask db upgrade
 | GET | /api/v1/erp/accounting-periods | erp:read | P3:会计期间列表 |
 | POST | /api/v1/erp/accounting-periods | erp:write | P3:创建会计期间(YYYY-MM) |
 | POST | /api/v1/erp/accounting-periods/<name>/close | erp:write | P3:关闭会计期间(关账月禁止过账) |
+| GET | /api/v1/erp/trial-balance | erp:read | P3:科目余额表+断链检查 |
+| GET | /api/v1/erp/locations | erp:read | P3:库位清单(可按仓库过滤) |
+| POST | /api/v1/erp/locations | erp:write | P3:创建库位(仓库内code唯一) |
+| GET | /api/v1/erp/locations/<id>/stock | erp:read | P3:库位现存量(流水聚合) |
 
 ### RPA(rpa)
 
@@ -431,6 +435,7 @@ flask db upgrade
 | POST | /api/v1/fde/run-dq | fde:run | 执行数据质量校验 |
 | POST | /api/v1/fde/backfill | fde:run | 重跑 ETL 指定日期范围[DWS+ADS] |
 | GET | /api/v1/fde/sku-classification | fde:read | P3:SKU ABC/XYZ 分级(支持 dt/abc/xyz 过滤) |
+| POST | /api/v1/finance/batches/<id>/adjustments | recon:create | P3:人工调节项(配平差异后可关账) |
 
 ### AIGC(aigc)
 

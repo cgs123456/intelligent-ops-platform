@@ -149,7 +149,29 @@ class StockMove(db.Model):
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))
     # P1-9: 批次管理（关联 StockLot，可空，非批次商品为 NULL）
     lot_id = db.Column(db.Integer, db.ForeignKey("erp_stock_lot.id"), nullable=True, index=True)
+    # P3-G3: 库位追溯（可空——历史流水与未启用库位的仓库无库位）。
+    # 语义：transfer 流水 from/to 成对出现；in 流水记 to_location（入库位）；
+    # out 流水记 from_location（出库位）。库位现存量按流水聚合（事件溯源口径）。
+    from_location_id = db.Column(db.Integer, db.ForeignKey("erp_stock_location.id"), nullable=True)
+    to_location_id = db.Column(db.Integer, db.ForeignKey("erp_stock_location.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
+
+
+class StockLocation(db.Model):
+    """库位（P3-G3，仓库内细分管位）
+
+    库位不改变库存总量（Product.stock_qty / 仓库级余额不变），仅提供流水级
+    追溯与库位维度现存量聚合（按 StockMove 事件溯源）。code 在仓库内唯一。
+    """
+
+    __tablename__ = "erp_stock_location"
+    __table_args__ = (db.Index("ux_stock_location_wh_code", "warehouse_id", "code", unique=True),)
+    id = db.Column(db.Integer, primary_key=True)
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=False, index=True)
+    code = db.Column(db.String(32), nullable=False)
+    name = db.Column(db.String(64))
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
 
 class AccountMove(db.Model):

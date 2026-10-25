@@ -14,6 +14,7 @@ from .erp import (
     ReorderRule,
     ReturnOrder,
     SaleOrder,
+    StockLocation,
     StockLot,
     StockMove,
     StockTake,
@@ -94,4 +95,7 @@ __all__ = [
     "BOMItem",
     "MRPPlan",
     "MRPRequirement",
+    # 会计期间 / 库位（P3）
+    "AccountingPeriod",
+    "StockLocation",
 ]
