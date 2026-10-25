@@ -674,6 +674,49 @@ class WarehouseService:
             )
             transit_map = {r[0]: int(r[1] or 0) for r in transit_rows}
 
+            # ---- P3-F2: ABC/XYZ 分级预取（滚动 90 天窗口）----
+            # ABC：销售额帕累托 A(累计<=80%) / B(<=95%) / C(其余)
+            # XYZ：日销量变异系数 X(<0.5) / Y(<1.0) / Z(>=1.0)
+            cls_window = int(self._flag("FDE_CLASSIFY_WINDOW_DAYS", 90))
+            cls_start = target_date - timedelta(days=cls_window - 1)
+            cls_rows = (
+                self.session.query(
+                    DwsSalesSkuDaily.product_id,
+                    func.coalesce(func.sum(DwsSalesSkuDaily.sale_amount), 0),
+                    func.coalesce(func.avg(DwsSalesSkuDaily.sale_qty), 0),
+                    func.coalesce(func.sum(DwsSalesSkuDaily.sale_qty * DwsSalesSkuDaily.sale_qty), 0),
+                    func.count(DwsSalesSkuDaily.id),
+                )
+                .filter(DwsSalesSkuDaily.dt >= cls_start, DwsSalesSkuDaily.dt <= target_date)
+                .group_by(DwsSalesSkuDaily.product_id)
+                .all()
+            )
+            cls_map = {}
+            for pid, amount, avg_qty, sum_sq, n_days in cls_rows:
+                mean = float(avg_qty or 0)
+                # E[Q^2]-E[Q]^2 与 mean 同口径（均按有 DWS 记录的天数）。
+                # DWS 只在有销售日落行，零销日缺口无法与"无数据"区分；
+                # 按观测日口径会低估间歇性需求的波动，但避免把"数据未铺满
+                # 窗口的稳定 SKU"误判为 Z（过度备货），风险更可控。
+                var = max(0.0, float(sum_sq or 0) / max(1, n_days) - mean * mean)
+                cv = (var**0.5) / mean if mean > 0 else None
+                cls_map[pid] = {"revenue": float(amount or 0), "cv": cv}
+            total_rev = sum(v["revenue"] for v in cls_map.values()) or 1.0
+            cum = 0.0
+            for rank, (_, v) in enumerate(sorted(cls_map.items(), key=lambda kv: kv[1]["revenue"], reverse=True)):
+                cum += v["revenue"]
+                v["share"] = round(v["revenue"] / total_rev, 6)
+                v["cum_share"] = round(cum / total_rev, 6)
+                # 首条（销售额最大）强制 A，保证垄断型 SKU 结构也有 A 层
+                if rank == 0 or v["cum_share"] <= 0.80:
+                    v["abc"] = "A"
+                elif v["cum_share"] <= 0.95:
+                    v["abc"] = "B"
+                else:
+                    v["abc"] = "C"
+                cv = v["cv"]
+                v["xyz"] = "X" if cv is not None and cv < 0.5 else ("Y" if cv is not None and cv < 1.0 else "Z")
+
             # 最优供应商报价：批量版（3 条查询替换 3N 条）
             best_quote_map = {}
             if RPAService is not None:
@@ -695,6 +738,7 @@ class WarehouseService:
                 avg_daily = recent_sales / 7.0 if recent_sales else 0.0
                 in_transit = transit_map.get(p.id, 0)
 
+                cls = cls_map.get(p.id, {})
                 # 最优供应商（决定交期与建议供应商）
                 best = best_quote_map.get(p.id)
                 # P1-8: 防御性检查 best[1] 避免访问 None 或空值导致 TypeError
@@ -722,6 +766,10 @@ class WarehouseService:
                         suggested_supplier_id=sup_id,
                         suggested_supplier_name=sup_name,
                         reason=reason,
+                        abc_class=cls.get("abc"),
+                        xyz_class=cls.get("xyz"),
+                        revenue_share_90d=cls.get("share"),
+                        cv_90d=round(cls["cv"], 4) if cls.get("cv") is not None else None,
                         dt=target_date,
                     )
                 )

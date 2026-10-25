@@ -105,3 +105,52 @@ def anomalies():
     else:
         result = detector.detect_sales_anomalies(target_date)
     return jsonify(result)
+
+@bp.route("/sku-classification")
+@require_permission("fde:read")
+def sku_classification():
+    """P3-F2: SKU ABC/XYZ 分级（最近一次 ETL 写入 ADS 的快照）。
+
+    Query:
+        - dt: 可选日期过滤（默认返回最新一天的数据）
+        - abc / xyz: 可选分级过滤（A/B/C、X/Y/Z）
+    """
+    from extensions import db
+    from models.warehouse import AdsReplenishmentSuggest
+
+    q = db.session.query(AdsReplenishmentSuggest)
+    dt = request.args.get("dt")
+    if dt:
+        q = q.filter(AdsReplenishmentSuggest.dt == dt)
+    else:
+        latest_dt = (
+            db.session.query(db.func.max(AdsReplenishmentSuggest.dt)).scalar()
+        )
+        if latest_dt is None:
+            return jsonify([])
+        q = q.filter(AdsReplenishmentSuggest.dt == latest_dt)
+    abc = request.args.get("abc", "").strip().upper()
+    xyz = request.args.get("xyz", "").strip().upper()
+    if abc in ("A", "B", "C"):
+        q = q.filter(AdsReplenishmentSuggest.abc_class == abc)
+    if xyz in ("X", "Y", "Z"):
+        q = q.filter(AdsReplenishmentSuggest.xyz_class == xyz)
+    rows = (
+        q.order_by(AdsReplenishmentSuggest.revenue_share_90d.desc())
+        .limit(500)
+        .all()
+    )
+    return jsonify(
+        [
+            {
+                "product_id": r.product_id,
+                "product_name": r.product_name,
+                "abc_class": r.abc_class,
+                "xyz_class": r.xyz_class,
+                "revenue_share_90d": float(r.revenue_share_90d) if r.revenue_share_90d is not None else None,
+                "cv_90d": float(r.cv_90d) if r.cv_90d is not None else None,
+                "dt": r.dt.isoformat() if r.dt else None,
+            }
+            for r in rows
+        ]
+    )

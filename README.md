@@ -43,6 +43,10 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 - **Data Agent Text2SQL 全链路**:NL→SQL 生成 → sqlglot AST 安全校验(单语句/SELECT-WITH/禁 DDL-DML 节点/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
 - **FDE 时序异常检测**:7 日移动平均 + 2σ/3σ 分级,critical 异常自动触发闭环补货,warning+ 多渠道告警,Celery Beat 09:00-22:00 整点调度
 - **LLM 经营日报**:4 段式(昨日回顾 + 趋势分析 + 风险提示 + 建议行动),读取近 7 天 ADS 趋势,Notifier 多渠道推送
+- **统计安全库存**:SS = z × σ_日需求 × √提前期(z 表四档服务水位,σ 含零日,提前期取最优报价供应商),按产品重算并可回写,替代静态手工字段
+- **SKU ABC/XYZ 分级**:ETL 滚动 90 天窗口帕累托 ABC(80%/95%)+ 日销量变异系数 XYZ(cv<0.5/<1.0),补货策略可按"价值×波动"分级
+- **高金额审批分级**:补货建议金额(数量×最优报价)≥阈值需 `aigc:approve_high` 权限,operator 默认不含,admin 通配
+- **会计期间锁定**:YYYY-MM 期间关账后四个过账入口(采购确认/销售/退货/采购退)统一拒绝,月结报表不被改写
 
 ### 高级改进
 
@@ -400,6 +404,10 @@ flask db upgrade
 | POST | /api/v1/erp/stock-takes | erp:write | 创建盘点单(@idempotent) |
 | GET | /api/v1/erp/stock-takes | erp:read | 盘点单列表(支持 product_id/status 过滤) |
 | POST | /api/v1/erp/stock-takes/<id>/confirm | erp:write | 确认盘点:调整库存+流水(@idempotent) |
+| POST | /api/v1/erp/products/<id>/safety-stock-recalc | erp:write | P3:安全库存重算(SS=z×σ×√LT,支持 service_level/window_days/apply) |
+| GET | /api/v1/erp/accounting-periods | erp:read | P3:会计期间列表 |
+| POST | /api/v1/erp/accounting-periods | erp:write | P3:创建会计期间(YYYY-MM) |
+| POST | /api/v1/erp/accounting-periods/<name>/close | erp:write | P3:关闭会计期间(关账月禁止过账) |
 
 ### RPA(rpa)
 
@@ -422,6 +430,7 @@ flask db upgrade
 | GET | /api/v1/fde/anomalies | fde:read | 改进9:时序异常检测(支持 date/trigger 参数,trigger=true 触发闭环+告警) |
 | POST | /api/v1/fde/run-dq | fde:run | 执行数据质量校验 |
 | POST | /api/v1/fde/backfill | fde:run | 重跑 ETL 指定日期范围[DWS+ADS] |
+| GET | /api/v1/fde/sku-classification | fde:read | P3:SKU ABC/XYZ 分级(支持 dt/abc/xyz 过滤) |
 
 ### AIGC(aigc)
 
@@ -429,7 +438,7 @@ flask db upgrade
 |---|---|---|---|
 | GET | /api/v1/aigc/suggestions | aigc:read | 待审建议列表 |
 | POST | /api/v1/aigc/generate-suggestions | aigc:review | 生成补货建议 |
-| POST | /api/v1/aigc/review | aigc:review | 审核建议(支持 final_qty) |
+| POST | /api/v1/aigc/review | aigc:review | 审核建议(支持 final_qty;金额≥SUGGESTION_HIGH_VALUE_AMOUNT 需 aigc:approve_high) |
 | POST | /api/v1/aigc/batch-review | aigc:review | 批量审核 |
 | GET | /api/v1/aigc/report | aigc:read | 最新日报 |
 | POST | /api/v1/aigc/generate-report | fde:run | 改进10:生成 4 段式 LLM 日报(支持 push/date 参数,push=true 多渠道推送) |

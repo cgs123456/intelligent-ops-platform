@@ -12,7 +12,13 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.aigc_service import AIGCService
 from services.idempotency import idempotent
-from services.rbac import get_actor_name, require_permission, verify_sse_auth
+from services.rbac import (
+    get_actor_name,
+    get_current_user,
+    get_user_permissions,
+    require_permission,
+    verify_sse_auth,
+)
 
 bp = Blueprint("aigc", __name__, url_prefix="/api/v1/aigc")
 
@@ -44,6 +50,10 @@ def review():
     # P0-11/M8 修复：缺参返回 400（此前 KeyError 直接 500），操作人取认证身份防伪造
     if sid is None or not action:
         return jsonify({"error": "缺少必填参数 id / action"}), 400
+    # P3-F3: 传递调用方权限集合，高金额建议（金额>=SUGGESTION_HIGH_VALUE_AMOUNT）
+    # approve 需 aigc:approve_high；无认证身份（dev 放行）传 None 由服务层按系统内部调用放行
+    current_user = get_current_user()
+    actor_permissions = get_user_permissions(current_user) if current_user else None
     try:
         AIGCService().review_suggestion(
             sid,
@@ -51,6 +61,7 @@ def review():
             data.get("note", ""),
             get_actor_name(data.get("reviewer")),
             final_qty=data.get("final_qty"),
+            actor_permissions=actor_permissions,
         )
         return jsonify(
             {
@@ -74,6 +85,9 @@ def batch_review():
     if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
         return jsonify({"error": "ids 必须为整数数组"}), 400
     reviewer = get_actor_name(data.get("reviewer"))
+    # P3-F3: 批量审核同样传递调用方权限（防止单条路径管住、批量路径绕过高金额审批）
+    current_user = get_current_user()
+    actor_permissions = get_user_permissions(current_user) if current_user else None
     results = []
     from extensions import db
 
@@ -81,7 +95,10 @@ def batch_review():
     for sid in ids:
         try:
             nested = db.session.begin_nested()
-            AIGCService().review_suggestion(sid, action, reviewer=reviewer, auto_commit=False)
+            AIGCService().review_suggestion(
+                sid, action, reviewer=reviewer, auto_commit=False,
+                actor_permissions=actor_permissions,
+            )
             nested.commit()
             results.append({"id": sid, "status": "ok", "new_status": action})
         except ValueError as e:

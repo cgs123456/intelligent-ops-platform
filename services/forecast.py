@@ -33,7 +33,7 @@ def _linear_slope(values):
     denom = sum((x - mx) ** 2 for x in xs)
     if denom == 0:
         return 0.0
-    return sum((x - mx) * (y - my) for x, y in zip(xs, values)) / denom
+    return sum((x - mx) * (y - my) for x, y in zip(xs, values, strict=True)) / denom
 
 
 def forecast_daily_demand(series, target_date=None, window_days=14):
@@ -101,7 +101,7 @@ def forecast_daily_demand(series, target_date=None, window_days=14):
 
     n = len(days)
     weights = list(range(1, n + 1))
-    wma = sum(q * w for q, w in zip(days, weights)) / sum(weights)
+    wma = sum(q * w for q, w in zip(days, weights, strict=True)) / sum(weights)
     trend = _linear_slope(days) * _TREND_DAMPING
     forecast = max(0.0, wma + trend)
 
@@ -124,4 +124,56 @@ def forecast_daily_demand(series, target_date=None, window_days=14):
         "trend": round(trend, 2),
         "recent_7d_sales": recent_7d,
         "samples": samples,
+    }
+
+
+# 服务水位 → 正态分位 z 值（统计安全库存 SS = z × σ_日需求 × √提前期）
+_Z_TABLE = {0.90: 1.2816, 0.95: 1.6449, 0.98: 2.0537, 0.99: 2.3263}
+
+
+def safety_stock_recommendation(daily_series, lead_days, service_level=0.95, window_days=90):
+    """基于需求波动与交期的统计安全库存建议。
+
+    SS = z × σ_日需求 × √lead_days（离散需求的正态近似，业界通用口径，
+    参照 stockpyl/Odoo/ERPNext 的 orderpoint 实践）。σ 直接取窗口内
+    含零日的日销量标准差——缺销日也是真实的需求实现，不能用有销日子集
+    低估波动。
+
+    :param daily_series: [(date, qty), ...] 历史日销量（可稀疏，缺失按 0）
+    :param lead_days: 补货提前期（天），<=0 视为 1
+    :param service_level: 服务水位，仅支持 0.90/0.95/0.98/0.99
+    :param window_days: 波动率回看窗口（默认 90 天）
+    :return: {
+        "safety_stock": int 建议安全库存（>=0）,
+        "sigma_daily": float 日需求标准差,
+        "z": float 分位值,
+        "service_level": float 原样返回,
+        "samples": int 窗口天数（含补零日）,
+    }
+    :raises ValueError: service_level 不在支持列表内
+    """
+    if service_level not in _Z_TABLE:
+        raise ValueError(f"不支持的服务水位 {service_level}，可选：{sorted(_Z_TABLE)}")
+    z = _Z_TABLE[service_level]
+
+    if not daily_series:
+        return {"safety_stock": 0, "sigma_daily": 0.0, "z": z, "service_level": service_level, "samples": 0}
+
+    target_date = max(d for d, _ in daily_series)
+    by_date = {d: int(q or 0) for d, q in daily_series if d <= target_date}
+    days = [by_date.get(target_date - timedelta(days=i), 0) for i in range(window_days - 1, -1, -1)]
+
+    n = len(days)
+    mean = sum(days) / n
+    variance = sum((q - mean) ** 2 for q in days) / n
+    sigma = variance**0.5
+    lead = max(1, int(lead_days or 1))
+    ss = z * sigma * (lead**0.5)
+
+    return {
+        "safety_stock": max(0, int(round(ss))),
+        "sigma_daily": round(sigma, 2),
+        "z": z,
+        "service_level": service_level,
+        "samples": n,
     }

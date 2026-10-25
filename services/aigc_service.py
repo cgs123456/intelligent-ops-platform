@@ -19,8 +19,13 @@ from collections import Counter
 from datetime import date, datetime
 from types import MappingProxyType
 
+from flask import current_app
+from sqlalchemy import func
+
 from extensions import db
 from models.aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
+from models.erp import Product
+from models.external import ExtSupplierQuote
 from models.warehouse import AdsDailyOpsReport, AdsReplenishmentSuggest
 
 logger = logging.getLogger(__name__)
@@ -974,7 +979,32 @@ class AIGCService:
             for s in rows
         ]
 
-    def review_suggestion(self, id, action, note="", reviewer="system", final_qty=None, auto_commit=True):
+    def _suggestion_amount(self, suggestion, qty=None):
+        """P3-F3：估算建议金额 = 数量 × 单价。
+
+        单价优先取该产品活跃供应商报价中的最低价（补货按最优报价估算）；
+        无报价回退 Product.avg_cost（移动加权平均成本）；两者皆无返回 0
+        （不触发高金额校验）。
+        """
+        quantity = qty if qty is not None else suggestion.suggested_qty
+        if not quantity or quantity <= 0:
+            return 0.0
+        unit_price = (
+            self.session.query(func.min(ExtSupplierQuote.quote_price))
+            .join(Product, Product.id == ExtSupplierQuote.product_id)
+            .filter(
+                ExtSupplierQuote.product_id == suggestion.product_id,
+                Product.is_active.is_(True),
+            )
+            .scalar()
+        )
+        if unit_price is None:
+            product = self.session.get(Product, suggestion.product_id)
+            unit_price = float(product.avg_cost or 0) if product else 0.0
+        return float(quantity) * float(unit_price or 0)
+
+    def review_suggestion(self, id, action, note="", reviewer="system", final_qty=None,
+                           auto_commit=True, actor_permissions=None):
         """审核补货建议：action 为 approve/reject 或 approved/rejected。
         review 时自动调 record_feedback 记录反馈。
 
@@ -983,6 +1013,9 @@ class AIGCService:
                           reject 时强制为 0
         :param auto_commit: P1-3，False 时仅变更不提交，由调用方（批量审核）统一提交，
                             避免 2N 次独立 commit
+        :param actor_permissions: P3-F3，调用方权限集合（set[str]）。approve 时若建议金额
+                            >= SUGGESTION_HIGH_VALUE_AMOUNT，要求集合含 aigc:approve_high
+                            或 *:*，否则拒绝（None 视为系统内部调用，放行）
         """
         s = self.session.query(Suggestion).filter(Suggestion.id == id).first()
         if not s:
@@ -998,6 +1031,17 @@ class AIGCService:
 
         if s.status != "pending":
             raise ValueError(f"建议已处理（当前状态：{s.status})")
+
+        # P3-F3: 高金额审批——金额 = 数量 × 单价（最新活跃报价优先，回退移动加权成本）
+        if action == "approved" and actor_permissions is not None:
+            amount = self._suggestion_amount(s, final_qty)
+            threshold = float(current_app.config.get("SUGGESTION_HIGH_VALUE_AMOUNT", 50000))
+            if amount >= threshold:
+                perms = actor_permissions if isinstance(actor_permissions, (set, frozenset, list, tuple)) else set()
+                if "aigc:approve_high" not in perms and "*:*" not in perms:
+                    raise ValueError(
+                        f"高金额建议（约 {amount:.2f}）需 aigc:approve_high 权限审批"
+                    )
 
         # P1-3/P0-3: 数量修改逻辑 —— 审核改量必须真正覆盖 suggested_qty（闭环 step3 按其下单）
         if action == "approved":

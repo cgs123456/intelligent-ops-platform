@@ -136,6 +136,13 @@ class AdsReplenishmentSuggest(db.Model):
     suggested_supplier_id = db.Column(db.Integer)
     suggested_supplier_name = db.Column(db.String(64))
     reason = db.Column(db.Text)
+    # P3-F2: ABC/XYZ SKU 分级（滚动 90 天窗口，ETL 每日重算）
+    # abc_class: 按销售额帕累托 A(累计≤80%)/B(≤95%)/C(其余)
+    # xyz_class: 按日销量变异系数 X(<0.5 稳定)/Y(<1.0 波动)/Z(≥1.0 无规律)
+    abc_class = db.Column(db.String(1))
+    xyz_class = db.Column(db.String(1))
+    revenue_share_90d = db.Column(db.Numeric(8, 6))  # 90 天销售额占比 0~1
+    cv_90d = db.Column(db.Numeric(8, 4))  # 90 天日销量变异系数
     dt = db.Column(db.Date, index=True)
 
 

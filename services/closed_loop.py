@@ -856,7 +856,6 @@ class ClosedLoop:
     @staticmethod
     def _step3_rpa_order(actor="system", cancel_event=None):
         from models.aigc import Suggestion
-
         from models.erp import PurchaseOrder
 
         _, RPAService, _, _ = ClosedLoop._services()

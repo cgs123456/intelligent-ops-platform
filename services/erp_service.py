@@ -14,12 +14,14 @@ ERP 服务层（模拟 Odoo 进销存 + 财务核心链路）
 """
 
 import logging
+import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from extensions import db
 from models.erp import (
+    AccountingPeriod,
     AccountMove,
     Budget,
     ExchangeRate,
@@ -34,7 +36,10 @@ from models.erp import (
     Supplier,
     Warehouse,
 )
+from models.external import ExtSupplierQuote
 from models.system import AuditLog
+from models.warehouse import DwsSalesSkuDaily
+from services.forecast import safety_stock_recommendation
 from services.notifier import notifier
 
 logger = logging.getLogger(__name__)
@@ -48,6 +53,102 @@ class ERPService:
         self.db = db_session or db.session
 
     # ==================== 内部工具 ====================
+
+    def _assert_period_open(self, move_date=None):
+        """会计期间锁定校验：关账期间禁止过账（P3-F4）。
+
+        无期间记录视为开放（未建期间不禁账）；命中 is_closed 抛 ValueError，
+        由调用方在事务内回滚。四个过账入口调用：confirm_purchase_order /
+        create_sale_order / create_return_order / create_purchase_return。
+        """
+        d = move_date or datetime.now()
+        name = f"{d.year:d}-{d.month:02d}"
+        period = self.db.query(AccountingPeriod).filter_by(name=name).first()
+        if period is not None and period.is_closed:
+            raise ValueError(f"会计期间 {name} 已关账（{period.closed_by or '未知'} 关闭），禁止过账")
+
+    def recalc_safety_stock(self, product_id, service_level=0.95, window_days=90, apply=False, actor="system"):
+        """基于需求波动与交期的安全库存建议（P3-F1）。
+
+        SS = z × σ_日需求 × √提前期。σ 取 DWS 日销序列（含零日）标准差；
+        提前期取最优活跃报价供应商的 lead_days，无报价回退 5 天（与 ADS 补货同口径）。
+        apply=True 时更新 Product.safety_stock 并写审计。
+        """
+        product = self.db.query(Product).filter_by(id=product_id).first()
+        if product is None:
+            raise ValueError(f"产品不存在: {product_id}")
+
+        series_start = date.today() - timedelta(days=window_days - 1)
+        rows = (
+            self.db.query(DwsSalesSkuDaily.dt, DwsSalesSkuDaily.sale_qty)
+            .filter(
+                DwsSalesSkuDaily.product_id == product_id,
+                DwsSalesSkuDaily.dt >= series_start,
+            )
+            .all()
+        )
+        series = [(dt, int(q or 0)) for dt, q in rows]
+
+        best = (
+            self.db.query(Supplier)
+            .join(ExtSupplierQuote, ExtSupplierQuote.supplier_id == Supplier.id)
+            .filter(ExtSupplierQuote.product_id == product_id, Supplier.is_active.is_(True))
+            .order_by(ExtSupplierQuote.quote_price.asc(), ExtSupplierQuote.quote_date.desc())
+            .first()
+        )
+        lead_days = best.lead_days if best else 5
+
+        rec = safety_stock_recommendation(series, lead_days, service_level=service_level, window_days=window_days)
+        rec["lead_days"] = lead_days
+        rec["current_safety_stock"] = product.safety_stock
+
+        if apply:
+            product.safety_stock = rec["safety_stock"]
+            self._audit(
+                actor,
+                "update",
+                "product",
+                product.id,
+                detail=f"安全库存重算: {rec['current_safety_stock']} -> {rec['safety_stock']}"
+                f"（服务水位{service_level}，σ={rec['sigma_daily']}，交期{lead_days}天）",
+            )
+            self.db.commit()
+        return rec
+
+    # ---- P3-F4: 会计期间管理 ----
+
+    def list_accounting_periods(self):
+        """列出全部会计期间（按名称倒序，最近在前）。"""
+        return self.db.query(AccountingPeriod).order_by(AccountingPeriod.name.desc()).all()
+
+    def create_accounting_period(self, name, actor="system"):
+        """创建会计期间。name 格式 YYYY-MM（正则校验），唯一约束防重。"""
+        if not isinstance(name, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", (name or "").strip()):
+            raise ValueError("期间格式必须为 YYYY-MM（如 2026-10）")
+        name = name.strip()
+        if self.db.query(AccountingPeriod).filter_by(name=name).first():
+            raise ValueError(f"会计期间 {name} 已存在")
+        period = AccountingPeriod(name=name)
+        self.db.add(period)
+        self._audit(actor, "create", "accounting_period", None, detail=f"创建会计期间 {name}")
+        self.db.commit()
+        return period
+
+    def close_accounting_period(self, name, actor="system"):
+        """关闭会计期间：此后该月四个过账入口全部拒绝（_assert_period_open）。
+
+        幂等：重复关闭同一期间不报错（返回已关账对象）。
+        """
+        period = self.db.query(AccountingPeriod).filter_by(name=name).first()
+        if period is None:
+            raise ValueError(f"会计期间 {name} 不存在，请先创建")
+        if not period.is_closed:
+            period.is_closed = True
+            period.closed_at = datetime.now()
+            period.closed_by = actor
+            self._audit(actor, "close", "accounting_period", period.id, detail=f"关闭会计期间 {name}")
+            self.db.commit()
+        return period
 
     def _audit(self, actor, action, target_type, target_id, detail="", ip=None):
         """写审计日志（对应 Odoo auditlog 模块，所有关键操作留痕）"""
@@ -191,6 +292,8 @@ class ERPService:
               约定：amount 字段保持不含税金额，tax_amount 单独存储税额。
               若订单无税率字段（旧数据），按 0 处理，向后兼容。
         """
+        # P3-F4: 会计期间锁定校验（关账期间禁止过账）
+        self._assert_period_open()
         try:
             order = self.db.get(PurchaseOrder, order_id)
             if not order:
@@ -439,6 +542,8 @@ class ERPService:
         P1-9: 支持 currency_code/tax_rate 参数，未传时回退到 Product 默认值；
               应收凭证写入 currency_code 与 tax_amount。
         """
+        # P3-F4: 会计期间锁定校验（关账期间禁止过账）
+        self._assert_period_open()
         try:
             # P0-4: 数量/单价合法性校验（负数 qty 会反向"卖入库存"，生成负应收凭证）
             self._validate_qty_price(qty, unit_price)
@@ -606,6 +711,8 @@ class ERPService:
         - 红字应收凭证 AccountMove(refund)
         - ReturnOrder 记录
         """
+        # P3-F4: 会计期间锁定校验（关账期间禁止过账）
+        self._assert_period_open()
         try:
             # P0-1: 拒绝非正数数量/金额 —— 负数退货会反向搬运库存并生成负红字凭证
             self._validate_positive_qty(qty)
@@ -1136,6 +1243,8 @@ class ERPService:
         :return: PurchaseOrder 对象
         :raises ValueError: 采购单不存在 / 状态非 received / 退货数量超限时抛出
         """
+        # P3-F4: 会计期间锁定校验（关账期间禁止过账）
+        self._assert_period_open()
         try:
             order = self.db.query(PurchaseOrder).filter_by(order_no=order_no).first()
             if not order:

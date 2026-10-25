@@ -45,6 +45,11 @@ def get_actor_name(fallback=None):
     return fallback or "system"
 
 
+def get_user_permissions(user):
+    """P3-F3: 返回用户权限集合的公共入口（供路由层传递给服务层做业务级审批校验）。"""
+    return _collect_permissions_safely(user)
+
+
 def require_permission(permission):
     """权限校验装饰器：JWT 认证 + RBAC 权限检查。
 

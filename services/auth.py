@@ -20,9 +20,8 @@ from functools import wraps
 
 import jwt
 from flask import current_app, g, jsonify, request
-from werkzeug.security import check_password_hash
-
 from sqlalchemy.exc import IntegrityError
+from werkzeug.security import check_password_hash
 
 from extensions import db
 from models.system import AuditLog, TokenBlacklist, User

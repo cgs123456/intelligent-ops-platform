@@ -62,6 +62,8 @@ class Config:
     # FDE：ETL 配置
     FDE_INCREMENTAL = os.getenv("FDE_INCREMENTAL", "1") == "1"  # 增量拉取开关
     FDE_DQ_STRICT = os.getenv("FDE_DQ_STRICT", "1") == "1"  # 数据质量强校验
+    # P3-F2: SKU ABC/XYZ 分级统计窗口天数（ETL _etl_ads 读取）
+    FDE_CLASSIFY_WINDOW_DAYS = int(os.getenv("FDE_CLASSIFY_WINDOW_DAYS", "90"))
 
     # 闭环
     LOOP_TIMEOUT = int(os.getenv("LOOP_TIMEOUT", "60"))  # 单步超时秒数
@@ -92,6 +94,9 @@ class Config:
 
     # API 文档（flask-smorest，P0-3: 默认开启）
     API_DOCS_ENABLED = os.getenv("API_DOCS_ENABLED", "1") == "1"
+
+    # P3-F3: 高金额补货建议审批阈值（金额 = 数量 × 单价，超阈值需 aigc:approve_high 权限）
+    SUGGESTION_HIGH_VALUE_AMOUNT = float(os.getenv("SUGGESTION_HIGH_VALUE_AMOUNT", "50000"))
 
     # P2-4: Agent 评测框架路径配置（可由环境变量覆盖，避免硬编码）
     # gold SQL 用例文件路径（默认 tests/fixtures/gold_sql.json）

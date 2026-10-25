@@ -3,6 +3,7 @@
 from .aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
 from .bom import BOM, BOMItem, MRPPlan, MRPRequirement
 from .erp import (
+    AccountingPeriod,
     AccountMove,
     Budget,
     CostCenter,
@@ -46,6 +47,7 @@ __all__ = [
     "SaleOrder",
     "StockMove",
     "AccountMove",
+    "AccountingPeriod",
     "ReturnOrder",
     # P1-9 ERP 业务模块扩展
     "StockLot",

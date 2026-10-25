@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 
 from services.erp_service import ERPService
 from services.idempotency import idempotent
-from services.rbac import require_permission
+from services.rbac import get_actor_name, require_permission
 
 bp = Blueprint("erp", __name__, url_prefix="/api/v1/erp")
 
@@ -443,5 +443,86 @@ def confirm_stock_take(take_id: int):
             ),
             200,
         )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+@bp.route("/products/<int:product_id>/safety-stock-recalc", methods=["POST"])
+@require_permission("erp:write")
+def safety_stock_recalc(product_id: int):
+    """P3-F1: 重算产品安全库存（SS = z × σ_日需求 × √提前期）。
+
+    Body 可选:
+        - service_level: 服务水位 0.90/0.95/0.98/0.99（默认 0.95）
+        - window_days: 统计窗口天数（默认 90）
+        - apply: true 时把建议值写回 Product.safety_stock 并审计（默认 false 仅预览）
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        service_level = float(data.get("service_level", 0.95))
+        window_days = int(data.get("window_days", 90))
+    except (TypeError, ValueError):
+        return jsonify({"error": "service_level / window_days 必须为数值"}), 400
+    apply = bool(data.get("apply", False))
+    try:
+        rec = ERPService().recalc_safety_stock(
+            product_id,
+            service_level=service_level,
+            window_days=window_days,
+            apply=apply,
+            actor=get_actor_name(),
+        )
+        return jsonify(rec), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/accounting-periods")
+@require_permission("erp:read")
+def accounting_periods():
+    """P3-F4: 会计期间列表（名称/关账状态/关账人/关账时间）。"""
+    periods = ERPService().list_accounting_periods()
+    return jsonify(
+        [
+            {
+                "id": p.id,
+                "name": p.name,
+                "is_closed": p.is_closed,
+                "closed_by": p.closed_by,
+                "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+            }
+            for p in periods
+        ]
+    )
+
+
+@bp.route("/accounting-periods", methods=["POST"])
+@require_permission("erp:write")
+def create_accounting_period():
+    """P3-F4: 创建会计期间（YYYY-MM）。"""
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    if not name:
+        return jsonify({"error": "缺少必填参数 name（YYYY-MM）"}), 400
+    try:
+        period = ERPService().create_accounting_period(name, actor=get_actor_name())
+        return jsonify({"id": period.id, "name": period.name, "is_closed": period.is_closed}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/accounting-periods/<name>/close", methods=["POST"])
+@require_permission("erp:write")
+def close_accounting_period(name: str):
+    """P3-F4: 关闭会计期间——该月过账入口（采购确认/销售/退货/采购退）全部拒绝。"""
+    try:
+        period = ERPService().close_accounting_period(name, actor=get_actor_name())
+        return jsonify(
+            {
+                "id": period.id,
+                "name": period.name,
+                "is_closed": period.is_closed,
+                "closed_by": period.closed_by,
+            }
+        ), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

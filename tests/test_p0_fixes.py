@@ -285,9 +285,9 @@ class TestAdsCache:
 class TestReturnTransferQtyValidation:
     def test_validate_positive_qty_rejects(self):
         """_validate_positive_qty：0/负数/小数/字符串/bool/None 一律拒绝"""
-        from services.erp_service import ERPService
-
         import pytest as _pytest
+
+        from services.erp_service import ERPService
 
         for qty in [0, -1, 2.5, "3", True, None]:
             with _pytest.raises(ValueError):

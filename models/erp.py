@@ -317,3 +317,19 @@ class Customer(db.Model):
     balance = db.Column(db.Numeric(12, 2), nullable=False, default=0)  # 当前应收余额
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class AccountingPeriod(db.Model):
+    """会计期间（对应 Odoo account.period）
+
+    关账后该期间禁止过账（采购/销售/退货凭证创建前校验），
+    保障月度结账后财务数据不再被追溯修改。
+    name 为 'YYYY-MM' 月份标识；无记录的期间视为开放（未建期间不禁账）。
+    """
+
+    __tablename__ = "erp_accounting_period"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(7), nullable=False, unique=True, index=True)  # 'YYYY-MM'
+    is_closed = db.Column(db.Boolean, nullable=False, default=False)
+    closed_at = db.Column(db.DateTime)
+    closed_by = db.Column(db.String(64))
