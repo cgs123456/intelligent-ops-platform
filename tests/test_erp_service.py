@@ -308,7 +308,7 @@ class TestERPServiceQuery:
             item = next(i for i in result if i["sku"] == "TEST-001")
             assert item["stock_qty"] == 100
 
-    def test_get_recent_orders(self, app, seed_data):
+    def test_get_recent_purchase_orders(self, app, seed_data):
         """近期订单返回列表 + limit 生效"""
         with app.app_context():
             svc = ERPService()
@@ -320,7 +320,7 @@ class TestERPServiceQuery:
                     unit_price=20,
                     customer=f"客户{i}",
                 )
-            result = svc.get_recent_orders(limit=3)
+            result = svc.get_recent_purchase_orders(limit=3)
             assert len(result) <= 3
 
     def test_get_account_summary(self, app, seed_data):

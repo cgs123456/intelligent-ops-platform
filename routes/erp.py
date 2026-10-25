@@ -22,7 +22,7 @@ def orders():
     # P0: limit 上限保护，防止拉爆内存
     limit = request.args.get("limit", 20, type=int)
     limit = max(1, min(limit, 100))
-    return jsonify(ERPService().get_recent_orders(limit))
+    return jsonify(ERPService().get_recent_purchase_orders(limit))
 
 
 @bp.route("/account")

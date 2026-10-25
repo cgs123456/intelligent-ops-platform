@@ -1,12 +1,11 @@
 """routes 包初始化 · 注册所有 Blueprint
 
-旧路径兼容说明（P0 安全修复）：
-  原 /api/xxx 旧路径全部为重复实现，绕过权限校验与输入校验，存在安全风险。
-  现统一改为 redirect 到对应 /api/v1/xxx 新路径，让新路径的 @require_permission
-  装饰器统一生效。/api/dashboard 无对应 v1 路由，保留实现但加 @require_permission。
+旧无版本路径（/api/erp/* 等）曾有 308 兼容重定向，契约对齐时移除：
+前端已全部直连 /api/v1/*，项目从未上线，无存量外部消费者。
+/api/dashboard 无对应 v1 路由，保留实现并加 @require_permission。
 """
 
-from flask import jsonify, redirect
+from flask import jsonify
 
 from services.rbac import require_permission
 
@@ -63,43 +62,5 @@ def register_blueprints(app):
         )
 
     # ---- 旧路径统一 308 永久重定向到 v1 新路径 ----
-    # 308 保留 method 和 body，POST 请求不会丢 body
-    _legacy_redirect_map = {
-        "/api/erp/inventory": "/api/v1/erp/inventory",
-        "/api/erp/orders": "/api/v1/erp/orders",
-        "/api/erp/account": "/api/v1/erp/account",
-        "/api/rpa/quotes": "/api/v1/rpa/quotes",
-        "/api/rpa/sync-orders": "/api/v1/rpa/sync-orders",
-        "/api/fde/run": "/api/v1/fde/run",
-        "/api/fde/stats": "/api/v1/fde/stats",
-        "/api/fde/ads": "/api/v1/fde/ads",
-        "/api/fde/anomalies": "/api/v1/fde/anomalies",  # P2-25: 补全缺失映射
-        "/api/aigc/suggestions": "/api/v1/aigc/suggestions",
-        "/api/aigc/generate-suggestions": "/api/v1/aigc/generate-suggestions",
-        "/api/aigc/review": "/api/v1/aigc/review",
-        "/api/aigc/report": "/api/v1/aigc/report",
-        "/api/aigc/generate-report": "/api/v1/aigc/generate-report",
-        "/api/aigc/query": "/api/v1/aigc/query",
-        "/api/aigc/negotiate": "/api/v1/aigc/negotiate",  # P2-25: 补全缺失映射
-        "/api/aigc/data-query": "/api/v1/aigc/data-query",  # P2-25: 补全缺失映射
-        "/api/loop/status": "/api/v1/loop/status",
-        "/api/loop/run-step": "/api/v1/loop/run-step",
-        "/api/loop/run-step-async": "/api/v1/loop/run-step-async",  # P2-25: 补全缺失映射
-        "/api/loop/rollback": "/api/v1/loop/rollback",  # P2-25: 补全缺失映射
-        "/api/loop/reset": "/api/v1/loop/reset",
-    }
-
-    def _make_redirect(new_path):
-        def _redirect_view(**kwargs):
-            return redirect(new_path, code=308)
-
-        return _redirect_view
-
-    for old_path, new_path in _legacy_redirect_map.items():
-        # GET 和 POST 都要支持
-        app.add_url_rule(
-            old_path,
-            endpoint=f'legacy_{old_path.strip("/")}',
-            view_func=_make_redirect(new_path),
-            methods=["GET", "POST"],
-        )
+    # 旧无版本路径已在契约对齐时移除：前端已全部直连 /api/v1/*，
+    # 项目从未上线部署，无存量外部消费者，不再保留 308 兼容层。

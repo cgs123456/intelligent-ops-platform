@@ -1110,7 +1110,7 @@ class ERPService:
             )
         return result
 
-    def get_recent_orders(self, limit=20):
+    def get_recent_purchase_orders(self, limit=20):
         """近期采购单（对应 Odoo purchase.order 列表）
         修复 N+1：先取所有 supplier_id，再用 Supplier.id.in_(ids) 批量预取建 map，避免逐单查供应商。
         """

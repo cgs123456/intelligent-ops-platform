@@ -479,7 +479,7 @@ async function loadDQ() {
   const el = document.getElementById('dqBox');
   if (!el) return;
   const html = Object.entries(dq).map(([table, tests]) => {
-    const items = Object.entries(tests).map(([t, s]) => `<span class="tag ${s.status==='pass'?'tag-ok':'tag-low'}" title="${esc(String(s.reason||s.column||''))}">${t}:${s.status}</span>`).join(' ');
+    const items = Object.entries(tests).map(([t, s]) => `<span class="tag ${s.status==='pass'?'tag-ok':'tag-low'}" title="${esc(t + ' 失败数: ' + (s.failures ?? '-') + (s.column ? ' 列: ' + s.column : ''))}">${t}:${s.status}</span>`).join(' ');
     return `<div class="dq-item"><strong>${esc(table)}</strong> ${items}</div>`;
   }).join('');
   el.innerHTML = html || '<div class="hint">运行数据质量测试查看结果</div>';
@@ -540,7 +540,7 @@ function editQty(id, currentQty) {
     const v = prompt(`修改最终采购数量（原建议 ${currentQty} 件）：`, currentQty);
     if (v === null) return;
     const qty = parseInt(v, 10);
-    if (isNaN(qty) || qty < 0) { showToast('数量必须为非负整数', 'warn'); return; }
+    if (isNaN(qty) || qty < 1) { showToast('数量必须为正整数', 'warn'); return; }
     const note = prompt('审核备注（可选）：', '') || '';
     reviewSuggestion(id, 'approve', {final_qty: qty, note});
 }
