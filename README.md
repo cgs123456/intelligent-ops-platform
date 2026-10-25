@@ -1,718 +1,220 @@
 # 中型企业智能运营平台
 
-RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 生成补货建议、人工审核、RPA 自动下单、ERP 记账入库、FDE 数仓刷新指标的五步闭环,验证供应链自动化协同。
+> RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型:AIGC 生成补货建议 → 人工审核 → RPA 自动下单 → ERP 记账入库 → FDE 数仓刷新指标。
+
+[![CI](https://github.com/cgs123456/intelligent-ops-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/cgs123456/intelligent-ops-platform/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
+[![Python 3.10-3.12](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
+
+```
+┌────────────────────────────────────────────┐
+│        前端 React SPA(frontend/ 源码)      │
+└──────────────────┬─────────────────────────┘
+                   │ HTTP / SSE
+┌──────────────────▼─────────────────────────┐
+│         Nginx(TLS + 静态资源 + 限流)        │
+└──────────────────┬─────────────────────────┘
+┌──────────────────▼─────────────────────────┐
+│        Flask(Gunicorn 多 worker)           │
+│  routes/ → services/ → models/             │
+│  adapters/(LLM/RPA 抽象) + tasks/(Celery)  │
+└───────┬──────────────┬─────────────┬───────┘
+        ▼              ▼             ▼
+   PostgreSQL        Redis        Celery(可选)
+   主库+备份      缓存+限流+broker  异步任务+Beat
+```
+
+五步闭环数据流:AIGC 补货建议(Suggestion) → 人工审核(approve/reject + final_qty) → RPA 多 Agent 博弈下单(PurchaseOrder) → ERP 记账入库(StockMove + AccountMove,移动加权平均成本) → FDE 刷新 ADS 指标。每步带文件锁、超时控制、失败回滚补偿;FDE 异常检测(critical)可自动重触发闭环。
 
 ## 目录
 
-- [项目概述](#项目概述)
+- [快速开始](#快速开始)
+- [功能特性](#功能特性)
 - [技术栈](#技术栈)
-- [项目架构](#项目架构)
-- [目录结构](#目录结构)
-- [核心文件说明](#核心文件说明)
-- [快速启动](#快速启动)
-- [配置说明](#配置说明)
-- [API 接口](#api-接口)
+- [配置](#配置)
+- [API](#api)
 - [工程化](#工程化)
 - [部署](#部署)
+- [项目结构](#项目结构)
+- [文档](#文档)
+- [贡献](#贡献)
+- [许可证](#许可证)
 
-## 项目概述
+## 快速开始
 
-平台落地一个涵盖 RPA、ERP、FDE、AIGC 四大领域的小型可运行系统,验证技术协同:
-
-- **AIGC**:基于 LLM 抽象层 + 规则引擎兜底,生成补货建议、4 段式经营日报,支持自然语言查询(Text2SQL 全链路 + 语义检索)
-- **RPA**:供应商报价采集(多 Agent 博弈)、电商订单同步,适配器模式支持 mock/selenium 切换
-- **ERP**:产品/供应商/采购/销售/库存/财务科目管理,移动加权平均成本核算
-- **FDE**:ODS/DWD/DWS/ADS 四层数仓,ETL 流水线 + 数据质量监控 + 数据血缘 + 时序异常检测
-- **闭环**:五步状态机编排,支持跨进程文件锁、超时处理、断点续跑、业务侧回滚补偿、异常自动触发
-
-主要特性:
-- JWT 认证 + RBAC 三级权限(admin/operator/viewer)+ Token 旋转 + 黑名单
-- 多租户隔离(共库共表 + tenant_id 自动过滤,详见 [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md))
-- SSE 流式输出(AIGC 问答 + 闭环实时进度)
-- Celery 异步任务(可选,未安装时优雅降级)
-- Idempotency-Key 幂等写接口
-- request_id 全链路追踪 + 审计日志
-- 多渠道告警通知(钉钉/企业微信/邮件)
-- Nginx TLS 终止 + 静态资源缓存 + 安全头
-- PostgreSQL 定时备份 + 完整性校验 + 保留策略
-- 健康检查端点(live/ready/deep)
-- Prometheus 指标 + Swagger API 文档(可选)
-
-### 进阶能力
-
-- **多 Agent 采购博弈**:买方 Agent + 双供应商 Agent LLM 角色扮演,综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手
-- **Data Agent Text2SQL 全链路**:NL→SQL 生成 → sqlglot AST 安全校验(单语句/SELECT-WITH/禁 DDL-DML 节点/表白名单/强制 LIMIT 100)→ 真实执行 → NL 回复
-- **FDE 时序异常检测**:7 日移动平均 + 2σ/3σ 分级,critical 异常自动触发闭环补货,warning+ 多渠道告警,Celery Beat 09:00-22:00 整点调度
-- **LLM 经营日报**:4 段式(昨日回顾 + 趋势分析 + 风险提示 + 建议行动),读取近 7 天 ADS 趋势,Notifier 多渠道推送
-- **统计安全库存**:SS = z × σ_日需求 × √提前期(z 表四档服务水位,σ 含零日,提前期取最优报价供应商),按产品重算并可回写,替代静态手工字段
-- **SKU ABC/XYZ 分级**:ETL 滚动 90 天窗口帕累托 ABC(80%/95%)+ 日销量变异系数 XYZ(cv<0.5/<1.0),补货策略可按"价值×波动"分级
-- **高金额审批分级**:补货建议金额(数量×最优报价)≥阈值需 `aigc:approve_high` 权限,operator 默认不含,admin 通配
-- **会计期间锁定**:YYYY-MM 期间关账后四个过账入口(采购确认/销售/退货/采购退)统一拒绝,月结报表不被改写
-
-### 高级改进
-
-- **闭环编排**:五步闭环采用节点函数单步执行模式(条件分支:step1 无建议跳过审核;step3 下单失败重试),步骤推进由 API/定时任务串行驱动,保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发
-- **sqlglot SQL 解析**:Data Agent 的 SQL AST 校验从 sqlparse 升级为 sqlglot,用真正的 AST 类型检查替代正则关键字匹配,消除列名 `u.update` 误判为 DML 的问题,CTE 别名追踪用 `find_all(exp.Table)` + `exp.CTE` 过滤,5 行替代 70 行状态机
-- **Agent 评测框架**:gold SQL 回归测试,三级对比(exact > table_set > result_set),12 条测试用例覆盖 5 个类别,退化检测对比上次评测报告(accuracy_delta / new_failures / new_passes),CLI 入口 `python -m services.evaluator`
-
-## 技术栈
-
-### 后端
-- Flask(Flask-SQLAlchemy / Flask-Migrate / Flask-Caching / Flask-Limiter / Flask-Cors)
-- PyJWT(认证)、Marshmallow(输入校验)、flask-smorest(OpenAPI 文档)
-- Gunicorn(WSGI 服务器)、Celery(异步任务,可选)
-- SQLAlchemy ORM + Alembic 迁移
-- APScheduler(定时任务)
-- LangGraph(闭环编排 StateGraph,可选,未安装时降级)
-- sqlglot(SQL AST 解析与安全校验)
-
-### 前端
-- 原生 HTML / CSS / JavaScript(无构建步骤)
-- Server-Sent Events(SSE)流式输出
-- fetch + ReadableStream(流式读取)
-
-### 数据与缓存
-- PostgreSQL(生产)/ SQLite(开发默认)
-- Redis(缓存 + 限流 + Celery broker,可选)
-
-### 基础设施
-- Docker + docker-compose(开发版 + 生产版)
-- Nginx(反向代理 + TLS + 静态资源)
-- Prometheus 指标采集(可选)
-- pg_dump + cron(定时备份)
-
-### 外部系统适配器
-- LLM:规则引擎(默认)/ GLM / Qwen / OpenAI 兼容
-- RPA:Mock(默认)/ Selenium 占位
-
-## 项目架构
-
-### 整体架构
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                      前端(浏览器)                          │
-│  React SPA（frontend/ 源码 → static/dist 构建产物）        │
-└──────────────────────────┬───────────────────────────────┘
-                           │ HTTP / SSE
-┌──────────────────────────▼───────────────────────────────┐
-│                    Nginx 反向代理                          │
-│  TLS 终止 + 静态资源 + 限流 + 安全头 + gzip                │
-└──────────────────────────┬───────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────┐
-│              Flask 应用(Gunicorn 多 worker)               │
-│  ┌──────────┬──────────┬──────────┬──────────┬─────────┐  │
-│  │ routes/  │ services/│ models/  │ adapters/│   ext   │  │
-│  │ Blueprint│ 业务服务 │ 数据模型 │ 外部系统 │ db/cache│  │
-│  └──────────┴──────────┴──────────┴──────────┴─────────┘  │
-│  middleware(request_id) + schemas(输入校验)               │
-└──────┬───────────────┬───────────────┬──────────────────┘
-       │               │               │
-       ▼               ▼               ▼
-  ┌─────────┐    ┌─────────┐    ┌──────────────┐
-  │PostgreSQL│   │  Redis  │    │   Celery     │
-  │  主库    │   │缓存+限流│    │ 异步任务(可选)│
-  └─────────┘    └─────────┘    └──────────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │  db-backup 容器  │
-              │ cron + pg_dump   │
-              └─────────────────┘
-```
-
-### 模块关系
-
-- **routes/**:Blueprint 路由层,只做参数解析与调用 service,不含业务逻辑
-- **services/**:业务服务层,封装 AIGC/ERP/RPA/FDE/闭环/RBAC/认证等核心能力
-- **models/**:SQLAlchemy 数据模型,按业务域分文件
-- **adapters/**:外部系统抽象层,把 mock 实现与生产实现解耦
-- **extensions.py**:统一管理 db / cache / migrate / limiter / celery_app 实例
-- **middleware.py**:request_id 注入与日志过滤器
-- **schemas.py**:Marshmallow 输入校验 schema
-- **tasks.py**:Celery 异步任务定义(含 _NullTask 兜底)
-
-### 数据流向(五步闭环)
-
-```
-1. AIGC 生成补货建议 → Suggestion(pending)
-2. 人工审核(approve/reject + final_qty) → SuggestionFeedback 自学习
-3. RPA 向供应商系统下单(多 Agent 博弈报价)→ ExtSupplierQuote + PurchaseOrder(draft)
-4. ERP 记账入库 → StockMove(in) + AccountMove(payable) + 移动加权平均成本
-5. FDE 刷新 ADS 层 → AdsReplenishmentSuggest + AdsDailyOpsReport
-```
-
-每步带文件锁防并发、超时装饰器、失败回滚补偿(取消采购单/记审计待手工冲销/删 ADS 数据)。
-
-**自动触发**:FDE 时序异常检测(critical 级别)→ `check_auto_trigger_with_anomaly` → 重置闭环并自动执行 step1 生成补货建议 + 审计日志。Celery Beat 09:00-22:00 整点调度。
-
-## 目录结构
-
-```
-intelligent-ops-platform/
-├── app.py                       # Flask 入口(工厂模式 + 优雅关闭)
-├── config.py                    # 配置管理(DevConfig / ProdConfig)
-├── extensions.py                # db / cache / migrate / limiter / celery_app
-├── middleware.py                # request_id 注入 + 日志过滤器
-├── schemas.py                   # Marshmallow 输入校验 schema
-├── tasks.py                     # Celery 异步任务(含 _NullTask 兜底)
-├── seed.py                      # 开发环境种子数据
-├── gunicorn.conf.py             # Gunicorn 配置
-│
-├── adapters/                    # 外部系统适配器抽象层
-│   ├── __init__.py              # 导出 get_rpa_backend / get_llm_backend
-│   ├── rpa_backend.py           # RPABackend ABC + Mock + Selenium 占位
-│   └── llm_backend.py           # LLMBackend ABC + Rule + GLM/Qwen/OpenAI
-│
-├── models/                      # 数据模型(按业务域分文件)
-│   ├── __init__.py
-│   ├── erp.py                   # Product/Supplier/PurchaseOrder/StockMove 等
-│   ├── external.py              # ExtSupplierQuote/ExtEcommerceOrder
-│   ├── warehouse.py             # ODS/DWD/DWS/ADS 四层数仓模型
-│   ├── aigc.py                  # Suggestion/DailyReport/ChatHistory/Feedback
-│   ├── system.py                # User/Role/AuditLog/LoopState/TokenBlacklist
-│   ├── bom.py                   # BOM/MRPPlan/MRPRequirement
-│   └── finance.py               # ReconciliationBatch/ReconciliationEntry
-│
-├── routes/                      # Blueprint 路由
-│   ├── __init__.py              # 注册 Blueprint + 旧路径 308 重定向
-│   ├── auth.py                  # 登录/刷新/登出/me/改密/MFA
-│   ├── erp.py                   # 库存/订单/财务/退货/调拨
-│   ├── rpa.py                   # 报价采集/订单同步/调度
-│   ├── fde.py                   # ETL/分层统计/ADS/血缘/数据质量
-│   ├── aigc.py                  # 建议/审核/日报/查询/SSE 流式
-│   ├── loop.py                  # 闭环状态/执行/回滚/异步任务/SSE
-│   ├── audit.py                 # 审计日志查询/统计/hash chain
-│   ├── finance.py               # 财务对账批次管理
-│   └── mrp.py                   # MRP/BOM 物料需求计划
-│
-├── services/                    # 业务服务层
-│   ├── auth.py                  # JWT 签发/验证/黑名单/锁定
-│   ├── rbac.py                  # 权限装饰器/角色初始化
-│   ├── aigc_service.py          # LLM 抽象/建议/日报/Text2SQL/语义检索
-│   ├── erp_service.py           # 库存/订单/财务/移动加权平均
-│   ├── rpa_service.py           # 采集/同步/调度(接入多 Agent 博弈)
-│   ├── warehouse_service.py     # ETL 流水线/血缘/数据质量
-│   ├── closed_loop.py           # 五步闭环(LangGraph StateGraph + 文件锁 + 回滚)
-│   ├── multiagent.py            # 改进7:多 Agent 采购博弈(MultiAgentNegotiator)
-│   ├── data_agent.py            # 改进8:Data Agent Text2SQL(sqlglot AST 校验+执行)
-│   ├── anomaly_detector.py      # 改进9:时序异常检测(7日 MA + 2σ/3σ 分级)
-│   ├── evaluator.py             # Agent 评测框架(gold SQL 回归测试 + 退化检测)
-│   ├── notifier.py              # 多渠道告警(钉钉/微信/邮件)
-│   ├── idempotency.py           # Idempotency-Key 幂等装饰器
-│   ├── password_policy.py       # 密码强度校验
-│   ├── crypto.py                # 字段级加密(Fernet, hybrid_property)
-│   ├── mfa.py                   # TOTP MFA 生成/验证/备用码
-│   ├── finance_recon_service.py # 财务对账(容忍度匹配/差异分析)
-│   ├── mrp_service.py           # MRP 多层 BOM 展开/净需求计算
-│   ├── cache_service.py         # L1/L2 多级缓存(进程内 + Redis)
-│   └── db_router.py             # 读写分离路由(占位,逐步启用)
-│
-├── migrations/                  # Alembic 数据库迁移
-│   ├── alembic.ini
-│   ├── env.py
-│   ├── script.py.mako
-│   └── versions/
-│       ├── 4e06934ab2d0_initial_schema.py
-│       ├── a1b2c3d4e5f6_add_token_version.py
-│       ├── a7b8c9d0e1f2_add_finance_and_bom.py
-│       ├── b2c3d4e5f6a7_p1_data_model_hardening.py
-│       ├── c0d1e2f3a4b5_recon_tolerance_match.py
-│       ├── c3d4e5f6a7b8_add_audit_hash_chain.py
-│       ├── d4e5f6a7b8c9_add_mfa_and_password_history.py
-│       ├── b00000000002_business_enhancements.py
-│       ├── b00000000003_stock_location.py
-│       └── b00000000004_chat_history_rag.py
-│
-├── frontend/                    # 前端源码（React 18 + Vite + Tailwind v4 + shadcn/ui）
-│   ├── src/                     #   pages×8 / components（shadcn ui×19 + DataTable）/ lib / stores
-│   └── scripts/post-build.mjs   #   构建后把 dist/index.html 拷贝为 Flask 模板
-│
-├── static/
-│   └── dist/                    # Vite 构建产物（文件名自带内容 hash，入库保证部署链）
-│
-├── templates/
-│   └── index.html               # 由 post-build 从构建产物生成（勿手改）
-│
-├── nginx/                       # Nginx 配置
-│   ├── conf.d/app.conf          # TLS + 静态资源 + 限流 + 安全头
-│   └── gen-self-signed-cert.sh  # 自签证书生成(本地预览用)
-│
-├── scripts/                     # 运维脚本
-│   ├── Dockerfile.backup        # 备份容器镜像
-│   ├── backup-cron-entrypoint.sh
-│   ├── backup_db.sh             # pg_dump + 校验 + 保留清理
-│   └── restore_db.sh            # 交互式恢复 + 行数校验
-│
-├── tests/                       # 测试套件(pytest)
-│   ├── __init__.py
-│   ├── conftest.py              # 公共 fixtures(app/client/db_session/auth_headers/mock_llm)
-│   ├── fixtures/                # 测试数据
-│   │   ├── gold_sql.json        # Agent 评测 gold SQL 测试用例(12 条)
-│   │   └── eval_reports/        # 评测报告历史(按时间戳 + latest.json)
-│   ├── test_health.py           # 健康检查端点
-│   ├── test_auth.py             # 认证模块
-│   ├── test_data_agent.py       # 改进8:Text2SQL sqlglot AST 安全校验
-│   ├── test_anomaly_detector.py # 改进9:时序异常检测算法
-│   ├── test_multiagent.py       # 改进7:多 Agent 博弈评分
-│   ├── test_daily_report.py     # 改进10:LLM 经营日报
-│   └── test_evaluator.py        # Agent 评测框架(gold SQL 回归 + 退化检测)
-│
-├── .github/workflows/ci.yml     # GitHub Actions CI(lint + test 矩阵 + security + build)
-├── pyproject.toml               # 项目元数据 + ruff/black/mypy/pytest/coverage 配置
-├── .pre-commit-config.yaml      # Git 提交前钩子(ruff + black + mypy)
-├── .editorconfig                # IDE 风格统一(UTF-8/LF/4 空格/120 列)
-├── .gitattributes               # Git 换行符统一(LF) + 二进制文件标记
-├── Makefile                     # 便利命令(install/test/lint/format/run/docker/migrate)
-├── LICENSE                      # MIT License
-├── Dockerfile                   # 多阶段构建 + 非 root 用户
-├── docker-compose.yml           # 开发版(web + db + redis)
-├── docker-compose.prod.yml      # 生产版(+ nginx + db-backup)
-├── .dockerignore
-├── .gitignore
-├── .env.example                 # 环境变量示例
-├── requirements.txt             # 生产依赖
-└── requirements-dev.txt         # 开发依赖(pytest/ruff/black/mypy/bandit/pre-commit)
-```
-
-## 核心文件说明
-
-### 入口与配置
-
-- **[app.py](app.py)**:Flask 工厂模式入口。完成 ProxyFix 还原真实 IP、日志配置(带 request_id)、扩展初始化、Celery 配置、CORS、Prometheus、Blueprint 注册、健康检查端点、统一错误处理(不暴露内部异常)、RBAC 初始化、开发环境种子数据、SIGTERM/SIGINT 优雅关闭
-- **[config.py](config.py)**:配置类。DevConfig(DEBUG=True,SQLite)/ ProdConfig(强制 SECRET_KEY + PostgreSQL + HTTPS Cookie)。所有配置通过环境变量注入,生产环境缺失关键变量会启动报错
-- **[extensions.py](extensions.py)**:集中管理 db / cache / migrate / limiter / celery_app。Celery 未安装时 celery_app=None,所有依赖 Celery 的代码会优雅降级
-
-### 核心业务逻辑
-
-- **[services/closed_loop.py](services/closed_loop.py)**:五步闭环编排。节点函数模式:5 个节点函数(_node_step1 ~ _node_step5)由 run_step 分发执行,条件路由(step1 无建议跳过审核 / step3 下单失败重试),步骤推进由 API/定时任务串行驱动。保留文件锁(fcntl + threading 兜底)、with_timeout 装饰器、回滚补偿、Notifier 告警、异常自动触发
-- **[services/aigc_service.py](services/aigc_service.py)**:LLM 抽象层 + 规则引擎兜底。补货建议生成(置信度算法)、4 段式经营日报(昨日回顾+趋势+风险+建议,含 7 天趋势 + Notifier 推送)、Text2SQL(优先 DataAgent,回退规则)、关键词语义检索、自然语言查询、审核反馈自学习
-- **[services/multiagent.py](services/multiagent.py)**:改进7 多 Agent 采购博弈。`MultiAgentNegotiator` 三 Agent LLM 角色扮演(买方 + 双供应商),`score_quotes` 综合评分(价格 50% + 交期 30% + 评级 20%),<2 供应商时自动生成竞争对手,LLM 不可用走规则兜底
-- **[services/data_agent.py](services/data_agent.py)**:改进8 Data Agent Text2SQL 全链路。`DataAgent.query()` NL→SQL→校验→执行→NL 回复,`_validate_sql_ast` 基于 sqlglot AST 类型检查(单语句/SELECT-WITH 根节点/禁 DDL-DML 节点/表白名单/强制 LIMIT 100),`_extract_tables` 用 `find_all(exp.Table)` + CTE 别名过滤,列名含关键字不误判
-- **[services/evaluator.py](services/evaluator.py)**:Agent 评测框架。`AgentEvaluator` gold SQL 回归测试,三级 SQL 对比(exact > table_set > result_set),12 条测试用例(aggregation/join/with/limit/filter),`_build_comparison` 退化检测对比上次报告,CLI 入口 `python -m services.evaluator [--category aggregation]`
-- **[services/anomaly_detector.py](services/anomaly_detector.py)**:改进9 时序异常检测。`AnomalyDetector` 7 日 MA + 2σ/3σ 分级(critical/warning/info),`detect_and_trigger` critical→触发闭环 step1 + 审计日志,warning+→Notifier 多渠道告警
-- **[services/auth.py](services/auth.py)**:JWT 签发(access 2h + refresh 7d,带 jti)、Token 黑名单、refresh 旋转、登录失败 5 次锁定、首次登录随机密码 + 强制改密
-- **[services/rbac.py](services/rbac.py)**:权限装饰器 @require_permission。支持 TESTING 跳过、dev 无 token 放行、有 token 验证 JWT、RBAC_ENABLED 时校验权限。权限 JSON 解析异常显式记日志
-- **[services/idempotency.py](services/idempotency.py)**:@idempotent 装饰器。基于 Idempotency-Key Header + Redis 缓存 24h,缺少 Header 放行兼容旧客户端
-
-### 数据模型
-
-- **[models/system.py](models/system.py)**:User/Role(多对多)/AuditLog/LoopState/TokenBlacklist
-- **[models/bom.py](models/bom.py)**:BOM(物料清单)/BOMItem/MRPPlan/MRPRequirement
-- **[models/finance.py](models/finance.py)**:ReconciliationBatch/ReconciliationEntry(对账批次+明细)
-- **[models/erp.py](models/erp.py)**:Product/Supplier/Warehouse/PurchaseOrder/SaleOrder/StockMove/AccountMove/ReturnOrder
-- **[models/warehouse.py](models/warehouse.py)**:ODS(贴源)/ DWD(明细)/ DWS(汇总)/ ADS(应用)四层,含 EtlMeta/DataQualityLog/DataLineage
-- **[models/aigc.py](models/aigc.py)**:Suggestion/DailyReport/ChatHistory/SuggestionFeedback
-
-### 关键组件
-
-- **[middleware.py](middleware.py)**:request_id 注入(优先用客户端 X-Request-Id,否则生成 UUID 短格式)、响应头回写、日志过滤器让所有 handler 自动带 request_id
-- **[schemas.py](schemas.py)**:Marshmallow 校验(LoginSchema/ChangePasswordSchema/CreateReturnSchema/ReviewSuggestionSchema 等)
-- **[tasks.py](tasks.py)**:Celery 任务(闭环异步执行/ETL/RPA 同步/日报生成/异常检测)。_NullTask 让 Celery 不可用时仍可 import。Celery Beat 定时调度(ETL 02:00 / 日报 02:30 默认推送 / RPA 每 30min / 异常检测 09:00-22:00 整点)
-- **[adapters/](adapters/)**:外部系统抽象。RPABackend(Mock + Selenium 占位)/ LLMBackend(Rule + GLM/Qwen/OpenAI 兼容)。通过 RPA_BACKEND / LLM_PROVIDER 环境变量切换
-- **[services/notifier.py](services/notifier.py)**:多渠道告警。异步发送、单渠道失败不影响其他、无配置时降级为仅记日志
-
-## 快速启动
-
-### 本地开发
+本地开发默认 SQLite + 内存缓存,零外部依赖:
 
 ```bash
+git clone https://github.com/cgs123456/intelligent-ops-platform.git
+cd intelligent-ops-platform
 pip install -r requirements.txt
-python app.py
+python app.py                      # http://127.0.0.1:5000
+```
 
-默认使用 SQLite + 内存缓存,无需 Redis/PostgreSQL。开发环境会自动加载种子数据。
+开发环境自动建表并写入种子数据(6 SKU / 3 供应商 / 7 天电商订单)。管理员账号 `admin`,初始随机密码打印在启动日志(stderr)中,首次登录强制改密。
 
-### Docker(生产版)
+Docker 生产版:
 
 ```bash
-cp .env.example .env
-# 编辑 .env,必须设置:SECRET_KEY、DB_PASSWORD、CORS_ORIGINS
-
+cp .env.example .env               # 必填项见下方[配置]
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-启动的服务:nginx(80/443)、web(5000)、db(PostgreSQL)、redis、db-backup(cron)。
+启动 nginx(80/443) + web + PostgreSQL + Redis + db-backup(cron)。
 
-### 数据库迁移
+前端为 React SPA,构建产物已入库(`static/dist/` + `templates/index.html`),开箱即用;修改前端源码后重新构建(需 Node ≥ 20 + pnpm 12):
 
 ```bash
-# 创建新迁移
-flask db migrate -m "描述"
-
-# 应用迁移
-flask db upgrade
+cd frontend && pnpm install && pnpm run build:flask
 ```
 
-## 配置说明
+## 功能特性
 
-完整环境变量见 [.env.example](.env.example),关键项:
+- **AIGC**:LLM 抽象层(GLM/Qwen/OpenAI 兼容)+ 规则引擎兜底;补货建议(置信度 + 高金额分级审批)、4 段式经营日报、自然语言数仓查询(Text2SQL 全链路 + 问答对 RAG 沉淀)
+- **RPA**:供应商报价采集、电商订单同步;多 Agent 采购博弈(买方 + 双供应商 LLM 角色扮演,价格/交期/评级综合评分);mock/selenium 适配器切换
+- **ERP**:采购/销售/退货/调拨/盘点全链路,移动加权平均成本;统计安全库存(SS=z×σ×√LT)、SKU ABC/XYZ 分级、会计期间锁定、库位管理、科目试算平衡
+- **FDE**:ODS/DWD/DWS/ADS 四层数仓,幂等 upsert ETL;数据质量校验、数据血缘、时序异常检测(7 日 MA + 2σ/3σ,critical 自动触发闭环)
+- **闭环编排**:五步状态机(节点函数单步执行 + 条件路由),文件锁防并发、超时装饰器、断点续跑、回滚补偿、SSE 实时进度
+- **平台能力**:JWT + RBAC 三级角色(admin/operator/viewer)+ TOTP MFA;多租户隔离(共库共表 + tenant_id 自动过滤);Idempotency-Key 幂等写;审计日志 hash chain 防篡改;request_id 全链路追踪;钉钉/企微/邮件多渠道告警;Prometheus 指标;限流 + 安全头
+- **MRP / 财务对账**:BOM 多层展开净需求计算;对账批次(精确/税容差/多对一组合匹配 + 人工调节项)
+
+## 技术栈
+
+- **后端**:Flask + SQLAlchemy 2.x + Alembic + Marshmallow;PyJWT;sqlglot(SQL AST 安全校验);Celery(可选,未安装时优雅降级);Gunicorn
+- **前端**:React 18 + Vite + TypeScript + Tailwind v4 + shadcn/ui + TanStack Query + Zustand + Recharts
+- **数据**:PostgreSQL(生产)/ SQLite(开发);Redis(缓存 + 限流 + broker,可选)
+- **基础设施**:Docker Compose(开发/生产/监控三套);Nginx TLS;Prometheus + Grafana + Loki 监控栈(可选);GitHub Actions CI
+
+## 配置
+
+完整清单见 [.env.example](.env.example)。关键项:
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | FLASK_ENV | development | development / production |
-| SECRET_KEY | dev-secret | 生产必填,生成方式 `python -c "import secrets; print(secrets.token_hex(32))"` |
-| DATABASE_URL | sqlite:///ops_platform.db | 生产必须用 PostgreSQL |
-| CACHE_TYPE | simple | simple / redis |
-| CACHE_REDIS_URL | | Redis 连接(启用 redis 模式时必填) |
-| RBAC_ENABLED | 0 | 0=dev 放行 / 1=强制权限校验(生产强制 1) |
-| CORS_ORIGINS | * | 生产必须显式指定,缺失则启动报错 |
-| LLM_PROVIDER | rule | rule / glm / qwen / openai |
-| LLM_API_KEY | | LLM 密钥(留空走规则引擎) |
+| SECRET_KEY | dev-secret | **生产必填**(≥32 字符):`python -c "import secrets; print(secrets.token_hex(32))"` |
+| FIELD_ENCRYPTION_KEY | | **生产必填** 字段级加密密钥:`python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
+| DATABASE_URL | sqlite:///ops_platform.db | 生产必须 PostgreSQL |
+| CORS_ORIGINS | localhost | **生产必填**(不可为 `*`) |
+| CELERY_BROKER_URL | memory:// | **生产必填**(不可 memory://,如 `redis://redis:6379/2`) |
+| RATELIMIT_STORAGE_URI | memory:// | **生产必填**(不可 memory://) |
+| RBAC_ENABLED | 0 | 0=dev 放行 / 1=强制权限校验 |
+| LLM_PROVIDER / LLM_API_KEY | rule | rule / glm / qwen / openai;留空走规则引擎 |
 | RPA_BACKEND | mock | mock / selenium |
 | LOOP_TIMEOUT | 60 | 闭环单步超时秒数 |
-| METRICS_ENABLED | 0 | 1=启用 Prometheus /metrics |
-| API_DOCS_ENABLED | 0 | 1=启用 Swagger /docs/swagger |
-| BACKUP_CRON | 0 2 * * * | 备份 cron(默认每天 02:00) |
-| BACKUP_RETENTION_DAYS | 7 | 备份保留天数 |
-| ALERT_DINGTALK_WEBHOOK | | 钉钉告警 webhook |
-| CELERY_BROKER_URL | | Celery broker(留空则禁用异步任务) |
+| METRICS_ENABLED / API_DOCS_ENABLED | 0 | 1=启用 Prometheus /metrics、Swagger /docs/swagger |
+| ALERT_DINGTALK_WEBHOOK | | 钉钉告警 webhook(可选) |
 
-## API 接口
+## API
 
-所有 API 统一前缀 `/api/v1/`,旧路径 `/api/xxx` 自动 308 重定向到 v1。
+所有接口统一前缀 `/api/v1/`,JWT 认证,响应统一 envelope。完整清单(90+ 端点、权限矩阵)见 [docs/API.md](docs/API.md)。
 
-### 认证(auth)
+```bash
+# 登录(token 走 HttpOnly Cookie)
+curl -X POST http://127.0.0.1:5000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "<启动日志中的初始密码>"}'
 
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| POST | /api/v1/auth/login | - | 登录,返回 access + refresh token |
-| POST | /api/v1/auth/refresh | - | 刷新 token(旋转 + 旧 token 拉黑) |
-| POST | /api/v1/auth/logout | - | 登出,吊销 token |
-| GET | /api/v1/auth/me | - | 当前用户信息(仅 JWT 认证) |
-| POST | /api/v1/auth/change-password | - | 修改密码(走 password_policy 校验) |
-| POST | /api/v1/auth/mfa/setup | auth:mfa:setup | 启用 TOTP MFA |
-
-### 租户管理(tenant,仅平台管理员)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/tenants | tenant:manage | 租户列表(含用户数) |
-| POST | /api/v1/tenants | tenant:manage | 创建租户(code 唯一) |
-| GET | /api/v1/tenants/{id}/users | tenant:manage | 租户用户列表 |
-| POST | /api/v1/tenants/{id}/users | tenant:manage | 为租户开户(密码强度校验) |
-| POST | /api/v1/auth/mfa/disable | auth:mfa:disable | 禁用 MFA |
-
-### ERP(erp)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/erp/inventory | erp:read | 库存清单 |
-| GET | /api/v1/erp/orders | erp:read | 近期单据(limit 上限 100) |
-| GET | /api/v1/erp/account | erp:read | 财务概览 |
-| GET | /api/v1/erp/warehouses | erp:read | 仓库列表 |
-| POST | /api/v1/erp/returns | return:write | 创建退货(@idempotent) |
-| POST | /api/v1/erp/transfers | transfer:write | 创建调拨(@idempotent) |
-| GET | /api/v1/erp/reorder-rules | erp:read | 补货预警规则列表 |
-| GET | /api/v1/erp/reorder-check | erp:read | 触发库存预警检查 |
-| GET | /api/v1/erp/budgets | erp:read | 预算列表 |
-| POST | /api/v1/erp/budgets/<id>/refresh | erp:write | 刷新预算实际发生额(@idempotent) |
-| GET | /api/v1/erp/cost-centers | erp:read | 成本中心列表 |
-| POST | /api/v1/erp/purchase-orders | purchase:write | 创建采购单(@idempotent) |
-| POST | /api/v1/erp/purchase-orders/<no>/confirm | purchase:write | 确认采购单(@idempotent) |
-| POST | /api/v1/erp/purchase-orders/<no>/receive | purchase:write | 到货入库(@idempotent) |
-| POST | /api/v1/erp/purchase-orders/<no>/cancel | purchase:write | 取消采购单(@idempotent) |
-| POST | /api/v1/erp/purchase-orders/<no>/return | purchase:write | 采购退货(@idempotent) |
-| POST | /api/v1/erp/sale-orders | sale:write | 创建销售单(@idempotent) |
-| POST | /api/v1/erp/stock-takes | erp:write | 创建盘点单(@idempotent) |
-| GET | /api/v1/erp/stock-takes | erp:read | 盘点单列表(支持 product_id/status 过滤) |
-| POST | /api/v1/erp/stock-takes/<id>/confirm | erp:write | 确认盘点:调整库存+流水(@idempotent) |
-| POST | /api/v1/erp/products/<id>/safety-stock-recalc | erp:write | P3:安全库存重算(SS=z×σ×√LT,支持 service_level/window_days/apply) |
-| GET | /api/v1/erp/accounting-periods | erp:read | P3:会计期间列表 |
-| POST | /api/v1/erp/accounting-periods | erp:write | P3:创建会计期间(YYYY-MM) |
-| POST | /api/v1/erp/accounting-periods/<name>/close | erp:write | P3:关闭会计期间(关账月禁止过账) |
-| GET | /api/v1/erp/trial-balance | erp:read | P3:科目余额表+断链检查 |
-| GET | /api/v1/erp/locations | erp:read | P3:库位清单(可按仓库过滤) |
-| POST | /api/v1/erp/locations | erp:write | P3:创建库位(仓库内code唯一) |
-| GET | /api/v1/erp/locations/<id>/stock | erp:read | P3:库位现存量(流水聚合) |
-
-### RPA(rpa)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/rpa/quotes | rpa:read | 采集供应商报价 |
-| POST | /api/v1/rpa/sync-orders | rpa:write | 同步电商订单 |
-| GET | /api/v1/rpa/schedule/status | rpa:read | 调度状态 |
-| POST | /api/v1/rpa/schedule/run | rpa:write | 立即执行调度任务 |
-
-### FDE(fde)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| POST | /api/v1/fde/run | fde:run | 执行 ETL 流水线 |
-| GET | /api/v1/fde/stats | fde:read | 分层统计 |
-| GET | /api/v1/fde/ads | fde:read | ADS 应用层数据 |
-| GET | /api/v1/fde/lineage | fde:read | 数据血缘 |
-| GET | /api/v1/fde/data-quality | fde:read | 数据质量报告 |
-| GET | /api/v1/fde/anomalies | fde:read | 改进9:时序异常检测(支持 date/trigger 参数,trigger=true 触发闭环+告警) |
-| POST | /api/v1/fde/run-dq | fde:run | 执行数据质量校验 |
-| POST | /api/v1/fde/backfill | fde:run | 重跑 ETL 指定日期范围[DWS+ADS] |
-| GET | /api/v1/fde/sku-classification | fde:read | P3:SKU ABC/XYZ 分级(支持 dt/abc/xyz 过滤) |
-| POST | /api/v1/finance/batches/<id>/adjustments | recon:create | P3:人工调节项(配平差异后可关账) |
-
-### AIGC(aigc)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/aigc/suggestions | aigc:read | 待审建议列表 |
-| POST | /api/v1/aigc/generate-suggestions | aigc:review | 生成补货建议 |
-| POST | /api/v1/aigc/review | aigc:review | 审核建议(支持 final_qty;金额≥SUGGESTION_HIGH_VALUE_AMOUNT 需 aigc:approve_high) |
-| POST | /api/v1/aigc/batch-review | aigc:review | 批量审核 |
-| GET | /api/v1/aigc/report | aigc:read | 最新日报 |
-| POST | /api/v1/aigc/generate-report | fde:run | 改进10:生成 4 段式 LLM 日报(支持 push/date 参数,push=true 多渠道推送) |
-| POST | /api/v1/aigc/query | aigc:read | 同步智能问答 |
-| POST | /api/v1/aigc/query-stream | aigc:read | SSE 流式智能问答 |
-| POST | /api/v1/aigc/data-query | aigc:read | 改进8:Data Agent Text2SQL 全链路(NL→SQL→执行→NL) |
-| POST | /api/v1/aigc/negotiate | aigc:review | 改进7:多 Agent 采购博弈(买方+双供应商 LLM 角色扮演) |
-| GET | /api/v1/aigc/chat-history/<session_id> | aigc:read | 对话历史 |
-| GET | /api/v1/aigc/feedback-stats | aigc:read | 反馈统计 |
-
-### MRP(mrp)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| POST | /api/v1/mrp/boms | mrp:write | 创建 BOM（物料清单）(@idempotent) |
-| GET | /api/v1/mrp/boms | mrp:read | 查询 BOM 列表 |
-| POST | /api/v1/mrp/plans | mrp:write | 创建 MRP 计划(@idempotent) |
-| POST | /api/v1/mrp/plans/<id>/calculate | mrp:write | 执行净需求计算 |
-| POST | /api/v1/mrp/plans/<id>/release | mrp:write | 下达计划：转为草稿采购单(@idempotent) |
-
-### Finance(finance)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| POST | /api/v1/finance/reconciliation/batches | recon:create | 创建对账批次(@idempotent) |
-| GET | /api/v1/finance/reconciliation/batches | finance:read | 对账批次列表(支持 period/status 过滤) |
-| POST | /api/v1/finance/reconciliation/batches/<id>/import | recon:import | 导入外部流水明细(@idempotent) |
-| POST | /api/v1/finance/reconciliation/batches/<id>/auto-match | recon:match | 自动匹配(按 reference_no + amount) |
-| GET | /api/v1/finance/reconciliation/batches/<id>/report | finance:read | 对账报告(含未匹配明细) |
-| POST | /api/v1/finance/reconciliation/batches/<id>/close | recon:close | 关闭对账批次(要求无未匹配) |
-
-### 闭环(loop)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/loop/status | loop:read | 闭环状态 |
-| POST | /api/v1/loop/run-step | loop:run | 同步执行步骤 |
-| POST | /api/v1/loop/run-step-async | loop:run | 异步执行(需 Celery) |
-| GET | /api/v1/loop/task/<task_id> | loop:read | 查询异步任务状态 |
-| POST | /api/v1/loop/rollback | loop:rollback | 回滚指定步骤 |
-| POST | /api/v1/loop/reset | loop:reset | 重置闭环状态(仅 admin) |
-| GET | /api/v1/loop/auto-trigger-check | loop:read | 触发自动检测闭环状态 |
-| GET | /api/v1/loop/stream | loop:read | SSE 实时进度推送 |
-
-### 审计(audit)
-
-| 方法 | 路径 | 权限 | 说明 |
-|---|---|---|---|
-| GET | /api/v1/audit/logs | audit:read | 分页查询审计日志(支持 actor/action/target_type/日期过滤) |
-| GET | /api/v1/audit/stats | audit:read | 最近 30 天按 action 聚合 |
-| GET | /api/v1/audit/verify-chain | audit:read | 校验审计日志 hash chain 完整性 |
-
-### 系统
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | /health | 深度健康检查(数据库 + Redis + 磁盘) |
-| GET | /health/live | 存活探针(轻量) |
-| GET | /health/ready | 就绪探针(依赖检查) |
-| GET | /api/dashboard | erp:read | 仪表盘汇总(TOP KPI) |
-| GET | /metrics | Prometheus 指标(METRICS_ENABLED=1 时) |
-| GET | /docs/swagger | API 文档(API_DOCS_ENABLED=1 时) |
+# 带认证查询库存
+curl http://127.0.0.1:5000/api/v1/erp/inventory -b cookies.txt
+```
 
 ## 工程化
 
-### CI/CD(GitHub Actions)
+CI(push/PR 到 main 自动触发,7 个 job 全绿才可合并):
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) 定义 4 个 job:
+| Job | 内容 |
+|-----|------|
+| lint | ruff + black + mypy |
+| test | Python 3.10 / 3.11 / 3.12 矩阵 pytest + coverage |
+| security | bandit + pip-audit(CVE 阻断) |
+| migrate | PostgreSQL 16 空库跑完整迁移链,断言 head |
+| frontend | pnpm install + 前端构建 |
+| build | Docker 镜像多阶段构建 + Trivy 扫描(HIGH/CRITICAL 阻断) |
 
-| Job | 说明 |
-|---|---|
-| **lint** | ruff check + black --check + mypy 类型检查 |
-| **test** | Python 3.10/3.11/3.12 矩阵运行 pytest + coverage,3.11 上传 Codecov |
-| **security** | bandit 安全扫描 + pip-audit CVE 扫描(HIGH/CRITICAL 阻断) |
-| **build** | Docker 镜像构建(lint + test + security 通过后触发) + Trivy 漏洞扫描(HIGH/CRITICAL 阻断) |
-
-push/PR 到 main 自动触发。
-
-### 测试(pytest)
+本地开发:
 
 ```bash
-# 安装开发依赖
 pip install -r requirements-dev.txt
-
-# 运行测试
-pytest                              # 或 make test
-
-# 带覆盖率报告
-pytest --cov=. --cov-report=html    # 或 make test-cov,生成 htmlcov/
+pytest                           # 581 用例全量回归
+pre-commit run --all-files       # ruff + black + mypy 提交前检查
 ```
 
-测试套件覆盖 30+ 模块 470+ 用例(coverage >= 60%):
-- `test_health.py`:健康检查端点
-- `test_auth.py`:登录/认证流程
-- `test_auth_extended.py`:认证扩展用例
-- `test_data_agent.py`:改进8 SQL sqlglot AST 安全校验(SELECT/WITH/INSERT/UPDATE/DELETE/DROP/白名单/多语句/LIMIT/列名含关键字/嵌套 CTE)
-- `test_anomaly_detector.py`:改进9 异常检测算法(正常/3σ/2σ/数据不足/空数据库)
-- `test_multiagent.py`:改进7 多 Agent 评分(价格权重/空列表/单供应商/min-max 归一化)
-- `test_daily_report.py`:改进10 4 段式日报(趋势加载/上下文构建/模板降级)
-- `test_evaluator.py`:Agent 评测框架(gold SQL 加载/SQL 三级对比/准确率/退化检测)
-- `test_erp_service.py`:ERP 进销存全链路(采购/销售/退货/调拨/盘点/预算/成本核算)
-- `test_mrp_service.py`:MRP 物料需求计划(BOM 多层展开/净需求计算/计划下达)
-- `test_finance_recon.py`:财务对账(容忍度匹配/差异分析/RBAC)
-- `test_rbac_authorization.py`:RBAC 权限矩阵(三级角色 + 细粒度权限点)
-- `test_tasks.py`:Celery 异步任务(多线程 App Context / 双重检查锁定)
-- `test_crypto_service.py`:字段级加密(AES-GCM / 加密解密)
-- `test_mfa_service.py`:MFA 双因素认证(TOTP 生成/验证/备用码)
-- `test_migrations.py`:数据库迁移(单 head / 无合并冲突)
-- `test_coverage_boost.py`:覆盖率补充(边界条件/异常路径)
-- `test_aigc_service.py`:AIGC 补货建议/置信度算法/Text2SQL/语义检索
-- `test_closed_loop.py`:五步闭环状态机(LangGraph + 文件锁 + 回滚)
-- `test_cache_service.py`:L1/L2 多级缓存
-- `test_idempotency.py`:幂等写接口(@idempotent)
-- `test_notifier.py`:多渠道告警通知
-- `test_response.py`:响应格式封装
-- `test_middleware.py`:request_id 注入与日志过滤
-- `test_rpa_service.py`:RPA 报价采集/订单同步
-- `test_warehouse_service.py`:ETL 流水线/数据质量/血缘
-- `test_security.py`:安全头/限流/CORS
-- `test_routes_integration.py`:路由集成测试
-
-[tests/conftest.py](tests/conftest.py) 提供公共 fixtures:
-- `app`:会话级 Flask app(临时 SQLite,`db.create_all()`)
-- `client`:测试客户端
-- `db_session`:函数级事务回滚,测试互不污染
-- `auth_headers`:JWT 认证头
-- `mock_llm`:Mock LLM 调用
-- `disable_timeout`:禁用闭环超时装饰器
-
-### 代码质量
-
-| 工具 | 配置位置 | 说明 |
-|---|---|---|
-| **ruff** | [pyproject.toml](pyproject.toml) `[tool.ruff]` | Lint + import 排序,line-length=120 |
-| **black** | [pyproject.toml](pyproject.toml) `[tool.black]` | 代码格式化,line-length=120 |
-| **mypy** | [pyproject.toml](pyproject.toml) `[tool.mypy]` | 类型检查(非 strict,渐进式启用) |
-| **bandit** | CI security job | 安全扫描 |
-| **pre-commit** | [.pre-commit-config.yaml](.pre-commit-config.yaml) | Git 提交前自动检查(ruff + black + mypy) |
+数据库迁移(链:b00000000001_baseline → …_business_enhancements → …_stock_location → …_chat_history_rag):
 
 ```bash
-# 安装 pre-commit 钩子
-pre-commit install
-
-# 手动运行所有检查
-pre-commit run --all-files    # 或 make pre-commit
-
-# 单独运行
-ruff check .                  # 或 make lint
-black .                       # 或 make format
-mypy app.py                   # 或 make type-check
-bandit -r . -x tests,.venv    # 或 make security
-```
-
-### Makefile 便利命令
-
-| 命令 | 说明 |
-|---|---|
-| `make help` | 显示所有可用命令 |
-| `make install` | 安装生产依赖 |
-| `make dev-install` | 安装生产 + 开发依赖 + pre-commit 钩子 |
-| `make test` | 运行测试 |
-| `make test-cov` | 测试 + 覆盖率报告(htmlcov/) |
-| `make lint` / `make format` | ruff 检查 / black 格式化 |
-| `make type-check` | mypy 类型检查 |
-| `make security` | bandit 安全扫描 |
-| `make run` | 启动开发服务器 |
-| `make docker-build` / `make docker-up` | Docker 构建 / 启动 |
-| `make migrate` / `make migrate-new m="描述"` | 数据库迁移 |
-| `make clean` | 清理缓存文件 |
-
-### 开发依赖
-
-[requirements-dev.txt](requirements-dev.txt) 单独管理开发依赖,与生产依赖分离:
-
-- 测试:pytest / pytest-cov / pytest-flask / coverage
-- 代码质量:ruff / black
-- 类型检查:mypy
-- 安全扫描:bandit
-- Git 钩子:pre-commit
-- 工具库:PyYAML
-
-```bash
-# 仅生产部署
-pip install -r requirements.txt
-
-# 开发环境
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+flask db upgrade                 # 应用迁移
+flask db migrate -m "描述"        # 创建新迁移
 ```
 
 ## 部署
 
-### 生产部署清单
-
-1. 复制 `.env.example` 为 `.env`,设置以下必填项:
-   - `SECRET_KEY`:`python -c "import secrets; print(secrets.token_hex(32))"`
-   - `DB_PASSWORD`:PostgreSQL 密码
-   - `CORS_ORIGINS`:允许的前端域名(逗号分隔)
-2. (可选)配置 LLM:`LLM_PROVIDER=glm` + `LLM_API_KEY=xxx` + `LLM_API_URL=xxx`
-3. (可选)配置告警:`ALERT_DINGTALK_WEBHOOK` / `ALERT_MAIL_*`
-4. (可选)配置 Celery:`CELERY_BROKER_URL=redis://redis:6379/2`
-5. TLS 证书:生产用 Let's Encrypt,本地预览用 `nginx/gen-self-signed-cert.sh`
+生产部署清单与运维手册见 [docs/deployment.md](docs/deployment.md) 与 [docs/ops-runbook.md](docs/ops-runbook.md)。要点:
 
 ```bash
+# 1. 配置 .env(生产必填项见上方[配置]节)
+# 2. 起服务
 docker compose -f docker-compose.prod.yml up -d
-docker compose -f docker-compose.prod.yml ps       # 查看健康状态
-docker compose -f docker-compose.prod.yml logs -f  # 查看日志
-```
-
-### 数据库备份恢复
-
-```bash
-# 手动备份(容器内 cron 默认每天 02:00 自动执行)
+# 3. 备份(容器内 cron 默认每天 02:00 自动执行)
 docker compose -f docker-compose.prod.yml exec db-backup /backup_db.sh
-
-# 恢复(交互式确认 + 行数校验)
-docker compose -f docker-compose.prod.yml exec db-backup /restore_db.sh /backups/ops_platform_20260629.sql.gz
+# 4. 恢复(交互式确认 + 行数校验)
+docker compose -f docker-compose.prod.yml exec db-backup /restore_db.sh /backups/<file>.sql.gz
 ```
 
-备份文件:`pg_dump` + `gzip`,带 `gunzip -t` 完整性校验,默认保留 7 天。
-
-### Celery Worker(可选)
+Celery(可选,未启动时异步接口返回 503、同步接口仍可用):
 
 ```bash
 celery -A tasks.celery_app worker --loglevel=info --concurrency=2
-celery -A tasks.celery_app beat --loglevel=info
+celery -A tasks.celery_app beat --loglevel=info    # ETL 02:00 / 日报 02:30 / RPA 每 30min / 异常检测 09:00-22:00 整点
 ```
 
-未启动 worker 时,异步接口 `/loop/run-step-async` 返回 503,同步接口仍可用。
+监控栈(可选):`docker compose -f docker-compose.monitoring.yml up -d` 启动 Prometheus + Grafana(预置仪表盘)+ Loki + Alertmanager。
 
+## 项目结构
 
-## 已完成问题修复 (P0-3 Roadmap)
-
-### High 级别修复
-- **error_response函数语法错误**: 修复code, message, error_level参数定义不匹配，移除未定义的http_status/data变量
-- **配置中的硬编码密钥**: config.py中SECRET_KEY移除默认dev值，改为生产环境必须通过环境变量设置
-- **SQLite在生产环境中的使用**: 配置要求生产环境必须使用PostgreSQL，默认配置已更新
-
-### Medium 级别修复
-- **速率限制存储配置**: _rateLIMIT_STORAGE_URI自动配置，生产环境从memory://迁移至Redis
-- **日志配置冗余**: 消除潜在的重复处理，确保request_id统一输出
-- **查询性能优化**: 慢查询阈值调整至200ms，query_hash追踪已添加
-
-### Low 级别修复
-- **注释风格统一**: 核心服务文件注释风格统一
-- **未使用导入清理**: 移除未引用的导入语句
-- **配置文档完善**: 环境变量说明更加清晰明了
-
-### 具体文件修复情况
-- `services/response.py`: error_response函数参数重组，修正http_status使用
-- `config.py`: pool_size/pool_recycle/pool_timeout通过环境变量配置，pool_pre_ping启用
-- `services/metrics.py`: SLOW_QUERY_THRESHOLD_MS可配置，query_hash追踪，Prometheus alert rules
-- `routes/loop.py`: SSE消息限制(最大50条)，动态心跳机制
-- `services/aigc_service.py`: cache_query方法，LLM provider configs与fallback chain
-- `services/rbac.py`: 审计日志占位符初始实现
-
-测试套件: 30+测试文件已准备就绪，pytest环境待安装运行。
+<details>
+<summary>展开目录树</summary>
 
 ```
+intelligent-ops-platform/
+├── app.py                  # Flask 工厂入口(优雅关闭)
+├── config.py               # DevConfig / ProdConfig(生产安全校验)
+├── extensions.py           # db / cache / limiter / celery + 多租户过滤
+├── tasks.py                # Celery 任务(含 _NullTask 兜底 + 逐租户执行)
+├── seed.py                 # 开发种子数据
+├── routes/                 # Blueprint 路由(auth/erp/rpa/fde/aigc/loop/audit/finance/mrp/tenant)
+├── services/               # 业务服务层(闭环/AIGC/ERP/RPA/FDE/对账/MRP/RBAC/...)
+├── models/                 # SQLAlchemy 模型(按业务域分文件 + TenantScoped mixin)
+├── adapters/               # LLM / RPA 外部系统抽象(mock 与生产实现解耦)
+├── frontend/               # React SPA 源码(pnpm 构建)
+├── static/dist/            # 前端构建产物(入库,部署链免 Node)
+├── templates/index.html    # 由 post-build 从构建产物生成(勿手改)
+├── migrations/versions/    # Alembic 迁移(b00000000001~b00000000004)
+├── tests/                  # pytest 测试套件(581 用例)
+├── nginx/                  # Nginx TLS + 限流 + 安全头配置
+├── scripts/                # 备份/恢复脚本
+├── monitoring/             # Prometheus / Grafana / Loki / Alertmanager 配置
+├── deploy/helm/            # Helm chart(K8s 部署)
+├── docker-compose.yml      # 开发版(web + db + redis)
+├── docker-compose.prod.yml # 生产版(+ nginx + db-backup)
+└── .github/workflows/      # CI(ci.yml) / CD(cd.yml,需配置 SSH secrets 后启用)
+```
+
+</details>
+
+## 文档
+
+- [docs/API.md](docs/API.md) — 全量 API 清单与权限矩阵
+- [docs/architecture.md](docs/architecture.md) — 架构设计
+- [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md) — 多租户模型与隔离语义
+- [docs/deployment.md](docs/deployment.md) — 部署手册
+- [docs/ops-runbook.md](docs/ops-runbook.md) — 运维手册
+- [docs/backup_recovery.md](docs/backup_recovery.md) — 备份恢复
+
+## 贡献
+
+欢迎 issue 与 PR;提交前请跑 `pytest` 与 `pre-commit run --all-files`。
+
+## 许可证
+
+[MIT](LICENSE)
