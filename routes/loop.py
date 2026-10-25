@@ -4,7 +4,7 @@ import json
 import logging
 import time
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 
 from services.closed_loop import ClosedLoop
 from services.rbac import get_actor_name, require_permission, verify_sse_auth
@@ -51,7 +51,8 @@ def run_step_async():
 
         if celery_app is None:
             return jsonify({"error": "Celery 未启用"}), 503
-        result = run_loop_step_async.delay(step_no, actor)
+        # 多租户：把触发者的租户传给 worker（无认证上下文时 None → 默认租户）
+        result = run_loop_step_async.delay(step_no, actor, tenant_id=g.get("tenant_id"))
         return jsonify({"task_id": result.id, "status": "queued"})
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503

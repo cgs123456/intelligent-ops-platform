@@ -52,4 +52,12 @@
 
 - 平台管理员操作业务表会看到全租户数据——这是设计语义，不是泄漏；审计会记录 `tenant_id=1`。
 - `data_agent` 的 SQL 改写覆盖单层/嵌套 CTE 与 JOIN 的真实表；若未来引入子查询外的动态 SQL 形态（如存储过程），需同步扩展 `_tenant_rewrite`。
-- Celery 任务沿用触发者的租户上下文写入（无上下文落默认租户）；如需跨租户定时任务的显式租户参数，是后续增强项。
+
+## 6. 异步执行链路的租户传递
+
+定时/异步任务是租户泄漏的高发点（worker 的 app context 里 `g.tenant_id` 未设置会静默落默认租户）。当前链路的保证与测试锚点：
+
+- **用户触发的任务**（`run_loop_step_async`）：路由提交时把 `g.tenant_id` 作为 `tenant_id` 参数传入，worker 内 `_run_as_tenant` 显式设置并在结束后恢复（防 worker 线程残留上一个任务的租户）。
+- **定时任务**（ETL/RPA 采集/建议生成/日报/异常检测）：`_run_for_each_tenant` 枚举全部活跃租户逐个执行，返回 `{tenant_id: result|{"error": ...}}`。失败语义：单租户失败记录明细不中断其他租户（整任务重试会重跑已成功租户，对补货建议生成有放大风险）；全部租户失败视为环境故障 raise 触发 Celery retry 与 on_failure 告警。
+- **步骤超时子线程**（`closed_loop.with_timeout`）：子线程 push 的是全新 app context，`g` 不随线程迁移——装饰器显式捕获并回放外层租户（`None` 平台管理员语义原样传递）。
+- 回归测试：`tests/test_multi_tenant.py::TestTenantContextPropagation`（7 用例：_run_as_tenant 设置/恢复/None 语义、遍历执行、部分失败不 raise、全部失败 raise、with_timeout 租户/平台管理员传递）。

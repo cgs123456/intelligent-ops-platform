@@ -100,4 +100,8 @@ __all__ = [
     # 会计期间 / 库位（P3）
     "AccountingPeriod",
     "StockLocation",
+    # 多租户基础设施
+    "Tenant",
+    "TenantScoped",
+    "DEFAULT_TENANT_ID",
 ]

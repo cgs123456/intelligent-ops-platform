@@ -13,6 +13,8 @@
 import logging
 import threading
 
+from flask import g
+
 from config import config as default_config
 from extensions import celery_app
 
@@ -78,6 +80,69 @@ _app_ctx_local = threading.local()
 _app_lock = threading.Lock()
 _app_instance = None  # 共享 app 实例（创建一次），但 context 每线程独立
 
+_TENANT_UNSET = object()
+
+
+def _iter_active_tenants():
+    """多租户：枚举全部活跃租户 id（sys_tenant 为全局表，查询不受租户过滤影响）。
+
+    定时任务必须逐租户执行——worker 的 app context 里 g.tenant_id 未设置时
+    会落到默认租户，若不遍历则租户 2+ 的数据永远不进数仓/不生成建议。
+    """
+    from extensions import db
+    from models.tenant import DEFAULT_TENANT_ID, Tenant
+
+    ids = [row[0] for row in db.session.query(Tenant.id).filter(Tenant.is_active.is_(True)).all()]
+    return ids or [DEFAULT_TENANT_ID]
+
+
+def _run_for_each_tenant(fn, label):
+    """对每个活跃租户执行 fn(tid)，返回 {tenant_id: result|{"error": ...}}。
+
+    失败语义：
+    - 逐租户 try/except，单租户失败不中断其他租户；
+    - 部分失败不 raise —— 整任务重试会重跑已成功租户（补货建议生成对重复执行
+      有放大风险），单租户失败留待下一轮 beat 自然重试，并记录 error 日志；
+    - 全部租户失败视为环境级故障，raise 触发 Celery retry 与 on_failure 告警。
+    """
+    results = {}
+    failed = []
+    for tid in _iter_active_tenants():
+        g.tenant_id = tid
+        try:
+            results[tid] = fn()
+        except Exception as exc:
+            logger.exception("[celery] %s failed for tenant %s", label, tid)
+            results[tid] = {"error": str(exc)}
+            failed.append(tid)
+    if failed and len(failed) == len(results):
+        raise RuntimeError(f"{label} 在全部 {len(failed)} 个租户上失败，疑似环境故障")
+    if failed:
+        logger.warning("[celery] %s 部分租户失败（等待下一轮调度重试）: %s", label, failed)
+    return results
+
+
+def _run_as_tenant(tid, fn):
+    """以指定租户执行 fn 并返回其结果；tid 为 None 时按默认租户。
+
+    g.tenant_id 必须显式赋值（不能依赖默认）：worker 线程的 app context
+    跨任务复用，上一个任务设置的租户会残留到下一个任务。
+    执行后恢复原值，保证同 context 内多次调用互不泄漏。
+    """
+    from flask import g
+
+    from models.tenant import DEFAULT_TENANT_ID
+
+    saved = g.get("tenant_id", _TENANT_UNSET)
+    g.tenant_id = DEFAULT_TENANT_ID if tid is None else tid
+    try:
+        return fn()
+    finally:
+        if saved is _TENANT_UNSET:
+            g.pop("tenant_id", None)
+        else:
+            g.tenant_id = saved
+
 
 def _get_app():
     """获取 Flask app context（线程局部，每个线程独立 push）
@@ -105,13 +170,13 @@ def _get_app():
 
 
 @_task(name="tasks.run_loop_step_async", bind=True, max_retries=2, default_retry_delay=5)
-def run_loop_step_async(self, step_no, actor="system"):
-    """异步执行闭环步骤"""
+def run_loop_step_async(self, step_no, actor="system", tenant_id=None):
+    """异步执行闭环步骤（tenant_id=触发者租户，缺失时默认租户——见 _run_as_tenant）"""
     try:
         _get_app()
         from services.closed_loop import ClosedLoop
 
-        result = ClosedLoop.run_step(step_no, actor=actor)
+        result = _run_as_tenant(tenant_id, lambda: ClosedLoop.run_step(step_no, actor=actor))
         logger.info("[celery] loop step %s done: %s", step_no, result)
         return result
     except Exception as exc:
@@ -123,16 +188,22 @@ def run_loop_step_async(self, step_no, actor="system"):
 
 @_task(name="tasks.run_etl_async", bind=True, max_retries=2, default_retry_delay=10)
 def run_etl_async(self):
-    """异步执行 FDE ETL 全量流水线"""
+    """异步执行 FDE ETL 全量流水线（逐租户执行，租户间互不影响）"""
     try:
         _get_app()
         from services.warehouse_service import WarehouseService
 
-        # P0-13: raise_on_error=True —— 让异常上抛触发 self.retry 与 on_failure 告警，
-        # 此前 run_full_pipeline 吞掉异常，Celery 永远显示成功、重试从不发生
-        result = WarehouseService().run_full_pipeline(raise_on_error=True)
-        logger.info("[celery] ETL done: %s", result)
-        return result
+        def _etl_one():
+            # P0-13: raise_on_error=True —— 让异常上抛触发逐租户错误收集，
+            # 全部租户失败时 _run_for_each_tenant raise 触发 self.retry 与 on_failure 告警
+            return WarehouseService().run_full_pipeline(raise_on_error=True)
+
+        results = _run_for_each_tenant(lambda tid: _etl_one(), "ETL")
+        logger.info(
+            "[celery] ETL done (per tenant): %s",
+            {k: "ok" if not (isinstance(v, dict) and "error" in v) else "error" for k, v in results.items()},
+        )
+        return results
     except Exception as exc:
         logger.exception("[celery] ETL failed")
         if hasattr(self, "retry"):
@@ -142,14 +213,14 @@ def run_etl_async(self):
 
 @_task(name="tasks.run_rpa_scheduled_async", bind=True, max_retries=1)
 def run_rpa_scheduled_async(self):
-    """异步执行 RPA 定时任务（报价采集 + 订单同步）"""
+    """异步执行 RPA 定时任务（报价采集 + 订单同步，逐租户执行）"""
     try:
         _get_app()
         from services.rpa_service import RPAService
 
-        result = RPAService().run_scheduled_tasks()
-        logger.info("[celery] RPA scheduled done: %s", result)
-        return result
+        results = _run_for_each_tenant(lambda tid: RPAService().run_scheduled_tasks(), "RPA scheduled")
+        logger.info("[celery] RPA scheduled done (per tenant): %s", results)
+        return results
     except Exception as exc:
         logger.exception("[celery] RPA scheduled failed")
         if hasattr(self, "retry"):
@@ -159,14 +230,19 @@ def run_rpa_scheduled_async(self):
 
 @_task(name="tasks.generate_suggestions_async", bind=True)
 def generate_suggestions_async(self):
-    """异步生成 AIGC 补货建议"""
+    """异步生成 AIGC 补货建议（逐租户执行）"""
     try:
         _get_app()
         from services.aigc_service import AIGCService
 
-        suggestions = AIGCService().generate_suggestions()
-        logger.info("[celery] generated %s suggestions", len(suggestions))
-        return {"count": len(suggestions)}
+        def _gen_one():
+            suggestions = AIGCService().generate_suggestions()
+            return {"count": len(suggestions)}
+
+        results = _run_for_each_tenant(_gen_one, "generate suggestions")
+        total = sum(v.get("count", 0) for v in results.values() if isinstance(v, dict))
+        logger.info("[celery] generated %s suggestions across %s tenants", total, len(results))
+        return results
     except Exception as exc:
         logger.exception("[celery] generate suggestions failed")
         if hasattr(self, "retry"):
@@ -189,9 +265,14 @@ def generate_daily_report_async(self, dt_str=None, push=True):
         from services.aigc_service import AIGCService
 
         dt = datetime.strptime(dt_str, "%Y-%m-%d").date() if dt_str else None
-        result = AIGCService().generate_daily_report(dt, push=push)
-        logger.info("[celery] daily report generated, pushed=%s", push)
-        return {"ok": result is not None, "pushed": push}
+
+        def _report_one():
+            result = AIGCService().generate_daily_report(dt, push=push)
+            return {"ok": result is not None, "pushed": push}
+
+        results = _run_for_each_tenant(_report_one, "daily report")
+        logger.info("[celery] daily report generated (per tenant): %s", results)
+        return results
     except Exception as exc:
         logger.exception("[celery] generate daily report failed")
         if hasattr(self, "retry"):
@@ -211,15 +292,14 @@ def detect_anomalies_async(self):
         _get_app()
         from services.anomaly_detector import AnomalyDetector
 
-        detector = AnomalyDetector()
-        result = detector.detect_and_trigger()
-        logger.info(
-            "[celery] anomaly detection done: checked=%d anomalies=%d triggered=%d",
-            result.get("checked", 0),
-            result.get("summary", {}).get("total", 0),
-            len(result.get("triggered_actions", [])),
-        )
-        return result
+        def _detect_one():
+            detector = AnomalyDetector()
+            return detector.detect_and_trigger()
+
+        results = _run_for_each_tenant(_detect_one, "anomaly detection")
+        total = sum(r.get("summary", {}).get("total", 0) for r in results.values() if isinstance(r, dict))
+        logger.info("[celery] anomaly detection done across %s tenants, anomalies=%d", len(results), total)
+        return results
     except Exception as exc:
         logger.exception("[celery] anomaly detection failed")
         if hasattr(self, "retry"):

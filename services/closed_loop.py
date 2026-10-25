@@ -152,9 +152,15 @@ def with_timeout(seconds):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            from flask import current_app
+            from flask import current_app, g
+
+            from extensions import current_tenant_id
 
             app = current_app._get_current_object()  # type: ignore[attr-defined]
+
+            # 多租户：子线程 push 的是全新 app context，g.tenant_id 不随线程迁移；
+            # 必须显式携带，否则步骤体以默认租户执行（跨租户串号）。None=平台管理员，原样传递。
+            outer_tid = current_tenant_id()
 
             cancel_event = threading.Event()
             result_box: list = [None]
@@ -164,6 +170,7 @@ def with_timeout(seconds):
             def target_thread():
                 try:
                     with app.app_context():
+                        g.tenant_id = outer_tid
                         try:
                             # 尝试将 cancel_event 注入 kwargs，让被装饰函数可以检查
                             result_box[0] = func(*args, cancel_event=cancel_event, **kwargs)

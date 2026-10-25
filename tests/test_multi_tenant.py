@@ -46,6 +46,7 @@ def cleanup(app):
             "user_roles",
             "sys_user",
             "sys_role",
+            "sys_tenant",
             "erp_product",
             "erp_supplier",
             "dws_sales_sku_daily",
@@ -255,3 +256,97 @@ class TestTenantApi:
         client = app.test_client()
         resp = client.get("/api/v1/tenants", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 403, resp.get_json()  # *:* 过权限关但被平台管理员检查拦下
+
+
+class TestTenantContextPropagation:
+    """Celery 任务与 with_timeout 子线程的租户上下文传递（review 修复回归）。"""
+
+    def test_run_as_tenant_sets_and_resets_g(self, app):
+        from flask import g
+
+        from tasks import _run_as_tenant
+
+        with app.app_context():
+            g.tenant_id = 1
+            assert _run_as_tenant(2, lambda: current_tenant_id()) == 2
+            # 显式租户执行后恢复原值（不泄漏到调用方后续逻辑）
+            assert current_tenant_id() == 1
+
+    def test_run_as_tenant_none_means_default(self, app):
+        from flask import g
+
+        from tasks import _run_as_tenant
+
+        with app.app_context():
+            g.tenant_id = 2  # 模拟 worker 线程残留上一个任务的租户
+            assert _run_as_tenant(None, lambda: current_tenant_id()) == DEFAULT_TENANT_ID
+
+    def test_run_for_each_tenant_iterates_active(self, app):
+        from flask import g
+
+        from tasks import _run_for_each_tenant
+
+        with app.app_context():
+            g.tenant_id = None
+            seen = _run_for_each_tenant(lambda: current_tenant_id(), "probe")
+            assert sorted(seen) == [1, 2]  # 两个活跃租户都被执行，且各自以本租户身份
+
+    def test_run_for_each_tenant_partial_failure_no_raise(self, app):
+        from flask import g
+
+        from tasks import _run_for_each_tenant
+
+        with app.app_context():
+            g.tenant_id = None
+
+            def flaky():
+                if current_tenant_id() == 2:
+                    raise ValueError("boom")
+                return "ok"
+
+            results = _run_for_each_tenant(flaky, "flaky")
+            assert results[1] == "ok"
+            assert "error" in results[2]  # 单租户失败记录明细、不中断其他租户
+
+    def test_run_for_each_tenant_all_failed_raises(self, app):
+        import pytest as _pytest
+        from flask import g
+
+        from tasks import _run_for_each_tenant
+
+        def always_fail():
+            raise ValueError("x")
+
+        with app.app_context():
+            g.tenant_id = None
+            with _pytest.raises(RuntimeError, match="环境故障"):
+                _run_for_each_tenant(always_fail, "all-fail")
+
+    def test_with_timeout_carries_tenant_to_thread(self, app):
+        from flask import g
+
+        from services.closed_loop import with_timeout
+
+        with app.app_context():
+            g.tenant_id = 2
+
+            @with_timeout(5)
+            def probe(cancel_event=None):
+                return current_tenant_id()
+
+            # 子线程 push 的新 app context 必须显式携带租户，否则落默认租户 1
+            assert probe() == 2
+
+    def test_with_timeout_carries_platform_admin(self, app):
+        from flask import g
+
+        from services.closed_loop import with_timeout
+
+        with app.app_context():
+            g.tenant_id = None  # 平台管理员语义须原样传递（None 不是"默认租户"）
+
+            @with_timeout(5)
+            def probe(cancel_event=None):
+                return current_tenant_id()
+
+            assert probe() is None
