@@ -432,8 +432,9 @@ class ClosedLoop:
                         level="error",
                         context={"run_id": run_id, "step": step_no},
                     )
-                except Exception as e:
-                    logger.debug("超时告警发送失败: %s", e)
+                except Exception as notify_err:
+                    # 不用 e 命名：except 退出会删除同名变量，遮蔽外层异常导致后续 NameError
+                    logger.debug("超时告警发送失败: %s", notify_err)
                 # P0-2 fix: release session after timeout to prevent daemon thread
                 # from using the shared db.session (SQLAlchemy sessions are not thread-safe)
                 db.session.remove()
@@ -467,8 +468,9 @@ class ClosedLoop:
                         level="error",
                         context={"run_id": run_id, "step": step_no, "error": str(e)[:100]},
                     )
-                except Exception as e:
-                    logger.debug("失败告警发送失败: %s", e)
+                except Exception as notify_err:
+                    # 同上：避免遮蔽外层异常变量 e
+                    logger.debug("失败告警发送失败: %s", notify_err)
                 return {"step": step_no, "error": str(e)}
         finally:
             release()

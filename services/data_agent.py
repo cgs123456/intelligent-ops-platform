@@ -394,7 +394,7 @@ class DataAgent:
                     conds.append(exp.column("tenant_id", table=alias).eq(exp.Placeholder(this="tid")))
                 if not conds:
                     continue
-                merged = None
+                merged: "exp.Condition | None" = None
                 for c in conds:
                     merged = c if merged is None else exp.and_(merged, c)
                 where = select.args.get("where")
