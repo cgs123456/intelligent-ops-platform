@@ -96,7 +96,10 @@ def batch_review():
         try:
             nested = db.session.begin_nested()
             AIGCService().review_suggestion(
-                sid, action, reviewer=reviewer, auto_commit=False,
+                sid,
+                action,
+                reviewer=reviewer,
+                auto_commit=False,
                 actor_permissions=actor_permissions,
             )
             nested.commit()

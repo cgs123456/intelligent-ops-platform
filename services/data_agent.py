@@ -122,9 +122,7 @@ class DataAgent:
             rag_fields = {}
             if llm_sql_succeeded and validated_sql:
                 rag_fields = {"question": question, "sql": validated_sql}
-            self.session.add(
-                ChatHistory(session_id=sid, role="assistant", content=answer, **rag_fields)
-            )
+            self.session.add(ChatHistory(session_id=sid, role="assistant", content=answer, **rag_fields))
             self.session.commit()
             recorded = True
         except Exception as e:

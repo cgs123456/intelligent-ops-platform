@@ -523,4 +523,3 @@ class TestRouteAfterStep3:
         with app.app_context():
             state = {"errors": ["仍失败"], "retry_count": 2}
             assert ClosedLoop._route_after_step3(state) == "continue"
-

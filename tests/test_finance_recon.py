@@ -388,9 +388,7 @@ class TestReconciliationTotalsAndClose:
             svc.auto_match(batch.id)
             assert batch.status == "matched"
             # 模拟落库后系统侧金额被调整：匹配对差异 50 > max(150*13%, 0.01)=19.5
-            sys_entry = (
-                db.session.query(ReconciliationEntry).filter_by(batch_id=batch.id, source="erp").first()
-            )
+            sys_entry = db.session.query(ReconciliationEntry).filter_by(batch_id=batch.id, source="erp").first()
             sys_entry.amount = 150
             db.session.commit()
             with pytest.raises(ValueError, match="税容差"):

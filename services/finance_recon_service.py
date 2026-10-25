@@ -532,7 +532,9 @@ class ReconciliationService:
             self.db.commit()
             logger.info(
                 "调节项已创建: batch=%s ref=%s amount=%s",
-                batch.batch_no, reference_no, amount,
+                batch.batch_no,
+                reference_no,
+                amount,
             )
             return entry
         except Exception:
@@ -632,9 +634,7 @@ class ReconciliationService:
             # 导致"匹配成功却永远无法关账"的自锁。discrepancy_amount 保留为参考指标。
             bad_pairs = []
             matched_system = (
-                self.db.query(ReconciliationEntry)
-                .filter_by(batch_id=batch_id, source="erp", matched=True)
-                .all()
+                self.db.query(ReconciliationEntry).filter_by(batch_id=batch_id, source="erp", matched=True).all()
             )
             for sys_e in matched_system:
                 if sys_e.matched_entry_id is None:
@@ -650,11 +650,7 @@ class ReconciliationService:
                         .filter(ReconciliationEntry.matched_entry_id == sys_e.id)
                         .all()
                     )
-                    members = (
-                        self.db.query(ReconciliationEntry)
-                        .filter(ReconciliationEntry.id.in_(group_ids))
-                        .all()
-                    )
+                    members = self.db.query(ReconciliationEntry).filter(ReconciliationEntry.id.in_(group_ids)).all()
                     group_sum = sum((self._to_decimal(m.amount) for m in members), Decimal("0"))
                     diff = abs(sys_amount - group_sum)
                 else:
@@ -668,9 +664,7 @@ class ReconciliationService:
                 if diff > tolerance:
                     bad_pairs.append(f"{sys_e.reference_no or sys_e.id}(差异 {float(diff):.2f})")
             if bad_pairs:
-                raise ValueError(
-                    f"存在超出税容差的匹配对 {len(bad_pairs)} 条（如 {bad_pairs[0]}），无法关闭"
-                )
+                raise ValueError(f"存在超出税容差的匹配对 {len(bad_pairs)} 条（如 {bad_pairs[0]}），无法关闭")
 
             batch.status = "closed"
             batch.closed_at = datetime.now()

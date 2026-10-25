@@ -977,20 +977,15 @@ class ERPService:
             wh = self.db.get(Warehouse, warehouse_id)
             if wh is None:
                 raise ValueError(f"仓库不存在: {warehouse_id}")
-            dup = (
-                self.db.query(StockLocation)
-                .filter_by(warehouse_id=warehouse_id, code=code)
-                .first()
-            )
+            dup = self.db.query(StockLocation).filter_by(warehouse_id=warehouse_id, code=code).first()
             if dup is not None:
                 raise ValueError(f"库位编码已存在: {code}")
-            loc = StockLocation(
-                warehouse_id=warehouse_id, code=code, name=name, is_active=is_active
-            )
+            loc = StockLocation(warehouse_id=warehouse_id, code=code, name=name, is_active=is_active)
             self.db.add(loc)
             self.db.flush()
-            self._audit(actor, "create", "stock_location", loc.id,
-                        detail=f"创建库位 {code} warehouse={warehouse_id}", ip=ip)
+            self._audit(
+                actor, "create", "stock_location", loc.id, detail=f"创建库位 {code} warehouse={warehouse_id}", ip=ip
+            )
             self.db.commit()
             return loc
         except Exception:
@@ -1035,8 +1030,7 @@ class ERPService:
         product_ids = [r[0] for r in rows]
         products = {p.id: p for p in self.db.query(Product).filter(Product.id.in_(product_ids))} if product_ids else {}
         return {
-            "location": {"id": loc.id, "code": loc.code, "name": loc.name,
-                         "warehouse_id": loc.warehouse_id},
+            "location": {"id": loc.id, "code": loc.code, "name": loc.name, "warehouse_id": loc.warehouse_id},
             "items": [
                 {
                     "product_id": pid,
@@ -1098,9 +1092,7 @@ class ERPService:
             .all()
         )
         dangling_refs = [
-            {"ref_order": ref, "ref_type": rt, "entry_count": int(cnt)}
-            for ref, rt, cnt in dangling
-            if ref not in valid
+            {"ref_order": ref, "ref_type": rt, "entry_count": int(cnt)} for ref, rt, cnt in dangling if ref not in valid
         ]
         return {"accounts": accounts, "totals": totals, "dangling_refs": dangling_refs}
 

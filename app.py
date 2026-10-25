@@ -42,7 +42,7 @@ def setup_logging(app):
         try:
             from pythonjsonlogger import jsonlogger
 
-            fmt = jsonlogger.JsonFormatter(
+            fmt: logging.Formatter | str = jsonlogger.JsonFormatter(
                 "%(timestamp)s %(level)s %(name)s %(message)s %(request_id)s %(filename)s %(lineno)d",
                 rename_fields={"timestamp": "@timestamp", "level": "severity", "name": "logger"},
                 json_ensure_ascii=False,

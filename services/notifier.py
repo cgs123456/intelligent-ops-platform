@@ -137,9 +137,7 @@ class Notifier:
             self._send_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="alert-sender"
             )
-        self._send_executor.submit(
-            self._send_sync, title, message, level, context or {}, app_ref
-        )
+        self._send_executor.submit(self._send_sync, title, message, level, context or {}, app_ref)
 
     def _send_sync(self, title, message, level, context, app_ref=None):
         """同步发送到所有已配置渠道

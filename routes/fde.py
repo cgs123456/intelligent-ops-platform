@@ -106,6 +106,7 @@ def anomalies():
         result = detector.detect_sales_anomalies(target_date)
     return jsonify(result)
 
+
 @bp.route("/sku-classification")
 @require_permission("fde:read")
 def sku_classification():
@@ -123,9 +124,7 @@ def sku_classification():
     if dt:
         q = q.filter(AdsReplenishmentSuggest.dt == dt)
     else:
-        latest_dt = (
-            db.session.query(db.func.max(AdsReplenishmentSuggest.dt)).scalar()
-        )
+        latest_dt = db.session.query(db.func.max(AdsReplenishmentSuggest.dt)).scalar()
         if latest_dt is None:
             return jsonify([])
         q = q.filter(AdsReplenishmentSuggest.dt == latest_dt)
@@ -135,11 +134,7 @@ def sku_classification():
         q = q.filter(AdsReplenishmentSuggest.abc_class == abc)
     if xyz in ("X", "Y", "Z"):
         q = q.filter(AdsReplenishmentSuggest.xyz_class == xyz)
-    rows = (
-        q.order_by(AdsReplenishmentSuggest.revenue_share_90d.desc())
-        .limit(500)
-        .all()
-    )
+    rows = q.order_by(AdsReplenishmentSuggest.revenue_share_90d.desc()).limit(500).all()
     return jsonify(
         [
             {

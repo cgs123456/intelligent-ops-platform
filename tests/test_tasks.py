@@ -284,7 +284,7 @@ class TestModuleTasksCeleryAvailable:
         assert len(schedule) == 5, f"应有 5 个定时任务，实际 {len(schedule)}"
         for key, entry in schedule.items():
             sched = entry["schedule"]
-            assert isinstance(sched, crontab), (
-                f"beat 任务 {key} 的 schedule 必须是 crontab 对象（P0-7），当前: {type(sched)}"
-            )
+            assert isinstance(
+                sched, crontab
+            ), f"beat 任务 {key} 的 schedule 必须是 crontab 对象（P0-7），当前: {type(sched)}"
         assert celery_app.conf.timezone == "Asia/Shanghai"

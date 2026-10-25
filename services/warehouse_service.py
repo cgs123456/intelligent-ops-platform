@@ -343,7 +343,9 @@ class WarehouseService:
             if candidate_nos:
                 existing_nos = {
                     r[0]
-                    for r in self.session.query(OdsSaleOrder.order_no).filter(OdsSaleOrder.order_no.in_(candidate_nos)).all()
+                    for r in self.session.query(OdsSaleOrder.order_no)
+                    .filter(OdsSaleOrder.order_no.in_(candidate_nos))
+                    .all()
                 }
             n, new_wm = 0, wm
             for so in rows:
@@ -551,7 +553,9 @@ class WarehouseService:
 
         ins_fn = pg_insert if self.session.get_bind().dialect.name == "postgresql" else sqlite_insert
         stmt = ins_fn(model.__table__).values(rows)
-        update_cols = {c.key: getattr(stmt.excluded, c.key) for c in model.__table__.columns if c.key not in ("product_id", "dt")}
+        update_cols = {
+            c.key: getattr(stmt.excluded, c.key) for c in model.__table__.columns if c.key not in ("product_id", "dt")
+        }
         stmt = stmt.on_conflict_do_update(index_elements=["product_id", "dt"], set_=update_cols)
         self.session.execute(stmt)
         return len(rows)
@@ -600,9 +604,7 @@ class WarehouseService:
             inv_rows = []
             for d in snapshot_dates:
                 for p in self.session.query(Product).all():
-                    inv_rows.append(
-                        {"product_id": p.id, "product_name": p.name, "dt": d, "stock_qty": p.stock_qty}
-                    )
+                    inv_rows.append({"product_id": p.id, "product_name": p.name, "dt": d, "stock_qty": p.stock_qty})
             details["dws_inventory_snapshot_daily"] = self._upsert(DwsInventoryDaily, inv_rows)
 
             self.session.commit()

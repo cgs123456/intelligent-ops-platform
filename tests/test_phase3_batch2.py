@@ -1,4 +1,5 @@
 """P3 第二批测试：G1 试算平衡 / G2 多对一+调节项 / G3 库位流水。"""
+
 import uuid
 
 import pytest
@@ -54,6 +55,7 @@ def cleanup(app_context):
 
 
 # ==================== P3-G3: 库位 ====================
+
 
 class TestStockLocation:
     def test_create_and_list_location(self, app_context, cleanup):
@@ -149,6 +151,7 @@ class TestStockLocation:
 
 # ==================== P3-G2: 多对一匹配 + 调节项 ====================
 
+
 class TestMultiMatchAndAdjustment:
     def _make_batch_with_split_payment(self, app_context):
         """系统侧 130 元（1 条），外部侧同 reference_no 拆 100+30（2 条）。"""
@@ -158,18 +161,31 @@ class TestMultiMatchAndAdjustment:
         _db.session.add_all(
             [
                 ReconciliationEntry(
-                    batch_id=batch.id, source="erp", account_code="AR",
-                    entry_date=_dt(), amount=130, direction="debit",
-                    reference_no="INV-001", tax_rate=0,
+                    batch_id=batch.id,
+                    source="erp",
+                    account_code="AR",
+                    entry_date=_dt(),
+                    amount=130,
+                    direction="debit",
+                    reference_no="INV-001",
+                    tax_rate=0,
                 ),
                 ReconciliationEntry(
-                    batch_id=batch.id, source="bank", account_code="BANK",
-                    entry_date=_dt(), amount=100, direction="credit",
+                    batch_id=batch.id,
+                    source="bank",
+                    account_code="BANK",
+                    entry_date=_dt(),
+                    amount=100,
+                    direction="credit",
                     reference_no="INV-001",
                 ),
                 ReconciliationEntry(
-                    batch_id=batch.id, source="bank", account_code="BANK",
-                    entry_date=_dt(), amount=30, direction="credit",
+                    batch_id=batch.id,
+                    source="bank",
+                    account_code="BANK",
+                    entry_date=_dt(),
+                    amount=30,
+                    direction="credit",
                     reference_no="INV-001",
                 ),
             ]
@@ -185,9 +201,7 @@ class TestMultiMatchAndAdjustment:
         assert result["unmatched_external"] == 0
 
         sys_e = ReconciliationEntry.query.filter_by(batch_id=batch.id, source="erp").first()
-        bank_entries = ReconciliationEntry.query.filter_by(
-            batch_id=batch.id, source="bank"
-        ).all()
+        bank_entries = ReconciliationEntry.query.filter_by(batch_id=batch.id, source="bank").all()
         assert sys_e.matched and sys_e.match_type == "multi"
         assert all(b.matched and b.match_type == "multi" for b in bank_entries)
         # 星型：erp -> 组合首条；组合成员 -> erp
@@ -198,9 +212,9 @@ class TestMultiMatchAndAdjustment:
         """组合和超出容差（tax_rate=0 → 容差 0.01）不得误配。"""
         batch = self._make_batch_with_split_payment(app_context)
         # 把一条银行明细改成 100.5：组合和 130.5，差 0.5 > 0.01
-        be = ReconciliationEntry.query.filter_by(batch_id=batch.id, source="bank").order_by(
-            ReconciliationEntry.id
-        ).all()
+        be = (
+            ReconciliationEntry.query.filter_by(batch_id=batch.id, source="bank").order_by(ReconciliationEntry.id).all()
+        )
         be[0].amount = 100.5
         _db.session.commit()
 
@@ -212,9 +226,9 @@ class TestMultiMatchAndAdjustment:
         """调节项 + 重跑匹配 → 批次配平可关闭（P3-G2 完整闭环）。"""
         batch = self._make_batch_with_split_payment(app_context)
         # 外部侧只有 100（另 30 为手续费无法收回 → 调节项核销）
-        be = ReconciliationEntry.query.filter_by(batch_id=batch.id, source="bank").order_by(
-            ReconciliationEntry.id
-        ).all()
+        be = (
+            ReconciliationEntry.query.filter_by(batch_id=batch.id, source="bank").order_by(ReconciliationEntry.id).all()
+        )
         _db.session.delete(be[1])
         _db.session.commit()
 
@@ -256,6 +270,7 @@ def _dt():
 
 # ==================== P3-G1: 试算平衡 ====================
 
+
 class TestTrialBalance:
     def test_trial_balance_aggregates_and_finds_dangling(self, app_context, cleanup):
         sup = Supplier(name=f"S-{_uid8()}")
@@ -267,9 +282,7 @@ class TestTrialBalance:
 
         svc = ERPService()
         # 采购 100@10 确认 → 应付 1000 + 税 130
-        po = svc.create_purchase_order(
-            supplier_id=sup.id, product_id=prod.id, qty=100, unit_price=10
-        )
+        po = svc.create_purchase_order(supplier_id=sup.id, product_id=prod.id, qty=100, unit_price=10)
         svc.confirm_purchase_order(po.id)
 
         tb = svc.trial_balance()

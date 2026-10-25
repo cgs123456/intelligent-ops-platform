@@ -449,6 +449,7 @@ def confirm_stock_take(take_id: int):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+
 @bp.route("/products/<int:product_id>/safety-stock-recalc", methods=["POST"])
 @require_permission("erp:write")
 def safety_stock_recalc(product_id: int):
@@ -519,14 +520,17 @@ def close_accounting_period(name: str):
     """P3-F4: 关闭会计期间——该月过账入口（采购确认/销售/退货/采购退）全部拒绝。"""
     try:
         period = ERPService().close_accounting_period(name, actor=get_actor_name())
-        return jsonify(
-            {
-                "id": period.id,
-                "name": period.name,
-                "is_closed": period.is_closed,
-                "closed_by": period.closed_by,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "id": period.id,
+                    "name": period.name,
+                    "is_closed": period.is_closed,
+                    "closed_by": period.closed_by,
+                }
+            ),
+            200,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -547,9 +551,7 @@ def list_locations():
     """P3-G3: 库位清单（?warehouse_id= 过滤，include_inactive=1 含停用）。"""
     warehouse_id = request.args.get("warehouse_id", type=int)
     include_inactive = request.args.get("include_inactive", "0") in ("1", "true")
-    locations = ERPService().list_locations(
-        warehouse_id=warehouse_id, include_inactive=include_inactive
-    )
+    locations = ERPService().list_locations(warehouse_id=warehouse_id, include_inactive=include_inactive)
     return jsonify(
         {
             "items": [

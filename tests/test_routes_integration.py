@@ -206,9 +206,7 @@ class TestFinanceRoutes:
 
     def test_create_batch_then_filter(self, client, app):
         """创建批次后可按 period 过滤查回"""
-        resp = client.post(
-            "/api/v1/finance/reconciliation/batches", json={"period": "2026-10"}
-        )
+        resp = client.post("/api/v1/finance/reconciliation/batches", json={"period": "2026-10"})
         assert resp.get_json()["code"] == "OK"
         resp = client.get("/api/v1/finance/reconciliation/batches?period=2026-10")
         data = resp.get_json()["data"]

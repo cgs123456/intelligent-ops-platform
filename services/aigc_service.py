@@ -1003,8 +1003,9 @@ class AIGCService:
             unit_price = float(product.avg_cost or 0) if product else 0.0
         return float(quantity) * float(unit_price or 0)
 
-    def review_suggestion(self, id, action, note="", reviewer="system", final_qty=None,
-                           auto_commit=True, actor_permissions=None):
+    def review_suggestion(
+        self, id, action, note="", reviewer="system", final_qty=None, auto_commit=True, actor_permissions=None
+    ):
         """审核补货建议：action 为 approve/reject 或 approved/rejected。
         review 时自动调 record_feedback 记录反馈。
 
@@ -1039,9 +1040,7 @@ class AIGCService:
             if amount >= threshold:
                 perms = actor_permissions if isinstance(actor_permissions, (set, frozenset, list, tuple)) else set()
                 if "aigc:approve_high" not in perms and "*:*" not in perms:
-                    raise ValueError(
-                        f"高金额建议（约 {amount:.2f}）需 aigc:approve_high 权限审批"
-                    )
+                    raise ValueError(f"高金额建议（约 {amount:.2f}）需 aigc:approve_high 权限审批")
 
         # P1-3/P0-3: 数量修改逻辑 —— 审核改量必须真正覆盖 suggested_qty（闭环 step3 按其下单）
         if action == "approved":

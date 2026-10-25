@@ -97,18 +97,17 @@ class TestSafetyStockService:
             s = Supplier(name=f"S-{_uuid8()}", lead_days=9, is_active=True)
             db.session.add_all([p, s])
             db.session.flush()
-            db.session.add(
-                ExtQuote(
-                    supplier_id=s.id, product_id=p.id, quote_price=15, quote_date=date.today()
-                )
-            )
+            db.session.add(ExtQuote(supplier_id=s.id, product_id=p.id, quote_price=15, quote_date=date.today()))
             base = date.today() - timedelta(days=29)
             for i in range(30):
                 q = 10 if i % 2 == 0 else 20
                 db.session.add(
                     DwsSalesSkuDaily(
-                        product_id=p.id, product_name=p.name, dt=base + timedelta(days=i),
-                        sale_qty=q, sale_amount=q * 20,
+                        product_id=p.id,
+                        product_name=p.name,
+                        dt=base + timedelta(days=i),
+                        sale_qty=q,
+                        sale_amount=q * 20,
                     )
                 )
             db.session.commit()
@@ -149,13 +148,34 @@ class TestAbcXyzClassification:
             # p2: 每天 10 件稳定（X），金额 100/件 = 30k
             # p3: 交替 1/9 件（cv≈0.75 → Y），金额 50/件 = 7.5k
             for i in range(30):
-                db.session.add(DwsSalesSkuDaily(product_id=p1.id, product_name=p1.name,
-                                                dt=base + timedelta(days=i), sale_qty=100, sale_amount=30000))
-                db.session.add(DwsSalesSkuDaily(product_id=p2.id, product_name=p2.name,
-                                                dt=base + timedelta(days=i), sale_qty=10, sale_amount=1000))
+                db.session.add(
+                    DwsSalesSkuDaily(
+                        product_id=p1.id,
+                        product_name=p1.name,
+                        dt=base + timedelta(days=i),
+                        sale_qty=100,
+                        sale_amount=30000,
+                    )
+                )
+                db.session.add(
+                    DwsSalesSkuDaily(
+                        product_id=p2.id,
+                        product_name=p2.name,
+                        dt=base + timedelta(days=i),
+                        sale_qty=10,
+                        sale_amount=1000,
+                    )
+                )
                 q = 1 if i % 2 == 0 else 9
-                db.session.add(DwsSalesSkuDaily(product_id=p3.id, product_name=p3.name,
-                                                dt=base + timedelta(days=i), sale_qty=q, sale_amount=q * 50))
+                db.session.add(
+                    DwsSalesSkuDaily(
+                        product_id=p3.id,
+                        product_name=p3.name,
+                        dt=base + timedelta(days=i),
+                        sale_qty=q,
+                        sale_amount=q * 50,
+                    )
+                )
             db.session.commit()
 
             result = WarehouseService()._etl_ads(target_date=date.today())
@@ -202,8 +222,7 @@ class TestHighValueApproval:
             sup = Supplier(name=f"S-{_uuid8()}", is_active=True)
             db.session.add_all([p, sup])
             db.session.flush()
-            db.session.add(ExtQuote(supplier_id=sup.id, product_id=p.id,
-                                    quote_price=120, quote_date=date.today()))
+            db.session.add(ExtQuote(supplier_id=sup.id, product_id=p.id, quote_price=120, quote_date=date.today()))
             db.session.commit()
             s = _make_pending_suggestion(p.id, 100)
             amount = AIGCService()._suggestion_amount(s)
@@ -305,7 +324,10 @@ class TestAccountingPeriod:
             db.session.commit()
             with pytest.raises(ValueError, match="已关账"):
                 ERPService().create_sale_order(
-                    product_id=p.id, qty=1, unit_price=10, customer="测试客户",
+                    product_id=p.id,
+                    qty=1,
+                    unit_price=10,
+                    customer="测试客户",
                 )
 
     def test_close_idempotent_and_open_period_passes(self, app):
@@ -318,7 +340,10 @@ class TestAccountingPeriod:
             db.session.add_all([sup, p])
             db.session.commit()
             po = ERPService().create_purchase_order(
-                supplier_id=sup.id, product_id=p.id, qty=5, unit_price=10,
+                supplier_id=sup.id,
+                product_id=p.id,
+                qty=5,
+                unit_price=10,
             )
             ERPService().confirm_purchase_order(po.id)
             # 关账幂等

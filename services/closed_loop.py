@@ -31,6 +31,7 @@ try:
 except ImportError:
     _HAS_MSVCRT = False
 
+
 def _file_lock(run_id, step):
     """跨进程文件锁（兼容 gunicorn 多 worker）。
     Linux/Mac 用 fcntl.flock；Windows 用 msvcrt.locking 实现跨进程锁。
@@ -91,7 +92,7 @@ def _try_acquire_file_lock(f):
 
 
 # Windows 兜底：进程内 threading 锁
-_thread_locks = {}
+_thread_locks: dict[tuple[int, int], threading.Lock] = {}
 _thread_locks_mutex = threading.Lock()
 
 
@@ -191,6 +192,7 @@ def with_timeout(seconds):
 
 # ==================== 闭环状态 Schema ====================
 
+
 class ClosedLoopState(TypedDict, total=False):
     """闭环单步执行的状态 schema（节点函数间传递）
 
@@ -217,7 +219,6 @@ class ClosedLoopState(TypedDict, total=False):
     detail: str
     retry_count: int
     need_manual: bool
-
 
 
 class ClosedLoop:

@@ -120,7 +120,9 @@ class TestPoIdempotencyKeys:
 
             class FakeRpa:
                 def place_supplier_order(self, s):
-                    po = _make_po(seed["supplier_id"], seed["product_id"], suggestion_id=s["id"], ext_order_no="EXT-OK-1")
+                    po = _make_po(
+                        seed["supplier_id"], seed["product_id"], suggestion_id=s["id"], ext_order_no="EXT-OK-1"
+                    )
                     db.session.add(po)
                     db.session.commit()
                     return {"status": "ok", "supplier": "幂等测试供应商", "ext_order_no": "EXT-OK-1"}

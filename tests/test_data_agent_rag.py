@@ -1,4 +1,5 @@
 """P3-RAG 测试：问答对沉淀 + few-shot 检索。"""
+
 import uuid
 
 import pytest
