@@ -7,13 +7,21 @@ from datetime import date, datetime, timedelta
 from extensions import db
 from models.erp import Product, SaleOrder, Supplier, Warehouse
 from models.external import ExtEcommerceOrder, ExtSupplierQuote
+from models.tenant import DEFAULT_TENANT_ID, Tenant
 
 logger = logging.getLogger(__name__)
 
 
 def seed_all(app):
     with app.app_context():
-        if Product.query.first():
+        # 多租户：确保默认租户存在（业务行 tenant_id 外键指向它）
+        if Tenant.query.get(DEFAULT_TENANT_ID) is None:
+            db.session.add(Tenant(id=DEFAULT_TENANT_ID, code="default", name="默认租户", is_active=True))
+            db.session.commit()
+
+        # 幂等：任一种子表已有数据即跳过。只查 Product 会在部分清理场景
+        # （如测试只清了 product/supplier）误判未种过，重插 warehouse 撞唯一约束。
+        if Product.query.first() or Warehouse.query.first() or Supplier.query.first():
             return False
 
         # 仓库

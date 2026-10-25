@@ -448,3 +448,7 @@ record_3: prev_hash=hash_2    hash=sha256(hash_2 + canonical_json(field_3))
 | 生产配置强校验 | ProdConfig 启动时校验 SECRET_KEY / DATABASE_URL / CELERY_BROKER_URL / CORS_ORIGINS |
 | 依赖 CVE 扫描 | CI pipeline 集成 bandit + pip-audit |
 | 非 root 容器 | Dockerfile 多阶段构建 + 非 root 用户运行 |
+
+### 5.7 多租户隔离
+
+共库共表 + `tenant_id` 列，ORM 层 `with_loader_criteria` 对全部 TenantScoped 模型的 SELECT/UPDATE/DELETE 自动追加租户过滤，`before_flush` 自动归属写入；用户自由 SQL（DataAgent）经 sqlglot AST 改写强制追加 `tenant_id = :tid`。租户上下文来自 JWT `tid` 声明，平台管理员（`tenant_id IS NULL`）跨租户可见。审计哈希链保持全局单链（租户维度仅记录），租户管理 API 仅平台管理员可用。完整设计见 [MULTI_TENANCY.md](MULTI_TENANCY.md)。

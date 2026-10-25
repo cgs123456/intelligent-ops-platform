@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy.ext.hybrid import hybrid_property
 
 from extensions import db
+from models.tenant import TenantScoped
 
 
 def _encrypt_field(value):
@@ -23,12 +24,13 @@ def _decrypt_field(value):
     return field_crypto.decrypt(value)
 
 
-class Product(db.Model):
+class Product(TenantScoped, db.Model):
     """产品主数据（SKU）"""
 
     __tablename__ = "erp_product"
+    __table_args__ = (db.Index("ux_product_tenant_sku", "tenant_id", "sku", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    sku = db.Column(db.String(32), unique=True, nullable=False, index=True)
+    sku = db.Column(db.String(32), nullable=False, index=True)
     name = db.Column(db.String(64), nullable=False)
     cost_price = db.Column(db.Numeric(10, 2), nullable=False, default=0)
     sale_price = db.Column(db.Numeric(10, 2), nullable=False, default=0)
@@ -45,7 +47,7 @@ class Product(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class Supplier(db.Model):
+class Supplier(TenantScoped, db.Model):
     """供应商主数据"""
 
     __tablename__ = "erp_supplier"
@@ -77,30 +79,36 @@ class Supplier(db.Model):
         self._phone = _encrypt_field(value) if value else None
 
 
-class Warehouse(db.Model):
+class Warehouse(TenantScoped, db.Model):
     """仓库主数据（多仓库支持）"""
 
     __tablename__ = "erp_warehouse"
+    __table_args__ = (db.Index("ux_warehouse_tenant_code", "tenant_id", "code", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    code = db.Column(db.String(16), unique=True, nullable=False)  # WH-01
+    code = db.Column(db.String(16), nullable=False)  # WH-01
     name = db.Column(db.String(64), nullable=False)
     location = db.Column(db.String(128))
     is_active = db.Column(db.Boolean, default=True)
 
 
-class PurchaseOrder(db.Model):
+class PurchaseOrder(TenantScoped, db.Model):
     """采购单（对应 Odoo purchase.order）"""
 
     __tablename__ = "erp_purchase_order"
+    __table_args__ = (
+        db.Index("ux_po_tenant_suggestion_id", "tenant_id", "suggestion_id", unique=True),
+        db.Index("ux_po_tenant_ext_order_no", "tenant_id", "ext_order_no", unique=True),
+        db.Index("ux_po_tenant_order_no", "tenant_id", "order_no", unique=True),
+    )
     id = db.Column(db.Integer, primary_key=True)
-    order_no = db.Column(db.String(40), unique=True, nullable=False, index=True)
+    order_no = db.Column(db.String(40), nullable=False, index=True)
     supplier_id = db.Column(db.Integer, db.ForeignKey("erp_supplier.id"), nullable=False, index=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     qty = db.Column(db.Integer, nullable=False)
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
     status = db.Column(db.String(16), nullable=False, default="draft", index=True)  # draft/confirmed/received/cancelled
-    ext_order_no = db.Column(db.String(64), index=True, unique=True)  # P2-1: 外部平台单号唯一，防重复同步建单
-    suggestion_id = db.Column(db.Integer, index=True, unique=True)  # P2-1: 一条补货建议最多一张采购单（幂等键）
+    ext_order_no = db.Column(db.String(64), index=True)  # P2-1: 外部平台单号唯一，防重复同步建单
+    suggestion_id = db.Column(db.Integer, index=True)  # P2-1: 一条补货建议最多一张采购单（幂等键）
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"))  # 入库仓库
     # P1-9: 多币种 + 多税率支持
     currency_code = db.Column(db.String(3), nullable=False, default="CNY")
@@ -112,12 +120,13 @@ class PurchaseOrder(db.Model):
     received_qty = db.Column(db.Integer, nullable=False, default=0)
 
 
-class SaleOrder(db.Model):
+class SaleOrder(TenantScoped, db.Model):
     """销售单（对应 Odoo sale.order）"""
 
     __tablename__ = "erp_sale_order"
+    __table_args__ = (db.Index("ux_so_tenant_order_no", "tenant_id", "order_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    order_no = db.Column(db.String(40), unique=True, nullable=False, index=True)
+    order_no = db.Column(db.String(40), nullable=False, index=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     qty = db.Column(db.Integer, nullable=False)
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
@@ -131,7 +140,7 @@ class SaleOrder(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
-class StockMove(db.Model):
+class StockMove(TenantScoped, db.Model):
     """库存移动（对应 Odoo stock.move）
     move_type: in(采购入库) / out(销售出库) / return_in(退货入库) / return_out(退货出库) / transfer(调拨)
     """
@@ -157,7 +166,7 @@ class StockMove(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
-class StockLocation(db.Model):
+class StockLocation(TenantScoped, db.Model):
     """库位（P3-G3，仓库内细分管位）
 
     库位不改变库存总量（Product.stock_qty / 仓库级余额不变），仅提供流水级
@@ -165,7 +174,7 @@ class StockLocation(db.Model):
     """
 
     __tablename__ = "erp_stock_location"
-    __table_args__ = (db.Index("ux_stock_location_wh_code", "warehouse_id", "code", unique=True),)
+    __table_args__ = (db.Index("ux_stock_location_wh_code", "tenant_id", "warehouse_id", "code", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=False, index=True)
     code = db.Column(db.String(32), nullable=False)
@@ -174,7 +183,7 @@ class StockLocation(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class AccountMove(db.Model):
+class AccountMove(TenantScoped, db.Model):
     """会计凭证（对应 Odoo account.move）"""
 
     __tablename__ = "erp_account_move"
@@ -190,12 +199,13 @@ class AccountMove(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
-class ReturnOrder(db.Model):
+class ReturnOrder(TenantScoped, db.Model):
     """退货单（销售退货 → 红字销售单 + 入库 + 红字应收凭证）"""
 
     __tablename__ = "erp_return_order"
+    __table_args__ = (db.Index("ux_ro_tenant_return_no", "tenant_id", "return_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    return_no = db.Column(db.String(40), unique=True, nullable=False, index=True)
+    return_no = db.Column(db.String(40), nullable=False, index=True)
     original_order_no = db.Column(db.String(40), nullable=False, index=True)  # 原销售单号
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     qty = db.Column(db.Integer, nullable=False)
@@ -208,7 +218,7 @@ class ReturnOrder(db.Model):
 # ==================== P1-9 业务模块扩展 ====================
 
 
-class StockLot(db.Model):
+class StockLot(TenantScoped, db.Model):
     """批次/批次号管理（对应 Odoo stock.production.lot）
 
     用于食品/医药等有保质期要求的商品，按批次追溯库存与到期日。
@@ -219,9 +229,12 @@ class StockLot(db.Model):
 
     __tablename__ = "erp_stock_lot"
     # P1-5: FEFO 出库高频查询（product_id + status + expiry_date）复合索引
-    __table_args__ = (db.Index("idx_stock_lot_product_status_expiry", "product_id", "status", "expiry_date"),)
+    __table_args__ = (
+        db.Index("ux_lot_tenant_lot_no", "tenant_id", "lot_no", unique=True),
+        db.Index("idx_stock_lot_product_status_expiry", "product_id", "status", "expiry_date"),
+    )
     id = db.Column(db.Integer, primary_key=True)
-    lot_no = db.Column(db.String(32), unique=True, nullable=False, index=True)  # 批次号
+    lot_no = db.Column(db.String(32), nullable=False, index=True)  # 批次号
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     supplier_id = db.Column(db.Integer, db.ForeignKey("erp_supplier.id"), nullable=True)  # 供货来源
     manufacture_date = db.Column(db.DateTime)  # 生产日期
@@ -232,7 +245,7 @@ class StockLot(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class ReorderRule(db.Model):
+class ReorderRule(TenantScoped, db.Model):
     """补货预警规则（对应 Odoo stock.warehouse.orderpoint）
 
     触发条件：Product.stock_qty <= min_qty
@@ -241,7 +254,7 @@ class ReorderRule(db.Model):
 
     __tablename__ = "erp_reorder_rule"
     # P1-5: (product_id, warehouse_id) 唯一 —— 同品同仓一条规则，防止预警重复触发
-    __table_args__ = (db.Index("ux_reorder_rule_product_wh", "product_id", "warehouse_id", unique=True),)
+    __table_args__ = (db.Index("ux_reorder_rule_product_wh", "tenant_id", "product_id", "warehouse_id", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
     warehouse_id = db.Column(db.Integer, db.ForeignKey("erp_warehouse.id"), nullable=True)
@@ -252,22 +265,23 @@ class ReorderRule(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class CostCenter(db.Model):
+class CostCenter(TenantScoped, db.Model):
     """成本中心（对应 Odoo account.analytic.account）
 
     用于会计凭证按部门/项目/产品线分摊成本，支持预算管控。
     """
 
     __tablename__ = "erp_cost_center"
+    __table_args__ = (db.Index("ux_cc_tenant_code", "tenant_id", "code", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    code = db.Column(db.String(16), unique=True, nullable=False, index=True)  # 如 CC-01
+    code = db.Column(db.String(16), nullable=False, index=True)  # 如 CC-01
     name = db.Column(db.String(64), nullable=False)
     description = db.Column(db.Text)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class Budget(db.Model):
+class Budget(TenantScoped, db.Model):
     """预算管理（对应 Odoo account.budget）
 
     按 cost_center + period + category 维度制定预算，actual_amount 由凭证汇总回填。
@@ -277,7 +291,9 @@ class Budget(db.Model):
     __tablename__ = "erp_budget"
     # P1-5: (cost_center_id, period, category) 唯一 —— 防止同期同成本中心重复预算，
     # refresh_budget_actual 的聚合口径才会唯一
-    __table_args__ = (db.Index("ux_budget_cc_period_cat", "cost_center_id", "period", "category", unique=True),)
+    __table_args__ = (
+        db.Index("ux_budget_cc_period_cat", "tenant_id", "cost_center_id", "period", "category", unique=True),
+    )
     id = db.Column(db.Integer, primary_key=True)
     cost_center_id = db.Column(db.Integer, db.ForeignKey("erp_cost_center.id"), nullable=False, index=True)
     period = db.Column(db.String(7), nullable=False, index=True)  # YYYY-MM
@@ -288,7 +304,7 @@ class Budget(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class ExchangeRate(db.Model):
+class ExchangeRate(TenantScoped, db.Model):
     """汇率换算（对应 Odoo res.currency.rate）
 
     用于多币种场景下将外币金额折算为本位币（CNY）。
@@ -298,7 +314,9 @@ class ExchangeRate(db.Model):
 
     __tablename__ = "erp_exchange_rate"
     # P1-5: (from, to, date) 唯一 —— 同日同币对一条汇率（此前迁移里有复合索引但模型缺失）
-    __table_args__ = (db.Index("ux_exchange_rate_pair_date", "from_currency", "to_currency", "date", unique=True),)
+    __table_args__ = (
+        db.Index("ux_exchange_rate_pair_date", "tenant_id", "from_currency", "to_currency", "date", unique=True),
+    )
     id = db.Column(db.Integer, primary_key=True)
     from_currency = db.Column(db.String(3), nullable=False, index=True)  # ISO 4217 三字母代码
     to_currency = db.Column(db.String(3), nullable=False, index=True)  # 通常为 CNY
@@ -307,7 +325,7 @@ class ExchangeRate(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class StockTake(db.Model):
+class StockTake(TenantScoped, db.Model):
     """库存盘点（对应 Odoo stock.inventory）
 
     记录盘点单：系统库存 vs 实际库存，差异 diff = actual_qty - system_qty。
@@ -326,7 +344,7 @@ class StockTake(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
 
-class Customer(db.Model):
+class Customer(TenantScoped, db.Model):
     """客户主数据（对应 Odoo res.partner）
 
     管理客户档案、信用额度与当前余额，支持销售订单信用管控。
@@ -341,7 +359,7 @@ class Customer(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class AccountingPeriod(db.Model):
+class AccountingPeriod(TenantScoped, db.Model):
     """会计期间（对应 Odoo account.period）
 
     关账后该期间禁止过账（采购/销售/退货凭证创建前校验），
@@ -350,8 +368,9 @@ class AccountingPeriod(db.Model):
     """
 
     __tablename__ = "erp_accounting_period"
+    __table_args__ = (db.Index("ux_period_tenant_name", "tenant_id", "name", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(7), nullable=False, unique=True, index=True)  # 'YYYY-MM'
+    name = db.Column(db.String(7), nullable=False, index=True)  # 'YYYY-MM'
     is_closed = db.Column(db.Boolean, nullable=False, default=False)
     closed_at = db.Column(db.DateTime)
     closed_by = db.Column(db.String(64))

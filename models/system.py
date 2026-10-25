@@ -8,7 +8,8 @@ from sqlalchemy import Index, PrimaryKeyConstraint
 from sqlalchemy.event import listens_for
 from sqlalchemy.ext.hybrid import hybrid_property
 
-from extensions import db
+from extensions import current_tenant_id, db
+from models.tenant import DEFAULT_TENANT_ID, TenantScoped
 
 
 def _get_field_crypto():
@@ -18,8 +19,8 @@ def _get_field_crypto():
     return field_crypto
 
 
-class LoopState(db.Model):
-    """闭环运行状态记录"""
+class LoopState(TenantScoped, db.Model):
+    """闭环运行状态记录（每租户独立闭环）"""
 
     __tablename__ = "loop_state"
     id = db.Column(db.Integer, primary_key=True)
@@ -53,6 +54,17 @@ class AuditLog(db.Model):
     # PrimaryKeyConstraint 显式声明。SQLite 下由 before_insert 钩子手动计算 MAX(id)+1
     # 兜底自增；PostgreSQL 下由迁移设置的序列/IDENTITY 自动生成。
     id = db.Column(db.Integer)
+    # 多租户：归属记录维度。审计链为全局单链（防篡改是平台级完整性），
+    # 故 AuditLog 不挂 TenantScoped 自动过滤；查询按租户过滤在路由层手动实现。
+    # callable default：写入时取当前租户（g.tenant_id）；平台管理员（None）
+    # 与无请求上下文（Celery 任务等，_UNSET→默认租户）自动落位，写入点零改动
+    tenant_id = db.Column(
+        db.Integer,
+        db.ForeignKey("sys_tenant.id"),
+        nullable=False,
+        default=lambda: current_tenant_id() or DEFAULT_TENANT_ID,
+        index=True,
+    )
     actor = db.Column(db.String(64), default="system", index=True)  # 操作人
     action = db.Column(db.String(32), nullable=False, index=True)  # create/review/order/receive/etl/...
     target_type = db.Column(db.String(32))  # 操作对象类型
@@ -195,6 +207,9 @@ class User(db.Model):
 
     __tablename__ = "sys_user"
     id = db.Column(db.Integer, primary_key=True)
+    # 多租户：用户归属租户。NULL = 平台管理员（跨租户，不自动过滤）。
+    # 认证后由 JWT 载荷回填 g.tenant_id。
+    tenant_id = db.Column(db.Integer, db.ForeignKey("sys_tenant.id"), nullable=True, index=True)
     username = db.Column(db.String(64), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(256), nullable=False)  # werkzeug.security
     display_name = db.Column(db.String(64))

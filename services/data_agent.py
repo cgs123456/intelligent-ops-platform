@@ -314,6 +314,16 @@ class DataAgent:
                 logger.warning("[DataAgent] 追加 LIMIT 失败: %s", e)
                 return None
 
+        # 5.5 多租户强制改写：原生 SQL 绕过 ORM 自动过滤，必须逐表注入 tenant_id 条件
+        from extensions import current_tenant_id
+
+        tid = current_tenant_id()
+        if tid is not None:
+            expression = self._tenant_rewrite(expression, tid)
+            if expression is None:
+                logger.warning("[DataAgent] SQL 租户改写失败，拒绝执行")
+                return None
+
         # 6. 生成规范化 SQL
         try:
             result_sql = expression.sql(dialect="sqlite")
@@ -347,6 +357,55 @@ class DataAgent:
                 tables.add(name)
         return tables
 
+    def _tenant_rewrite(self, expression, tid):
+        """多租户：给每个 SELECT 作用域的真实表引用强制 AND tenant_id = :tid。
+
+        Text2SQL 生成原生 SQL 执行（session.execute(text(sql))），完全绕过
+        ORM 层 with_loader_criteria 自动过滤，跨租户读取只会发生在这里 ——
+        必须在 AST 层强制改写，不依赖 LLM 自觉。
+
+        实现：
+        - 遍历全部 SELECT 节点（含 CTE / 子查询内部作用域）
+        - 每个 SELECT 直接引用的真实白名单表追加 {alias}.tenant_id = :tid
+          （用户已写过同条件时 AND 幂等，无害）
+        - CTE 引用不加（其定义处已覆盖）；平台管理员（tid None）不改写
+        - 刻意不做 qualify 规整：加条件只需表别名（alias_or_name），列解析
+          在 CTE 输出列上会因 schema 不完整而误报拒绝（qualify 报
+          "Column could not be resolved"），改写语义不依赖它
+
+        :param expression: sqlglot Expression
+        :param tid: 当前租户 ID
+        :return: 改写后的 Expression，失败返回 None
+        """
+        try:
+            from sqlglot import exp
+
+            expr = expression.copy()
+            cte_names = {c.alias.lower() for c in expr.find_all(exp.CTE) if c.alias}
+            for select in list(expr.find_all(exp.Select)):
+                conds = []
+                for table in select.find_all(exp.Table):
+                    # 仅处理直接属于本 SELECT 的表（子查询由其自身节点处理）
+                    if table.find_ancestor(exp.Select) is not select:
+                        continue
+                    if (table.name or "").lower() in cte_names:
+                        continue
+                    alias = table.alias_or_name
+                    conds.append(exp.column("tenant_id", table=alias).eq(exp.Placeholder(this="tid")))
+                if not conds:
+                    continue
+                merged = None
+                for c in conds:
+                    merged = c if merged is None else exp.and_(merged, c)
+                where = select.args.get("where")
+                cur = where.this if where is not None else None
+                combined = merged if cur is None else exp.and_(cur, merged)
+                select.set("where", exp.Where(this=combined))
+            return expr
+        except Exception as e:
+            logger.warning("[DataAgent] 租户改写异常: %s", e)
+            return None
+
     # ---------------- 3. 执行查询 ----------------
 
     def _execute_sql(self, sql):
@@ -364,11 +423,16 @@ class DataAgent:
         try:
             from sqlalchemy import text
 
+            from extensions import current_tenant_id
+
+            # 多租户：改写后的 SQL 带 :tid 占位符，平台管理员（None）不绑定
+            tid = current_tenant_id()
+            params = {"tid": tid} if (tid is not None and ":tid" in sql) else {}
             bind = self.session.get_bind()
             if bind.dialect.name == "postgresql":
                 self.session.commit()  # 清空 pending 写入，保证 SET TRANSACTION 是事务首语句
                 self.session.execute(text("SET TRANSACTION READ ONLY"))
-                result = self.session.execute(text(sql))
+                result = self.session.execute(text(sql), params)
                 rows = result.fetchmany(self.MAX_ROWS)
                 self.session.rollback()
             else:
@@ -385,7 +449,7 @@ class DataAgent:
 
                 _pragma("PRAGMA query_only = ON")
                 try:
-                    result = self.session.execute(text(sql))
+                    result = self.session.execute(text(sql), params)
                     rows = result.fetchmany(self.MAX_ROWS)
                 finally:
                     # 先恢复连接属性再回滚：rollback 会把连接归还池，迟了会污染池里后续写入

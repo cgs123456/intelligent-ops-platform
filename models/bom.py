@@ -16,9 +16,10 @@ from datetime import datetime
 from sqlalchemy import Index
 
 from extensions import db
+from models.tenant import TenantScoped
 
 
-class BOM(db.Model):
+class BOM(TenantScoped, db.Model):
     """物料清单头（对应 Odoo mrp.bom）
 
     一个 Product 可有多个版本 BOM，但同一时间只有一条 active。
@@ -26,10 +27,13 @@ class BOM(db.Model):
 
     __tablename__ = "bom"
     # P1-5: (product_id, version) 唯一 —— 防止同产品同版本重复建 BOM（与迁移 h9i0j1k2l3m4 对齐）
-    __table_args__ = (Index("ux_bom_product_version", "product_id", "version", unique=True),)
+    __table_args__ = (
+        db.Index("ux_bom_tenant_code", "tenant_id", "code", unique=True),
+        Index("ux_bom_product_version", "tenant_id", "product_id", "version", unique=True),
+    )
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)  # 成品/半成品
-    code = db.Column(db.String(32), unique=True, nullable=False, index=True)  # BOM 编码
+    code = db.Column(db.String(32), nullable=False, index=True)  # BOM 编码
     version = db.Column(db.String(16), nullable=False, default="1.0")  # 版本号
     status = db.Column(db.String(16), nullable=False, default="active", index=True)  # active/frozen
     quantity = db.Column(db.Numeric(18, 4), nullable=False, default=1)  # 基础产量（生产 quantity 单位成品所需子件量）
@@ -39,7 +43,7 @@ class BOM(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
 
-class BOMItem(db.Model):
+class BOMItem(TenantScoped, db.Model):
     """物料清单行（对应 Odoo mrp.bom.line）
 
     每行记录一个子件及其用量。scrap_rate 为损耗率（如 0.05 表示 5% 损耗）。
@@ -47,7 +51,7 @@ class BOMItem(db.Model):
 
     __tablename__ = "bom_item"
     # P1-5: (bom_id, component_product_id) 唯一 —— 同一子件不可重复行
-    __table_args__ = (Index("ux_bom_item_bom_component", "bom_id", "component_product_id", unique=True),)
+    __table_args__ = (Index("ux_bom_item_bom_component", "tenant_id", "bom_id", "component_product_id", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     bom_id = db.Column(db.Integer, db.ForeignKey("bom.id"), nullable=False, index=True)
     component_product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)
@@ -58,7 +62,7 @@ class BOMItem(db.Model):
     notes = db.Column(db.String(256))
 
 
-class MRPPlan(db.Model):
+class MRPPlan(TenantScoped, db.Model):
     """MRP 计划单（对应 Odoo mrp.production）
 
     status 流转：draft -> calculated -> released -> closed
@@ -69,8 +73,9 @@ class MRPPlan(db.Model):
     """
 
     __tablename__ = "mrp_plan"
+    __table_args__ = (db.Index("ux_mrp_tenant_plan_no", "tenant_id", "plan_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    plan_no = db.Column(db.String(40), unique=True, nullable=False, index=True)  # 计划单号
+    plan_no = db.Column(db.String(40), nullable=False, index=True)  # 计划单号
     product_id = db.Column(db.Integer, db.ForeignKey("erp_product.id"), nullable=False, index=True)  # 计划生产的产品
     bom_id = db.Column(db.Integer, db.ForeignKey("bom.id"), nullable=True, index=True)  # 使用的 BOM
     planned_qty = db.Column(db.Numeric(18, 4), nullable=False)  # 计划生产数量
@@ -79,7 +84,7 @@ class MRPPlan(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class MRPRequirement(db.Model):
+class MRPRequirement(TenantScoped, db.Model):
     """MRP 需求明细（对应 Odoo mrp.production 的 component 需求展开）
 
     每行记录一个子件的毛需求 / 现有库存 / 净需求 / 建议下单量 / 建议下单日期。

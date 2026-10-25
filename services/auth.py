@@ -91,6 +91,8 @@ class AuthService:
         full_payload = {
             "sub": str(user.id),
             "username": user.username,
+            # 多租户：租户归属入 token（None = 平台管理员），认证后回填 g.tenant_id
+            "tid": user.tenant_id,
             "iat": _to_epoch(now),
             "exp": _to_epoch(exp),
             "type": token_type,
@@ -645,6 +647,8 @@ def jwt_required(f):
         if not payload:
             return jsonify({"error": "Token无效或已过期"}), 401
         g.current_user = payload
+        # 多租户：token 载荷回填当前租户（None = 平台管理员，跨租户不过滤）
+        g.tenant_id = payload.get("tid", 1)
         return f(*args, **kwargs)
 
     return wrapped

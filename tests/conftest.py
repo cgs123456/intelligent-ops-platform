@@ -71,6 +71,32 @@ def client(app):
     return app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def _clear_auth_process_state():
+    """清 AuthService 进程级缓存（token_version 缓存 / 内存黑名单 jti）。
+
+    这些缓存按 uid/jti 键全局共享，跨测试/跨库场景（如 rbac 用独立临时库、
+    用户 id 重新从 1 计数）会读到陈旧版本导致 verify 误判 401。生产单库
+    uid 全局唯一无此问题，故在测试层统一免疫。
+    """
+    from flask import has_app_context
+
+    from extensions import db as _db
+    from services.auth import AuthService
+
+    def _reset() -> None:
+        AuthService._user_cache.clear()
+        AuthService._revoked_jti_memory.clear()
+        if has_app_context():
+            # 长活外层 app context 使 session 跨测试存活，清陈旧 identity map
+            # 防路由按 uid 取到前测试同主键旧对象（密码哈希串号 → 误 401）
+            _db.session.expunge_all()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture(scope="function")
 def db_session(app):
     """函数级数据库 session，每个测试结束后回滚，互不污染。

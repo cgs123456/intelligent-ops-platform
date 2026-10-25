@@ -543,20 +543,28 @@ class WarehouseService:
     def _upsert(self, model, rows):
         """P2-4: 批量 upsert（PG/SQLite 的 on_conflict_do_update 语法一致，仅 import 路径不同）。
 
-        冲突键固定 (product_id, dt) —— DWS 两表的唯一键。替代原"delete 全量 + 逐行 add"：
-        无删除窗口、并发重跑不翻倍、增量重算只触碰目标日期。
+        冲突键 (tenant_id, product_id, dt) —— DWS 两表的复合唯一键（多租户化）。
+        Core insert 绕过 ORM 租户填充，这里显式注入当前租户。
+        替代原"delete 全量 + 逐行 add"：无删除窗口、并发重跑不翻倍、增量重算只触碰目标日期。
         """
         if not rows:
             return 0
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+        from extensions import current_tenant_id
+
+        tid = current_tenant_id()
+        for r in rows:
+            r.setdefault("tenant_id", tid)
         ins_fn = pg_insert if self.session.get_bind().dialect.name == "postgresql" else sqlite_insert
         stmt = ins_fn(model.__table__).values(rows)
         update_cols = {
-            c.key: getattr(stmt.excluded, c.key) for c in model.__table__.columns if c.key not in ("product_id", "dt")
+            c.key: getattr(stmt.excluded, c.key)
+            for c in model.__table__.columns
+            if c.key not in ("tenant_id", "product_id", "dt")
         }
-        stmt = stmt.on_conflict_do_update(index_elements=["product_id", "dt"], set_=update_cols)
+        stmt = stmt.on_conflict_do_update(index_elements=["tenant_id", "product_id", "dt"], set_=update_cols)
         self.session.execute(stmt)
         return len(rows)
 
@@ -571,14 +579,19 @@ class WarehouseService:
             date_filter = set(target_dates) if target_dates is not None else None
 
             # ---- SKU 日销售汇总（原生 SQL 聚合）----
+            # 原生 SQL 绕过 ORM 租户过滤，必须显式带当前租户
+            from extensions import current_tenant_id
+
+            _tid = current_tenant_id()
             sales_sql = text("""
                 SELECT product_id, product_name, dt,
                        SUM(qty) AS sale_qty, SUM(amount) AS sale_amount
                 FROM dwd_sales_order_di
+                WHERE tenant_id = :tid
                 GROUP BY product_id, product_name, dt
             """)
             sales_rows = []
-            for row in self.session.execute(sales_sql):
+            for row in self.session.execute(sales_sql, {"tid": _tid}):
                 dt_val = row[2]
                 # SQLite 原生 SQL 返回 dt 可能为字符串，统一转 date
                 if isinstance(dt_val, str):

@@ -102,6 +102,21 @@ def _create_partitioned_audit_log():
     op.execute("CREATE TABLE audit_log_default PARTITION OF audit_log DEFAULT")
 
 
+def _ensure_default_tenant():
+    """幂等插入默认租户 id=1（多租户业务行 FK 指向它，生产 PG 严格外键）"""
+    from sqlalchemy import text
+
+    bind = op.get_bind()
+    if bind.execute(text("SELECT 1 FROM sys_tenant WHERE id = 1")).first():
+        return
+    bind.execute(
+        text(
+            "INSERT INTO sys_tenant (id, code, name, is_active, created_at) "
+            "VALUES (1, 'default', '默认租户', 1, CURRENT_TIMESTAMP)"
+        )
+    )
+
+
 def upgrade():
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
@@ -109,9 +124,11 @@ def upgrade():
         tables = [t for t in db.metadata.sorted_tables if t.name != "audit_log"]
         db.metadata.create_all(bind=bind, tables=tables)
         _create_partitioned_audit_log()
+        _ensure_default_tenant()
     else:
         # SQLite：不支持分区，audit_log 由模型生成普通表
         db.metadata.create_all(bind=bind)
+        _ensure_default_tenant()
 
 
 def downgrade():

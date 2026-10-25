@@ -5,9 +5,10 @@ from datetime import datetime
 from sqlalchemy import Index
 
 from extensions import db
+from models.tenant import TenantScoped
 
 
-class Suggestion(db.Model):
+class Suggestion(TenantScoped, db.Model):
     """AIGC 生成的补货建议（需人工审核）"""
 
     __tablename__ = "aigc_suggestion"
@@ -31,17 +32,18 @@ class Suggestion(db.Model):
     run_id = db.Column(db.Integer, nullable=True, index=True)
 
 
-class DailyReport(db.Model):
+class DailyReport(TenantScoped, db.Model):
     """AIGC 生成的经营日报"""
 
     __tablename__ = "aigc_daily_report"
+    __table_args__ = (db.Index("ux_aigc_report_tenant_dt", "tenant_id", "dt", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    dt = db.Column(db.Date, unique=True, index=True)
+    dt = db.Column(db.Date, index=True)
     report_text = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class ChatHistory(db.Model):
+class ChatHistory(TenantScoped, db.Model):
     """多轮对话历史"""
 
     __tablename__ = "aigc_chat_history"
@@ -58,7 +60,7 @@ class ChatHistory(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
-class SuggestionFeedback(db.Model):
+class SuggestionFeedback(TenantScoped, db.Model):
     """审核反馈（用于 AIGC 自学习）"""
 
     __tablename__ = "aigc_suggestion_feedback"

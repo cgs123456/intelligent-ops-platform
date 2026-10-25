@@ -97,9 +97,9 @@ def _build(code, message, data, http_status):
     )
 
 
-def success_response(data=None, message="success", code=ErrorCode.OK):
+def success_response(data=None, message="success", code=ErrorCode.OK, http_status=200):
     """成功响应 envelope"""
-    return _build(code, message, data, 200)
+    return _build(code, message, data, http_status)
 
 
 def error_response(code, message=None, http_status=None, data=None):

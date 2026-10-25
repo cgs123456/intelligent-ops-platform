@@ -8,14 +8,15 @@ from datetime import datetime
 from sqlalchemy import Index, UniqueConstraint
 
 from extensions import db
+from models.tenant import TenantScoped
 
 # ==================== ODS 贴源层 ====================
 
 
-class OdsSaleOrder(db.Model):
+class OdsSaleOrder(TenantScoped, db.Model):
     __tablename__ = "ods_sale_order"
     # P1-5: order_no 唯一索引 —— 防止 ETL 重复抽取重复入库（与迁移 h9i0j1k2l3m4 对齐）
-    __table_args__ = (Index("ux_ods_sale_order_no", "order_no", unique=True),)
+    __table_args__ = (Index("ux_ods_sale_order_no", "tenant_id", "order_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     product_id = db.Column(db.Integer, index=True)
@@ -28,10 +29,10 @@ class OdsSaleOrder(db.Model):
     etl_batch = db.Column(db.String(32))  # ETL 批次号
 
 
-class OdsPurchaseOrder(db.Model):
+class OdsPurchaseOrder(TenantScoped, db.Model):
     __tablename__ = "ods_purchase_order"
     # P1-5: order_no 唯一索引（与迁移 h9i0j1k2l3m4 对齐）
-    __table_args__ = (Index("ux_ods_purchase_order_no", "order_no", unique=True),)
+    __table_args__ = (Index("ux_ods_purchase_order_no", "tenant_id", "order_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     order_no = db.Column(db.String(40), index=True)
     supplier_id = db.Column(db.Integer)
@@ -44,7 +45,7 @@ class OdsPurchaseOrder(db.Model):
     etl_batch = db.Column(db.String(32))
 
 
-class OdsStockMove(db.Model):
+class OdsStockMove(TenantScoped, db.Model):
     __tablename__ = "ods_stock_move"
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
@@ -59,7 +60,7 @@ class OdsStockMove(db.Model):
 # ==================== DWD 明细层 ====================
 
 
-class DwdSalesFact(db.Model):
+class DwdSalesFact(TenantScoped, db.Model):
     """销售事实表（星型模型事实表）"""
 
     __tablename__ = "dwd_sales_order_di"
@@ -74,7 +75,7 @@ class DwdSalesFact(db.Model):
     dt = db.Column(db.Date, index=True)
 
 
-class DwdStockFact(db.Model):
+class DwdStockFact(TenantScoped, db.Model):
     """库存移动事实表"""
 
     __tablename__ = "dwd_stock_move_di"
@@ -90,12 +91,12 @@ class DwdStockFact(db.Model):
 # ==================== DWS 汇总层 ====================
 
 
-class DwsSalesSkuDaily(db.Model):
+class DwsSalesSkuDaily(TenantScoped, db.Model):
     """SKU 日销售汇总"""
 
     __tablename__ = "dws_sales_sku_daily"
     # P1-13: (product_id, dt) 唯一约束防止重复 ETL 写入，同时优化按 product + 日期范围查询
-    __table_args__ = (UniqueConstraint("product_id", "dt", name="uq_dws_sales_sku_product_dt"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "product_id", "dt", name="uq_dws_sales_sku_product_dt"),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -104,12 +105,12 @@ class DwsSalesSkuDaily(db.Model):
     sale_amount = db.Column(db.Numeric(12, 2))
 
 
-class DwsInventoryDaily(db.Model):
+class DwsInventoryDaily(TenantScoped, db.Model):
     """库存日快照"""
 
     __tablename__ = "dws_inventory_snapshot_daily"
     # P1-5: (product_id, dt) 唯一 —— 防止重复 ETL 导致库存快照翻倍（对齐 dws_sales_sku_daily）
-    __table_args__ = (Index("ux_dws_inventory_product_dt", "product_id", "dt", unique=True),)
+    __table_args__ = (Index("ux_dws_inventory_product_dt", "tenant_id", "product_id", "dt", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, index=True)
     product_name = db.Column(db.String(64))
@@ -120,7 +121,7 @@ class DwsInventoryDaily(db.Model):
 # ==================== ADS 应用层 ====================
 
 
-class AdsReplenishmentSuggest(db.Model):
+class AdsReplenishmentSuggest(TenantScoped, db.Model):
     """补货建议源数据"""
 
     __tablename__ = "ads_replenishment_suggest"
@@ -146,12 +147,13 @@ class AdsReplenishmentSuggest(db.Model):
     dt = db.Column(db.Date, index=True)
 
 
-class AdsDailyOpsReport(db.Model):
+class AdsDailyOpsReport(TenantScoped, db.Model):
     """经营日报"""
 
     __tablename__ = "ads_daily_ops_report"
+    __table_args__ = (db.Index("ux_ads_report_tenant_dt", "tenant_id", "dt", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    dt = db.Column(db.Date, unique=True, index=True)
+    dt = db.Column(db.Date, index=True)
     total_sales_amount = db.Column(db.Numeric(12, 2))
     total_purchase_amount = db.Column(db.Numeric(12, 2))
     total_sale_qty = db.Column(db.Integer)
@@ -163,12 +165,12 @@ class AdsDailyOpsReport(db.Model):
 # ==================== ETL 元数据与治理 ====================
 
 
-class EtlMeta(db.Model):
+class EtlMeta(TenantScoped, db.Model):
     """ETL 执行元数据（增量拉取的水位线）"""
 
     __tablename__ = "etl_meta"
     # P1-5: (layer, table_name) 唯一 —— 水位线每表一行，防止双行导致增量口径漂移
-    __table_args__ = (Index("ux_etl_meta_layer_table", "layer", "table_name", unique=True),)
+    __table_args__ = (Index("ux_etl_meta_layer_table", "tenant_id", "layer", "table_name", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
     layer = db.Column(db.String(8), nullable=False, index=True)  # ODS/DWD/DWS/ADS
     table_name = db.Column(db.String(64), nullable=False, index=True)
@@ -180,7 +182,7 @@ class EtlMeta(db.Model):
     error_msg = db.Column(db.Text)
 
 
-class DataQualityLog(db.Model):
+class DataQualityLog(TenantScoped, db.Model):
     """数据质量测试日志（模拟 dbt tests）"""
 
     __tablename__ = "data_quality_log"
@@ -194,7 +196,7 @@ class DataQualityLog(db.Model):
     checked_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
-class DataLineage(db.Model):
+class DataLineage(TenantScoped, db.Model):
     """数据血缘追踪（上游表 → 下游表）"""
 
     __tablename__ = "data_lineage"

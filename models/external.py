@@ -3,9 +3,10 @@
 from datetime import date, datetime
 
 from extensions import db
+from models.tenant import TenantScoped
 
 
-class ExtSupplierQuote(db.Model):
+class ExtSupplierQuote(TenantScoped, db.Model):
     """外部供应商报价（模拟供应商网站数据）"""
 
     __tablename__ = "ext_supplier_quote"
@@ -18,7 +19,7 @@ class ExtSupplierQuote(db.Model):
     collected_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class ExtEcommerceOrder(db.Model):
+class ExtEcommerceOrder(TenantScoped, db.Model):
     """外部电商订单（模拟电商平台后台数据）"""
 
     __tablename__ = "ext_ecommerce_order"

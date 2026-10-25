@@ -19,6 +19,7 @@ from .finance import bp as finance_bp
 from .loop import bp as loop_bp
 from .mrp import bp as mrp_bp
 from .rpa import bp as rpa_bp
+from .tenant import bp as tenant_bp
 
 
 def register_blueprints(app):
@@ -32,6 +33,7 @@ def register_blueprints(app):
     app.register_blueprint(audit_bp)
     app.register_blueprint(finance_bp)  # P2-17: 财务对账模块
     app.register_blueprint(mrp_bp)  # P0-fix: MRP/BOM 模块
+    app.register_blueprint(tenant_bp)  # 多租户：平台管理员租户/用户管理
 
     # ---- /api/dashboard：保留实现，但加权限校验 ----
     @app.route("/api/dashboard")

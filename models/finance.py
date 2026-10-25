@@ -18,9 +18,10 @@ from decimal import Decimal
 from sqlalchemy import Index
 
 from extensions import db
+from models.tenant import TenantScoped
 
 
-class ReconciliationBatch(db.Model):
+class ReconciliationBatch(TenantScoped, db.Model):
     """对账批次（按期间归集一次对账流程）
 
     status 流转：draft -> pending -> matched/discrepancy -> closed
@@ -32,8 +33,9 @@ class ReconciliationBatch(db.Model):
     """
 
     __tablename__ = "finance_reconciliation_batch"
+    __table_args__ = (db.Index("ux_recon_tenant_batch_no", "tenant_id", "batch_no", unique=True),)
     id = db.Column(db.Integer, primary_key=True)
-    batch_no = db.Column(db.String(40), unique=True, nullable=False, index=True)  # 对账批次号
+    batch_no = db.Column(db.String(40), nullable=False, index=True)  # 对账批次号
     period = db.Column(db.String(7), nullable=False, index=True)  # 对账期间 YYYY-MM
     status = db.Column(
         db.String(16), nullable=False, default="draft", index=True
@@ -47,7 +49,7 @@ class ReconciliationBatch(db.Model):
     notes = db.Column(db.Text)  # 备注
 
 
-class ReconciliationEntry(db.Model):
+class ReconciliationEntry(TenantScoped, db.Model):
     """对账明细（系统侧 + 外部侧统一建模）
 
     source 取值：

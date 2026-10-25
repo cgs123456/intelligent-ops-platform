@@ -8,7 +8,7 @@
 
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from extensions import db
 from models.system import AuditLog
@@ -52,6 +52,12 @@ def list_logs():
     per_page = max(1, min(per_page, 200))  # 上限 200
 
     q = db.session.query(AuditLog)
+
+    # 多租户：AuditLog 为全局 hash chain 单链，不挂 ORM 自动过滤；
+    # 租户用户只看本租户审计，平台管理员（tenant_id None）看全部
+    tid = getattr(g, "tenant_id", None)
+    if tid is not None:
+        q = q.filter(AuditLog.tenant_id == tid)
 
     actor = request.args.get("actor", "").strip()
     if actor:
@@ -108,13 +114,12 @@ def stats():
     from sqlalchemy import func
 
     since = datetime.now() - timedelta(days=30)
-    rows = (
-        db.session.query(AuditLog.action, func.count(AuditLog.id))
-        .filter(AuditLog.created_at >= since)
-        .group_by(AuditLog.action)
-        .order_by(func.count(AuditLog.id).desc())
-        .all()
-    )
+    q = db.session.query(AuditLog.action, func.count(AuditLog.id)).filter(AuditLog.created_at >= since)
+    # 多租户：与 /logs 一致，租户用户仅统计本租户（链校验 /verify-chain 仍是平台级全局）
+    tid = getattr(g, "tenant_id", None)
+    if tid is not None:
+        q = q.filter(AuditLog.tenant_id == tid)
+    rows = q.group_by(AuditLog.action).order_by(func.count(AuditLog.id).desc()).all()
     return jsonify(
         {
             "since": since.strftime("%Y-%m-%d %H:%M:%S"),

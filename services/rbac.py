@@ -91,6 +91,7 @@ def require_permission(permission):
                 if not payload:
                     return jsonify({"error": "Token无效或已过期"}), 401
                 g.current_user = payload
+                g.tenant_id = payload.get("tid", 1)  # 多租户：回填当前租户
 
             # 第二步：RBAC 权限校验（仅 RBAC_ENABLED=True 时执行）
             if not current_app.config.get("RBAC_ENABLED"):
@@ -152,6 +153,8 @@ def verify_sse_auth(permission):
         if not payload:
             return jsonify({"error": "Token无效或已过期"}), 401
         g.current_user = payload
+        # 多租户：与 require_permission 一致，从 JWT 载荷回填租户上下文
+        g.tenant_id = payload.get("tid", 1)
 
     # 第二步：RBAC 权限校验（仅 RBAC_ENABLED=True 时执行）
     if not current_app.config.get("RBAC_ENABLED"):

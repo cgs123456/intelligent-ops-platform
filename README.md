@@ -27,6 +27,7 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 
 主要特性:
 - JWT 认证 + RBAC 三级权限(admin/operator/viewer)+ Token 旋转 + 黑名单
+- 多租户隔离(共库共表 + tenant_id 自动过滤,详见 [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md))
 - SSE 流式输出(AIGC 问答 + 闭环实时进度)
 - Celery 异步任务(可选,未安装时优雅降级)
 - Idempotency-Key 幂等写接口
@@ -378,6 +379,15 @@ flask db upgrade
 | GET | /api/v1/auth/me | - | 当前用户信息(仅 JWT 认证) |
 | POST | /api/v1/auth/change-password | - | 修改密码(走 password_policy 校验) |
 | POST | /api/v1/auth/mfa/setup | auth:mfa:setup | 启用 TOTP MFA |
+
+### 租户管理(tenant,仅平台管理员)
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | /api/v1/tenants | tenant:manage | 租户列表(含用户数) |
+| POST | /api/v1/tenants | tenant:manage | 创建租户(code 唯一) |
+| GET | /api/v1/tenants/{id}/users | tenant:manage | 租户用户列表 |
+| POST | /api/v1/tenants/{id}/users | tenant:manage | 为租户开户(密码强度校验) |
 | POST | /api/v1/auth/mfa/disable | auth:mfa:disable | 禁用 MFA |
 
 ### ERP(erp)

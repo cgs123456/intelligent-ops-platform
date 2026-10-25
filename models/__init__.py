@@ -1,5 +1,6 @@
 """models 包初始化 · 按层组织数据模型"""
 
+# 多租户基础设施必须最先导入（其余模型 import TenantScoped）
 from .aigc import ChatHistory, DailyReport, Suggestion, SuggestionFeedback
 from .bom import BOM, BOMItem, MRPPlan, MRPRequirement
 from .erp import (
@@ -24,6 +25,7 @@ from .erp import (
 from .external import ExtEcommerceOrder, ExtSupplierQuote
 from .finance import ReconciliationBatch, ReconciliationEntry
 from .system import AuditLog, LoopState, Role, TokenBlacklist, User, user_roles
+from .tenant import DEFAULT_TENANT_ID, Tenant, TenantScoped
 from .warehouse import (
     AdsDailyOpsReport,
     AdsReplenishmentSuggest,
