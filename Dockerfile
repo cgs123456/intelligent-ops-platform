@@ -4,7 +4,9 @@
 # ==================== Stage 1: 前端构建（React/Vite）====================
 FROM node:20-alpine AS frontend-build
 
-WORKDIR /build
+# WORKDIR 与本地同构（frontend/ 与 static/、templates/ 同级），
+# vite outDir ../static/dist 与 post-build.mjs 的 ../../ 推导自然成立
+WORKDIR /repo/frontend
 
 # 先装依赖（利用层缓存：lockfile 不变则跳过安装）
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
@@ -37,8 +39,8 @@ RUN python -m pip install --upgrade pip && \
 COPY . .
 
 # 用 Stage 1 的 Vite 构建产物覆盖（保证镜像内前端与源码一致）
-COPY --from=frontend-build /build/static/dist/ /app/static/dist/
-COPY --from=frontend-build /build/templates/index.html /app/templates/index.html
+COPY --from=frontend-build /repo/static/dist/ /app/static/dist/
+COPY --from=frontend-build /repo/templates/index.html /app/templates/index.html
 
 # 创建非 root 用户并切换
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
