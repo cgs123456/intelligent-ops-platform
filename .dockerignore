@@ -32,3 +32,6 @@ env/
 htmlcov/
 # 排除 instance 目录（含日志）
 instance/
+
+# Trivy 豁免清单只在 CI 扫描时使用（trivy-action 读 checkout 目录），无需进镜像
+.trivyignore

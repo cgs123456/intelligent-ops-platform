@@ -1,0 +1,22 @@
+# Trivy 漏洞豁免清单（每条必须写明理由与移除条件）
+#
+# 背景：pip 26.2.2 的 wheel 内自带 vendored 依赖 SBOM
+# （site-packages/pip/_vendor/bom.cdx.json），Trivy 会解析该第三方 SBOM 并把
+# 其中记录的组件并入 "Python" 聚合 target。这些组件是 pip 命令行自用的
+# vendored 副本，不属于本应用运行时依赖树——应用自身的对应包均已安装修复版
+# （setuptools 84.2.1 / urllib3 2.8.0，见 requirements.txt 与 Dockerfile）。
+#
+# 移除条件：pip 发布内置 urllib3>=2.8.0 / msgpack>=1.2.1 的新版本后，
+# 升级 Dockerfile 中 `pip install --upgrade pip` 的产物并删除对应豁免行。
+
+# pip 26.2.2 vendored urllib3（SBOM 记录 2.7.0）；应用运行时 urllib3 已是 2.8.0
+CVE-2026-97687
+CVE-2026-97689
+
+# pip 26.2.2 vendored SBOM 记录的构建期 setuptools 70.3.0；
+# 镜像内实际安装的 setuptools 是 84.2.1（无此 CVE），70.3.0 仅存在于 SBOM 文本
+CVE-2025-47273
+
+# pip 26.2.2 vendored msgpack（cachecontrol 依赖，pip 下载器自用）；
+# 不在应用依赖树中
+GHSA-6v7p-g79w-8964
