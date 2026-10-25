@@ -1118,10 +1118,13 @@ class ERPService:
         if not orders:
             return []
 
-        # 批量预取供应商，建 id -> supplier map（修复 N+1 查询）
+        # 批量预取供应商与产品，建 id -> 对象 map（修复 N+1 查询）
         supplier_ids = {o.supplier_id for o in orders}
         suppliers = self.db.query(Supplier).filter(Supplier.id.in_(supplier_ids)).all()
         supplier_map = {s.id: s for s in suppliers}
+        product_ids = {o.product_id for o in orders}
+        products = self.db.query(Product).filter(Product.id.in_(product_ids)).all()
+        product_map = {p.id: p for p in products}
 
         result = []
         for o in orders:
@@ -1135,6 +1138,7 @@ class ERPService:
                     "supplier_contact": sup.contact if sup else None,
                     "supplier_phone": sup.phone if sup else None,
                     "product_id": o.product_id,
+                    "product": product_map[o.product_id].name if o.product_id in product_map else None,
                     "qty": o.qty,
                     "unit_price": float(o.unit_price),
                     "amount": float(o.qty * o.unit_price),

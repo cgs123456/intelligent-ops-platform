@@ -229,12 +229,12 @@ setInterval(() => {
 }, 30 * 1000);
 
 async function loadReport() {
-  const r = await API('/api/aigc/report');
+  const r = await API('/api/v1/aigc/report');
   document.getElementById('dailyReport').textContent = r.text;
 }
 async function genReport() {
   try {
-    const r = await API('/api/aigc/generate-report', {method:'POST'});
+    const r = await API('/api/v1/aigc/generate-report', {method:'POST'});
     document.getElementById('dailyReport').textContent = r.text || '生成失败';
     loadDashboard();
     showToast('日报已生成', 'success');
@@ -244,8 +244,8 @@ async function loadOrders() {
   const orders = await API('/api/v1/erp/orders');
   const html = orders.map(o => `
     <div class="order-item">
-      <span><span class="tag ${o.type==='采购'?'tag-confirmed':'tag-ok'}">${o.type}</span> ${esc(o.product)} ×${o.qty}</span>
-      <span style="color:var(--text2)">${esc(o.party)} · ${fmt(o.amount)} · ${o.time}</span>
+      <span><span class="tag tag-confirmed">采购</span> ${esc(o.product)} ×${o.qty}</span>
+      <span style="color:var(--text2)">${esc(o.supplier_name)} · ${fmt(o.amount)} · ${o.created_at || ''}</span>
     </div>`).join('');
   document.getElementById('recentOrders').innerHTML = html || '<div class="hint">暂无单据</div>';
 }
@@ -346,7 +346,7 @@ const invTable = new TableState('invTable', [
     {key:'name', label:'品名'},
     {key:'stock_qty', label:'库存', sortable:true},
     {key:'safety_stock', label:'安全线', sortable:true},
-    {key:'is_low', label:'状态', render:r => `<span class="tag ${r.is_low?'tag-low':'tag-ok'}">${r.is_low?'低于安全线':'正常'}</span>`},
+    {key:'is_below_safety', label:'状态', render:r => `<span class="tag ${r.is_below_safety?'tag-low':'tag-ok'}">${r.is_below_safety?'低于安全线':'正常'}</span>`},
 ], {perPage:8});
 _tableStates['invTable'] = invTable;
 
@@ -471,7 +471,7 @@ async function loadLineage() {
   const lin = await API('/api/v1/fde/lineage');
   const el = document.getElementById('lineageBox');
   if (!el) return;
-  const html = lin.map(l => `<div class="lineage-item">${esc(l.upstream_table)} → ${esc(l.downstream_table)} <span class="hint">(${esc(l.layer||'')})</span></div>`).join('');
+  const html = lin.map(l => `<div class="lineage-item">${esc(l.upstream)} → ${esc(l.downstream)} <span class="hint">(${esc(l.layer||'')})</span></div>`).join('');
   el.innerHTML = html || '<div class="hint">暂无血缘</div>';
 }
 async function loadDQ() {
@@ -479,7 +479,7 @@ async function loadDQ() {
   const el = document.getElementById('dqBox');
   if (!el) return;
   const html = Object.entries(dq).map(([table, tests]) => {
-    const items = Object.entries(tests).map(([t, s]) => `<span class="tag ${s==='pass'?'tag-ok':'tag-low'}">${t}:${s}</span>`).join(' ');
+    const items = Object.entries(tests).map(([t, s]) => `<span class="tag ${s.status==='pass'?'tag-ok':'tag-low'}" title="${esc(String(s.reason||s.column||''))}">${t}:${s.status}</span>`).join(' ');
     return `<div class="dq-item"><strong>${esc(table)}</strong> ${items}</div>`;
   }).join('');
   el.innerHTML = html || '<div class="hint">运行数据质量测试查看结果</div>';

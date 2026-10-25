@@ -51,7 +51,7 @@ def register_blueprints(app):
         return jsonify(
             {
                 "total_skus": len(inv),
-                "low_stock_count": sum(1 for i in inv if i.get("is_low")),
+                "low_stock_count": sum(1 for i in inv if i.get("is_below_safety")),
                 "inventory_value": sum(i.get("stock_value", 0) for i in inv),
                 "total_payable": acct.get("payable", 0),
                 "total_receivable": acct.get("net_receivable", acct.get("receivable", 0)),
