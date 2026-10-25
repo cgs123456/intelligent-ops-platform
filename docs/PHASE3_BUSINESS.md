@@ -1,6 +1,6 @@
 # P3 业务功能增强（第一批）
 
-> 对应 OPTIMIZATION_REPORT.md Phase 3 中的业务演进项，参照 stockpyl / Odoo orderpoint /
+> Phase 3 业务演进项落地记录，参照 stockpyl / Odoo orderpoint /
 > ERPNext / 主流补货 Agent 项目的共识功能模式，结合本项目数据基础筛选后落地。
 > 本批四项：F1 安全库存重算、F2 SKU ABC/XYZ 分级、F3 高金额审批、F4 会计期间锁定。
 

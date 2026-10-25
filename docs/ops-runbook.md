@@ -688,9 +688,6 @@ pip-audit -r requirements.txt
 # CI 已集成，本地手动执行
 docker compose -f docker-compose.prod.yml exec web \
   bandit -r . -x tests,.venv
-
-# 或通过 Makefile
-make security
 ```
 
 **Docker 镜像扫描**（可选）：

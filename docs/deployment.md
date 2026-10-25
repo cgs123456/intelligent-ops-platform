@@ -432,13 +432,6 @@ ls migrations/versions/
 flask db upgrade
 ```
 
-或通过 Makefile：
-
-```bash
-make migrate              # 应用迁移
-make migrate-new m="描述"  # 创建新迁移
-```
-
 ### 7.3 回滚迁移
 
 ```bash
