@@ -16,6 +16,9 @@ marshmallow>=3.0,<4.0
 flask-smorest>=0.44,<0.50  # P0-3: API 文档 + Schema 校验
 sqlglot>=23.0,<26.0  # P2-4: 缩窄到实际测试过的版本范围
 requests>=2.28,<3.0
+# 传递依赖显式 pin（Trivy 镜像扫描）：requests 传递安装的 urllib3 需 >=2.8.0
+# （CVE-2026-97687 HTTPS 代理 TLS 流量拦截 / CVE-2026-97689 无界内存 DoS）
+urllib3==2.8.0
 # P0-2: 可观测性 - JSON 日志 + OpenTelemetry
 # P0-8: OTel 全系只发布 prerelease 版本（b0/b1 后缀），pip 默认拒绝区间匹配的 prerelease，
 # 导致干净环境 `pip install -r requirements.txt` 直接失败 —— 必须精确 pin 到具体版本

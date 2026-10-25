@@ -34,7 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 先装依赖（利用 layer 缓存）
 COPY requirements.txt .
 # P0-fix: 升级 pip 避免旧版 resolver 误报冲突 + 打印 requirements 便于排错 + 关闭进度条
-RUN python -m pip install --upgrade pip setuptools wheel && \
+# setuptools>=78.1.1: CVE-2025-47273（PackageIndex 路径穿越），基础镜像自带 70.3.0 需显式升级
+RUN python -m pip install --upgrade pip && \
+    pip install --upgrade "setuptools>=78.1.1" wheel && \
     echo "===== requirements.txt =====" && cat requirements.txt && \
     pip install --no-cache-dir --progress-bar off -r requirements.txt
 
