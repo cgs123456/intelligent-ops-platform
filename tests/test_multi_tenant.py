@@ -50,6 +50,7 @@ def cleanup(app):
             "erp_product",
             "erp_supplier",
             "dws_sales_sku_daily",
+            "dws_inventory_snapshot_daily",
         ):
             _db.session.execute(_db.text(f"DELETE FROM {table}"))
         _db.session.commit()
@@ -170,6 +171,46 @@ class TestDataAgentRewrite:
             assert cnt > 0
             product_ids = {int(r["product_id"]) for r in rows}
             assert product_ids == {202}  # 只见本租户
+
+
+class TestDwsUpsertTenantFallback:
+    """DWS Core upsert 绕过 ORM 租户填充：平台管理员（tid=None）必须落默认租户而非 NOT NULL 崩溃。"""
+
+    def test_platform_admin_etl_dws_writes_default_tenant(self, app):
+        from flask import g
+
+        from models.warehouse import DwsInventoryDaily
+        from services.warehouse_service import WarehouseService
+
+        with app.app_context():
+            g.tenant_id = None  # 平台管理员
+            _db.session.add(Product(sku="ETL-PAD", name="平台管理员ETL", stock_qty=5))
+            _db.session.commit()
+            pid = Product.query.filter_by(sku="ETL-PAD").first().id
+
+            WarehouseService(_db.session)._etl_dws()
+
+            row = _db.session.query(DwsInventoryDaily).filter_by(product_id=pid).first()
+            assert row is not None
+            assert row.tenant_id == DEFAULT_TENANT_ID
+
+    def test_tenant2_context_etl_dws_writes_tenant2(self, app):
+        from flask import g
+
+        from models.warehouse import DwsInventoryDaily
+        from services.warehouse_service import WarehouseService
+
+        with app.app_context():
+            g.tenant_id = 2
+            _db.session.add(Product(sku="ETL-T2", name="租户2ETL", stock_qty=3))
+            _db.session.commit()
+            pid = Product.query.filter_by(sku="ETL-T2").first().id
+
+            WarehouseService(_db.session)._etl_dws()
+
+            row = _db.session.query(DwsInventoryDaily).filter_by(product_id=pid).first()
+            assert row is not None
+            assert row.tenant_id == 2
 
 
 class TestTenantApi:

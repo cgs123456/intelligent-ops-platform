@@ -206,6 +206,24 @@ class AIGCService:
                 logger.debug("获取反馈统计失败，few-shot 省略: %s", e)
 
         created = []
+        # 批量取候选供应商的最新报价，落 unit_price 供审核卡展示金额（无报价则留空回退 avg_cost 口径）
+        quote_price: dict[tuple[int, int], float] = {}
+        try:
+            from models.external import ExtSupplierQuote
+
+            product_ids = {r.product_id for r in rows}
+            quotes = (
+                self.session.query(ExtSupplierQuote)
+                .filter(ExtSupplierQuote.product_id.in_(product_ids))
+                .order_by(ExtSupplierQuote.quote_date.desc(), ExtSupplierQuote.id.desc())
+                .all()
+            )
+            for q in quotes:
+                key = (q.supplier_id, q.product_id)
+                if key not in quote_price and q.quote_price:
+                    quote_price[key] = float(q.quote_price)
+        except Exception as e:
+            logger.debug("报价预取失败，建议 unit_price 留空: %s", e)
         try:
             for r in rows:
                 # P0-6: 超时取消后立刻中止，未 commit 的建议全部回滚
@@ -246,6 +264,7 @@ class AIGCService:
                     suggested_supplier_name=r.suggested_supplier_name,
                     suggested_qty=r.suggested_qty,
                     original_qty=r.suggested_qty,
+                    unit_price=quote_price.get((r.suggested_supplier_id, r.product_id)),
                     reason=reason,
                     confidence=confidence,
                     status="pending",

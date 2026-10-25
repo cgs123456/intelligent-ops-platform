@@ -6,6 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
 
+<p align="center"><img src="docs/images/dashboard.png" width="880" alt="运营概览仪表盘：KPI 卡片、近 7 日销量 Top 8、近期采购单与 AIGC 运营日报"></p>
+
 ```
 ┌────────────────────────────────────────────┐
 │        前端 React SPA(frontend/ 源码)      │
@@ -30,6 +32,7 @@
 
 - [快速开始](#快速开始)
 - [功能特性](#功能特性)
+- [界面预览](#界面预览)
 - [技术栈](#技术栈)
 - [配置](#配置)
 - [API](#api)
@@ -77,6 +80,22 @@ cd frontend && pnpm install && pnpm run build:flask
 - **闭环编排**:五步状态机(节点函数单步执行 + 条件路由),文件锁防并发、超时装饰器、断点续跑、回滚补偿、SSE 实时进度
 - **平台能力**:JWT + RBAC 三级角色(admin/operator/viewer)+ TOTP MFA;多租户隔离(共库共表 + tenant_id 自动过滤);Idempotency-Key 幂等写;审计日志 hash chain 防篡改;request_id 全链路追踪;钉钉/企微/邮件多渠道告警;Prometheus 指标;限流 + 安全头
 - **MRP / 财务对账**:BOM 多层展开净需求计算;对账批次(精确/税容差/多对一组合匹配 + 人工调节项)
+
+## 界面预览
+
+前端为 React SPA(shadcn/ui + Tailwind,亮/暗双主题,⌘1-6 快速切换),以下为真实运行截图:
+
+| 智能闭环(五步状态机,停在人工审核) | AIGC 补货建议审核(置信度 + 改量/拒绝) |
+| :---: | :---: |
+| <img src="docs/images/loop.png" width="420" alt="智能闭环五步时间线"> | <img src="docs/images/aigc.png" width="420" alt="AIGC 补货建议审核卡片"> |
+
+| 库存财务(库存徽章 + 三卡财务概览) | RPA 采购(报价表 + 多 Agent 博弈) |
+| :---: | :---: |
+| <img src="docs/images/erp.png" width="420" alt="库存与财务页"> | <img src="docs/images/rpa.png" width="420" alt="RPA 采购报价页"> |
+
+| 数仓 FDE(四层统计 + ETL + ADS) | 登录页 |
+| :---: | :---: |
+| <img src="docs/images/fde.png" width="420" alt="FDE 数仓页"> | <img src="docs/images/login.png" width="420" alt="登录页"> |
 
 ## 技术栈
 

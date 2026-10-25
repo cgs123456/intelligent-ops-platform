@@ -49,3 +49,4 @@ static/dist/
 # 前端（React/Vite）：依赖不入库；static/dist 与 templates/index.html 为构建产物但入库以保证部署链
 frontend/node_modules/
 frontend/.vite/
+ops_platform.db.bak

@@ -553,8 +553,10 @@ class WarehouseService:
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
         from extensions import current_tenant_id
+        from models.tenant import DEFAULT_TENANT_ID
 
-        tid = current_tenant_id()
+        # 平台管理员（tid=None）操作业务表时按 ORM before_flush 约定落默认租户
+        tid = current_tenant_id() or DEFAULT_TENANT_ID
         for r in rows:
             r.setdefault("tenant_id", tid)
         ins_fn = pg_insert if self.session.get_bind().dialect.name == "postgresql" else sqlite_insert
@@ -579,10 +581,11 @@ class WarehouseService:
             date_filter = set(target_dates) if target_dates is not None else None
 
             # ---- SKU 日销售汇总（原生 SQL 聚合）----
-            # 原生 SQL 绕过 ORM 租户过滤，必须显式带当前租户
+            # 原生 SQL 绕过 ORM 租户过滤，必须显式带当前租户（平台管理员落默认租户）
             from extensions import current_tenant_id
+            from models.tenant import DEFAULT_TENANT_ID
 
-            _tid = current_tenant_id()
+            _tid = current_tenant_id() or DEFAULT_TENANT_ID
             sales_sql = text("""
                 SELECT product_id, product_name, dt,
                        SUM(qty) AS sale_qty, SUM(amount) AS sale_amount
