@@ -92,7 +92,7 @@ RPA / ERP / FDE / AIGC 四层闭环协同的可运行原型系统。通过 AIGC 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                      前端(浏览器)                          │
-│  templates/index.html + static/js/app.js + static/css     │
+│  React SPA（frontend/ 源码 → static/dist 构建产物）        │
 └──────────────────────────┬───────────────────────────────┘
                            │ HTTP / SSE
 ┌──────────────────────────▼───────────────────────────────┐
@@ -221,16 +221,19 @@ intelligent-ops-platform/
 │       ├── c0d1e2f3a4b5_recon_tolerance_match.py
 │       ├── c3d4e5f6a7b8_add_audit_hash_chain.py
 │       ├── d4e5f6a7b8c9_add_mfa_and_password_history.py
-│       ├── e5f6a7b8c9d0_add_business_modules.py
-│       ├── f6a7b8c9d0e1_add_table_partitioning.py
-│       └── g7h8i9j0k1l2_add_erp_missing_tables.py
+│       ├── b00000000002_business_enhancements.py
+│       ├── b00000000003_stock_location.py
+│       └── b00000000004_chat_history_rag.py
 │
-├── static/                      # 前端静态资源
-│   ├── css/style.css
-│   └── js/app.js
+├── frontend/                    # 前端源码（React 18 + Vite + Tailwind v4 + shadcn/ui）
+│   ├── src/                     #   pages×8 / components（shadcn ui×19 + DataTable）/ lib / stores
+│   └── scripts/post-build.mjs   #   构建后把 dist/index.html 拷贝为 Flask 模板
+│
+├── static/
+│   └── dist/                    # Vite 构建产物（文件名自带内容 hash，入库保证部署链）
 │
 ├── templates/
-│   └── index.html               # 单页应用主模板
+│   └── index.html               # 由 post-build 从构建产物生成（勿手改）
 │
 ├── nginx/                       # Nginx 配置
 │   ├── conf.d/app.conf          # TLS + 静态资源 + 限流 + 安全头

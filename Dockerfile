@@ -1,25 +1,18 @@
 # 语法说明：使用多阶段构建（BuildKit frontend-stage + python runtime）
-# P0-11: 添加前端构建阶段，使用 terser/clean-css 压缩 JS/CSS
+# 前端：React + Vite + Tailwind（frontend/），构建产物输出 static/dist + templates/index.html
 
-# ==================== Stage 1: 前端构建（JS/CSS 压缩）====================
+# ==================== Stage 1: 前端构建（React/Vite）====================
 FROM node:20-alpine AS frontend-build
 
 WORKDIR /build
 
-# 复制静态资源源文件
-COPY static/ ./static/
+# 先装依赖（利用层缓存：lockfile 不变则跳过安装）
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
 
-# 安装压缩工具并执行压缩
-RUN npm install -g terser clean-css-cli && \
-    # 压缩 JS：移除注释、空白；保留语义（不破坏可选链等 ES2020 语法）
-    terser static/js/app.js \
-        --compress --mangle \
-        --output static/js/app.min.js && \
-    # 压缩 CSS
-    cleancss -o static/css/style.min.css static/css/style.css && \
-    # 用压缩版替换原文件（Flask url_for 仍引用原文件名）
-    mv static/js/app.min.js static/js/app.js && \
-    mv static/css/style.min.css static/css/style.css
+# 源码 + 构建（Vite 产物自带内容 hash 文件名）
+COPY frontend/ ./
+RUN pnpm run build:flask
 
 # ==================== Stage 2: Python 运行时 ====================
 FROM python:3.12-slim AS base
@@ -43,9 +36,9 @@ RUN python -m pip install --upgrade pip && \
 # 复制业务代码
 COPY . .
 
-# 用 Stage 1 的压缩版静态文件覆盖原始文件
-COPY --from=frontend-build /build/static/js/app.js /app/static/js/app.js
-COPY --from=frontend-build /build/static/css/style.css /app/static/css/style.css
+# 用 Stage 1 的 Vite 构建产物覆盖（保证镜像内前端与源码一致）
+COPY --from=frontend-build /build/static/dist/ /app/static/dist/
+COPY --from=frontend-build /build/templates/index.html /app/templates/index.html
 
 # 创建非 root 用户并切换
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \

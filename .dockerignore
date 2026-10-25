@@ -35,3 +35,9 @@ instance/
 
 # Trivy 豁免清单只在 CI 扫描时使用（trivy-action 读 checkout 目录），无需进镜像
 .trivyignore
+
+# 前端：node_modules 绝不进镜像；dist 与模板由 frontend-build 阶段统一产出
+frontend/node_modules/
+frontend/.vite/
+static/dist/
+templates/index.html
