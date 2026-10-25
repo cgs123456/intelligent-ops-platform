@@ -80,6 +80,7 @@ class DataAgent:
         sid = session_id or __import__("uuid").uuid4().hex
 
         # 1. LLM 生成 SQL
+        llm_sql_succeeded = False  # P3-RAG: 是否走通 LLM 生成→校验→真执行链路
         sql = self._generate_sql(question)
 
         # 2. AST 安全校验
@@ -98,6 +99,7 @@ class DataAgent:
                 explanation = rule_res["explanation"]
             else:
                 explanation = f"LLM 生成 SQL 并真执行（AST 校验通过，{rows_count} 行）"
+                llm_sql_succeeded = True
         else:
             # LLM 未生成 / 校验失败：回退规则
             logger.info("[DataAgent] SQL 生成或校验失败，回退规则查询")
@@ -116,7 +118,13 @@ class DataAgent:
             from models.aigc import ChatHistory
 
             self.session.add(ChatHistory(session_id=sid, role="user", content=question))
-            self.session.add(ChatHistory(session_id=sid, role="assistant", content=answer))
+            # P3-RAG: 仅 LLM 生成并真执行成功的 SQL 才沉淀（规则回退的模板 SQL 无学习价值）
+            rag_fields = {}
+            if llm_sql_succeeded and validated_sql:
+                rag_fields = {"question": question, "sql": validated_sql}
+            self.session.add(
+                ChatHistory(session_id=sid, role="assistant", content=answer, **rag_fields)
+            )
             self.session.commit()
             recorded = True
         except Exception as e:
@@ -133,6 +141,46 @@ class DataAgent:
             "_recorded": recorded,
         }
 
+    def _retrieve_similar_qa(self, question, limit=3):
+        """P3-RAG: 从沉淀的问答对中检索相似问题（2-gram Jaccard，无向量库依赖）。
+
+        只取 LLM 真执行成功沉淀的记录（question/sql 非空的 assistant 行），
+        最近 200 条内评分取 top-N。空语料返回 []（冷启动安全）。
+        """
+        from models.aigc import ChatHistory
+
+        rows = (
+            self.session.query(ChatHistory.question, ChatHistory.sql)
+            .filter(
+                ChatHistory.role == "assistant",
+                ChatHistory.question.isnot(None),
+                ChatHistory.sql.isnot(None),
+            )
+            .order_by(ChatHistory.created_at.desc())
+            .limit(200)
+            .all()
+        )
+        if not rows:
+            return []
+
+        def grams(t):
+            t = t or ""
+            return {t[i : i + 2] for i in range(max(len(t) - 1, 0))}
+
+        qg = grams(question)
+        if not qg:
+            return []
+        scored = []
+        for q, sql in rows:
+            g = grams(q)
+            if not g:
+                continue
+            score = len(qg & g) / len(qg | g)
+            if score > 0:
+                scored.append((score, q, sql))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [{"question": q, "sql": sql} for _, q, sql in scored[:limit]]
+
     # ---------------- 1. LLM NL→SQL 生成 ----------------
 
     def _generate_sql(self, question):
@@ -145,6 +193,20 @@ class DataAgent:
         # 获取今天日期作为上下文（LLM 需要知道"今天"/"昨天"对应的日期）
         today = date.today().isoformat()
         yesterday = date.fromordinal(date.today().toordinal() - 1).isoformat()
+
+        # P3-RAG: 检索历史成功问答对作为 few-shot（冷启动/无相似时为空）
+        few_shot_block = ""
+        try:
+            examples = self._retrieve_similar_qa(question, limit=3)
+        except Exception as e:
+            logger.warning("[DataAgent] few-shot 检索失败（跳过注入）: %s", e)
+            examples = []
+        if examples:
+            lines = ["", "", "以下是历史上验证成功的相似问答（供参考，语义适配当前问题）："]
+            for ex in examples:
+                lines.append(f"问：{ex['question']}")
+                lines.append(f"SQL：{ex['sql']}")
+            few_shot_block = "\n".join(lines)
 
         prompt = [
             {
@@ -160,6 +222,7 @@ class DataAgent:
                     "5. 日期字段用 YYYY-MM-DD 格式；\n"
                     f"6. 今天是 {today}，昨天是 {yesterday}；\n"
                     "7. 只返回一条 SQL，不要解释、不要 markdown 代码块。"
+                    f"{few_shot_block}"
                 ),
             },
             {"role": "user", "content": question},

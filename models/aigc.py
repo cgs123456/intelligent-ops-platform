@@ -51,6 +51,10 @@ class ChatHistory(db.Model):
     session_id = db.Column(db.String(64), nullable=False, index=True)  # 会话ID
     role = db.Column(db.String(16), nullable=False)  # user/assistant
     content = db.Column(db.Text, nullable=False)
+    # P3-RAG: 问答对沉淀——assistant 行冗余记录问题与已验证 SQL（仅 LLM 真执行
+    # 成功的才沉淀），供后续 few-shot 检索（Vanna 式自学习，冷启动时检索为空不注入）
+    question = db.Column(db.Text, nullable=True)
+    sql = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now, index=True)
 
 

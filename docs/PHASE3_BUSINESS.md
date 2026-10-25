@@ -171,3 +171,28 @@ AccountMove 是单行凭证模型（无借贷列）：payable/receivable 正记�
 ## 配置项汇总（第二批）
 
 无新增环境配置——库位/调节项均为业务参数（API 请求体），不引入全局开关。
+
+---
+
+# 第三批（P3-RAG）：Text2SQL 问答对沉淀 + few-shot 检索
+
+调研结论（DB-GPT/WrenAI/Vanna 对比）落地：BIRD 榜最佳 Text2SQL 准确率仅
+67.86%，幻觉是主要风险；Vanna 模式的核心是"从历史成功问答学习"。本批把
+该闭环接到 DataAgent，冷启动安全（语料为空时不注入，行为与现状一致）。
+
+- **沉淀**：query() 链路中 LLM 生成→AST 校验→真执行全部成功的问题/SQL 对
+  存入 ChatHistory（assistant 行新增 question/sql 列；规则回退的模板 SQL
+  不沉淀——无学习价值）。
+- **检索**：_retrieve_similar_qa 按 2-gram Jaccard 在最近 200 条沉淀里取
+  top-3 相似问答（无向量库依赖，SQLite/PG 通用；后续语料大可换 pgvector）。
+- **注入**：_generate_sql 的 system prompt 追加 few-shot 参考块（检索为空
+  则不追加）。
+
+## 迁移
+
+`b00000000004_chat_history_rag.py`（幂等加列），空库 b1→b2→b3→b4 实测通过。
+
+## 测试
+
+`tests/test_data_agent_rag.py` 4 用例：冷启动空检索、2-gram 排序正确性、
+无重叠排除、端到端闭环（规则回退不沉淀 / LLM 成功沉淀 / 沉淀后可检索）。
