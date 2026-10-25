@@ -112,7 +112,8 @@ def _ensure_default_tenant():
     bind.execute(
         text(
             "INSERT INTO sys_tenant (id, code, name, is_active, created_at) "
-            "VALUES (1, 'default', '默认租户', 1, CURRENT_TIMESTAMP)"
+            # TRUE 字面量：PG boolean 列拒绝整数 1（psycopg 无隐式转换），SQLite 3.23+ 同样支持
+            "VALUES (1, 'default', '默认租户', TRUE, CURRENT_TIMESTAMP)"
         )
     )
 
