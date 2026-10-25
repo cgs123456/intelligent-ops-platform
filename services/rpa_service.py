@@ -23,7 +23,7 @@ from config import Config
 from extensions import db
 from models.erp import Product, Supplier
 from models.external import ExtEcommerceOrder, ExtSupplierQuote
-from models.system import AuditLog
+from services.audit_helper import record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +73,8 @@ class RPAService:
         return True
 
     def _audit(self, action, target_type=None, target_id=None, detail=None):
-        """记录审计日志（失败不阻断主流程）。"""
-        try:
-            self.session.add(
-                AuditLog(
-                    actor="rpa-service",
-                    action=action,
-                    target_type=target_type,
-                    target_id=str(target_id) if target_id is not None else None,
-                    detail=detail,
-                )
-            )
-            self.session.commit()
-        except Exception as e:
-            logger.error("[RPA-audit] 审计日志写入失败: %s", e)
-            self.session.rollback()
+        """记录审计日志（业务已提交后的补充审计，失败不阻断主流程）。"""
+        record_audit(self.session, "rpa-service", action, target_type, target_id, detail, commit=True)
 
     # ====================================================================
     # 多 Agent 报价模拟（改进7）

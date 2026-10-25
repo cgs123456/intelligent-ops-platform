@@ -183,7 +183,8 @@ class AuthService:
         # 3. DB 兜底（跨 worker 共享真实来源）
         try:
             return bool(TokenBlacklist.query.filter_by(jti=jti).first())
-        except Exception:
+        except Exception as e:
+            logger.debug("Token 黑名单 DB 兜底查询失败（按未吊销处理）: %s", e)
             return False
 
     @staticmethod
@@ -357,8 +358,8 @@ class AuthService:
 
             if current_app.config.get("CACHE_TYPE") == "redis":
                 return cache.get(key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis 读缓存降级: key=%s err=%s", key, e)
         return None
 
     @staticmethod
@@ -369,8 +370,8 @@ class AuthService:
 
             if current_app.config.get("CACHE_TYPE") == "redis":
                 cache.set(key, value, timeout=ttl or int(AuthService._CACHE_TTL))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis 写缓存降级: key=%s err=%s", key, e)
 
     @staticmethod
     def _redis_delete(key):
@@ -380,8 +381,8 @@ class AuthService:
 
             if current_app.config.get("CACHE_TYPE") == "redis":
                 cache.delete(key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis 删缓存降级: key=%s err=%s", key, e)
 
     @staticmethod
     def verify_token(token):
@@ -580,8 +581,8 @@ class AuthService:
             if current_app.config.get("CACHE_TYPE") == "redis":
                 count = cache.get(key)
                 return int(count) if count else 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis 失败计数读取降级: key=%s err=%s", key, e)
 
         # fallback: 查 AuditLog（P2-5 增加 IP 维度过滤）
         query = AuditLog.query.filter(
@@ -612,8 +613,8 @@ class AuthService:
                 # 后端未暴露原生客户端，退回 get+set（轻微少计，方向偏保守）
                 count = cache.get(key)
                 cache.set(key, int(count) + 1 if count else 1, timeout=AuthService.LOCKOUT_DURATION)
-        except Exception:
-            pass  # AuditLog 已记录，fallback 路径可用
+        except Exception as e:
+            logger.debug("Redis 失败计数递增降级（AuditLog fallback 可用）: err=%s", e)
 
     @staticmethod
     def _clear_login_fail_count(username, ip=None):
@@ -626,8 +627,8 @@ class AuthService:
                 if ip:
                     keys.append(f"login_fail_ip:{ip}")
                 cache.delete(*keys)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Redis 清失败计数降级: keys=%s err=%s", keys, e)
 
 
 def jwt_required(f):

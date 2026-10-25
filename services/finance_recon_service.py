@@ -20,7 +20,7 @@ from itertools import combinations
 from extensions import db
 from models.erp import AccountMove
 from models.finance import ReconciliationBatch, ReconciliationEntry
-from models.system import AuditLog
+from services.audit_helper import record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +43,7 @@ class ReconciliationService:
         :param target_id: 操作对象 ID
         :param actor: 操作人，默认 system
         """
-        log = AuditLog(
-            actor=actor or "system",
-            action=action,
-            target_type=target_type,
-            target_id=str(target_id) if target_id is not None else None,
-            detail=detail,
-        )
-        self.db.add(log)
-        return log
+        return record_audit(self.db, actor, action, target_type, target_id, detail)
 
     @staticmethod
     def _gen_batch_no() -> str:

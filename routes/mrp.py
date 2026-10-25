@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 from services.idempotency import idempotent
 from services.mrp_service import MRPService
 from services.rbac import require_permission
+from services.response import parse_page_args
 
 bp = Blueprint("mrp", __name__, url_prefix="/api/v1/mrp")
 
@@ -39,8 +40,7 @@ def list_boms():
     from models.bom import BOM
     from models.erp import Product
 
-    page = max(request.args.get("page", 1, type=int), 1)
-    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+    page, per_page = parse_page_args()
 
     pag = BOM.query.order_by(BOM.id).paginate(page=page, per_page=per_page, error_out=False)
     boms = pag.items

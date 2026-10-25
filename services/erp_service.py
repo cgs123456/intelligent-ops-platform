@@ -38,8 +38,8 @@ from models.erp import (
     Warehouse,
 )
 from models.external import ExtSupplierQuote
-from models.system import AuditLog
 from models.warehouse import DwsSalesSkuDaily
+from services.audit_helper import record_audit
 from services.forecast import safety_stock_recommendation
 from services.notifier import notifier
 
@@ -153,16 +153,7 @@ class ERPService:
 
     def _audit(self, actor, action, target_type, target_id, detail="", ip=None):
         """写审计日志（对应 Odoo auditlog 模块，所有关键操作留痕）"""
-        log = AuditLog(
-            actor=actor or "system",
-            action=action,
-            target_type=target_type,
-            target_id=str(target_id) if target_id is not None else None,
-            detail=detail,
-            ip=ip,
-        )
-        self.db.add(log)
-        return log
+        return record_audit(self.db, actor, action, target_type, target_id, detail, ip)
 
     @staticmethod
     def _gen_order_no(prefix):

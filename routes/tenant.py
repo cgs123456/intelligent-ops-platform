@@ -89,7 +89,8 @@ def list_tenant_users(tenant_id):
     tenant = Tenant.query.get(tenant_id)
     if not tenant:
         return error_response("ERR_SYS_004", "租户不存在", http_status=404)
-    users = User.query.filter(User.tenant_id == tenant_id).order_by(User.id).all()
+    # 租户用户量可控但防御性设上限，避免异常大户拖垮平台管理接口
+    users = User.query.filter(User.tenant_id == tenant_id).order_by(User.id).limit(500).all()
     items = [
         {
             "id": u.id,

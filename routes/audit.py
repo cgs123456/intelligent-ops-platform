@@ -13,6 +13,7 @@ from flask import Blueprint, g, jsonify, request
 from extensions import db
 from models.system import AuditLog
 from services.rbac import require_permission
+from services.response import parse_page_args
 
 bp = Blueprint("audit", __name__, url_prefix="/api/v1/audit")
 
@@ -47,9 +48,7 @@ def list_logs():
       - start: 起始日期 YYYY-MM-DD
       - end: 结束日期 YYYY-MM-DD
     """
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    per_page = max(1, min(per_page, 200))  # 上限 200
+    page, per_page = parse_page_args()
 
     q = db.session.query(AuditLog)
 

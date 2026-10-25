@@ -207,7 +207,7 @@ class ClosedLoopState(TypedDict, total=False):
     - run_id: 闭环运行轮次 ID
     - current_step: 当前执行步骤号 (1-5)
     - steps_status: 各步骤状态 {step_no: "pending"/"running"/"done"/"failed"}
-    - suggestions: 补货建议列表（step1 产出）
+    - suggestions: 待处理补货建议条数（step1 产出；路由只做真值判断，不加载对象）
     - orders: 采购单列表（step3 产出）
     - errors: 错误信息列表
     - actor: 操作人
@@ -219,7 +219,7 @@ class ClosedLoopState(TypedDict, total=False):
     run_id: int
     current_step: int
     steps_status: dict
-    suggestions: list
+    suggestions: int
     orders: list
     errors: list
     actor: str
@@ -313,20 +313,25 @@ class ClosedLoop:
         records = LoopState.query.filter_by(run_id=run_id).all()
         steps_status = {r.step: r.status for r in records}
 
-        # 查询当前补货建议（用于路由判断）
-        suggestions = []
+        # 路由只需判断"是否存在待处理建议"，用 count 聚合避免加载 ORM 对象
+        suggestion_count = 0
         try:
             from models.aigc import Suggestion
 
-            suggestions = Suggestion.query.filter(Suggestion.status.in_(["pending", "approved"])).all()
-        except Exception:
-            pass
+            suggestion_count = (
+                Suggestion.query.with_entities(db.func.count(Suggestion.id))
+                .filter(Suggestion.status.in_(["pending", "approved"]))
+                .scalar()
+                or 0
+            )
+        except Exception as e:
+            logger.debug("补货建议计数查询失败（按 0 处理）: %s", e)
 
         return {
             "run_id": run_id,
             "current_step": step_no,
             "steps_status": steps_status,
-            "suggestions": suggestions,
+            "suggestions": suggestion_count,
             "orders": [],
             "errors": [],
             "actor": actor,
@@ -427,8 +432,8 @@ class ClosedLoop:
                         level="error",
                         context={"run_id": run_id, "step": step_no},
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("超时告警发送失败: %s", e)
                 # P0-2 fix: release session after timeout to prevent daemon thread
                 # from using the shared db.session (SQLAlchemy sessions are not thread-safe)
                 db.session.remove()
@@ -462,8 +467,8 @@ class ClosedLoop:
                         level="error",
                         context={"run_id": run_id, "step": step_no, "error": str(e)[:100]},
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("失败告警发送失败: %s", e)
                 return {"step": step_no, "error": str(e)}
         finally:
             release()
@@ -615,9 +620,10 @@ class ClosedLoop:
     def get_status():
         run_id = ClosedLoop.get_current_run_id()
         records = LoopState.query.filter_by(run_id=run_id).order_by(LoopState.step).all()
+        records_by_step = {r.step: r for r in records}
         steps = []
         for step_no, step_name, owner in ClosedLoop.STEPS:
-            rec = next((r for r in records if r.step == step_no), None)
+            rec = records_by_step.get(step_no)
             steps.append(
                 {
                     "step": step_no,

@@ -615,8 +615,9 @@ class WarehouseService:
             else:
                 snapshot_dates = {date.today()}
             inv_rows = []
+            products = self.session.query(Product).all()
             for d in snapshot_dates:
-                for p in self.session.query(Product).all():
+                for p in products:
                     inv_rows.append({"product_id": p.id, "product_name": p.name, "dt": d, "stock_qty": p.stock_qty})
             details["dws_inventory_snapshot_daily"] = self._upsert(DwsInventoryDaily, inv_rows)
 

@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 from services.erp_service import ERPService
 from services.idempotency import idempotent
 from services.rbac import get_actor_name, require_permission
+from services.response import parse_page_args
 
 bp = Blueprint("erp", __name__, url_prefix="/api/v1/erp")
 
@@ -112,8 +113,7 @@ def reorder_rules():
     product_id = request.args.get("product_id", type=int)
     is_active = request.args.get("is_active", "true").lower() == "true"
 
-    page = max(request.args.get("page", 1, type=int), 1)
-    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+    page, per_page = parse_page_args()
 
     query = ReorderRule.query.filter_by(is_active=is_active) if is_active else ReorderRule.query
     if product_id:
@@ -169,8 +169,7 @@ def budgets():
     period = request.args.get("period", type=str)
     is_active = request.args.get("is_active", "true").lower() == "true"
 
-    page = max(request.args.get("page", 1, type=int), 1)
-    per_page = min(max(request.args.get("per_page", 50, type=int), 1), 200)
+    page, per_page = parse_page_args()
 
     query = Budget.query.filter_by(is_active=is_active) if is_active else Budget.query
     if cost_center_id:

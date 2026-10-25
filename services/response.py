@@ -115,6 +115,18 @@ def error_response(code, message=None, http_status=None, data=None):
     return _build(code, message, data, http_status)
 
 
+def parse_page_args(default_per_page=50, max_per_page=200):
+    """从 request.args 解析分页参数（page 从 1 起，per_page 夹在 [1, max_per_page]）
+
+    :return: (page, per_page)
+    """
+    from flask import request
+
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = min(max(request.args.get("per_page", default_per_page, type=int), 1), max_per_page)
+    return page, per_page
+
+
 def paginate_response(query, page, per_page, serializer):
     """分页响应 envelope
 
