@@ -155,7 +155,7 @@ CI(push/PR 到 main 自动触发,7 个 job 全绿才可合并):
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                           # 581 用例全量回归
+pytest                           # 全量回归
 pre-commit run --all-files       # ruff + black + mypy 提交前检查
 ```
 
@@ -209,7 +209,7 @@ intelligent-ops-platform/
 ├── static/dist/            # 前端构建产物(入库,部署链免 Node)
 ├── templates/index.html    # 由 post-build 从构建产物生成(勿手改)
 ├── migrations/versions/    # Alembic 迁移(b00000000001~b00000000004)
-├── tests/                  # pytest 测试套件(581 用例)
+├── tests/                  # pytest 测试套件
 ├── nginx/                  # Nginx TLS + 限流 + 安全头配置
 ├── scripts/                # 备份/恢复脚本
 ├── monitoring/             # Prometheus / Grafana / Loki / Alertmanager 配置
